@@ -1,0 +1,9 @@
+### User's Original Query ###
+{query}
+
+### Web Search Results ###
+Here are the search results from DuckDuckGo. Use this information to construct your answer.
+{search_results}
+
+### Your Task ###
+Based *only* on the provided search results, write a comprehensive answer to the user's original query.

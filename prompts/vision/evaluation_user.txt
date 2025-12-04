@@ -1,0 +1,35 @@
+### Mission ###
+- Original User Request: {original_request}
+
+### Plan Status ###
+{plan_status_str}
+
+### Analysis of Last Executed Task ###
+
+**Task Goal:** {task_description}
+
+**Expected Outcome (Success Criterion):**
+> {expected_outcome}
+
+**Actual Result:**
+Please analyze the attached "POST-ACTION SCREENSHOT" and compare it against the "Expected Outcome" above to determine the task's success.
+
+**Actions Executed:**
+```
+{actions_executed}
+```
+**Error Context (if any):** {task_error_context}
+
+{clipboard_content_block}
+
+### Current Environment ###
+#### Screen Analysis ####
+- PRE-ACTION SCREENSHOT: Attached as the first image.
+- POST-ACTION SCREENSHOT: Attached as the second image.
+- POST-ACTION SCREEN ANALYSIS:
+{post_action_context}
+
+#### System Information ####
+- Operating System: {os_info}
+- Execution History:
+{history_str}

@@ -1,0 +1,9 @@
+### Recent Action History ###
+{recent_history_str}
+
+### Current Screen Analysis ###
+A loading indicator has appeared. Your task is to identify which action in the history caused it by analyzing the attached screenshots.
+- Screenshot 1 corresponds to the screen state BEFORE Action 1.
+- Screenshot 2 corresponds to the screen state BEFORE Action 2.
+...and so on.
+The final screenshot shows the current screen with the loading indicator.

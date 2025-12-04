@@ -1,0 +1,110 @@
+[project]
+name = "logos"
+version = "0.1.0"
+description = "A desktop AI assistant that sees your screen and clicks buttons for you. What could possibly go wrong?"
+readme = "README.md"
+requires-python = "==3.12.*"
+dependencies = [
+    "pyside6",
+    "pyautogui",
+    "mss",
+    "pillow",
+    "psutil",
+    "requests",
+    "pynput",
+    "qtawesome",
+    "thefuzz",
+    "python-Levenshtein",
+    "json_repair",
+    "pydantic",
+    "installed-apps-scanner",
+    "keyring",
+    "google-genai",
+    "google-api-core",
+    "openai",
+    "anthropic",
+    "xai_sdk",
+    "easyocr",
+    "transformers==4.46.1",
+    "ultralytics==8.3.70",
+    "supervision==0.18.0",
+    "numpy==1.26.4",
+    "opencv-python-headless",
+    "accelerate",
+    "timm",
+    "einops==0.8.0",
+    "torch",
+    "torchvision",
+    "matplotlib",
+    "pandas",
+    "scikit-learn",
+    "watchdog",
+    "trafilatura",
+    "ddgs",
+    "markdown",
+    "sumy",
+    "nltk",
+    "rapidfuzz",
+    "pathspec",
+    "ruff",
+]
+
+[tool.uv]
+index = [
+    { url = "https://pypi.org/simple" }
+]
+
+#[tool.uv.sources]
+#torch = [{ url = "https://download.pytorch.org/whl/cu121/torch-2.5.1%2Bcu121-cp312-cp312-win_amd64.whl" }]
+#torchvision = [{ url = "https://download.pytorch.org/whl/cu121/torchvision-0.20.1%2Bcu121-cp312-cp312-win_amd64.whl" }]
+[tool.uv.sources]
+# Torch
+torch = [
+    # Windows:
+    { url = "https://download.pytorch.org/whl/cu121/torch-2.5.1%2Bcu121-cp312-cp312-win_amd64.whl", marker = "platform_system == 'Windows'" },
+
+    # Linux:
+    { url = "https://download.pytorch.org/whl/cu121/torch-2.5.1%2Bcu121-cp312-cp312-linux_x86_64.whl", marker = "platform_system == 'Linux'" },
+]
+
+# Torchvision
+torchvision = [
+    # Windows
+    { url = "https://download.pytorch.org/whl/cu121/torchvision-0.20.1%2Bcu121-cp312-cp312-win_amd64.whl", marker = "platform_system == 'Windows'" },
+
+    # Linux
+    { url = "https://download.pytorch.org/whl/cu121/torchvision-0.20.1%2Bcu121-cp312-cp312-linux_x86_64.whl", marker = "platform_system == 'Linux'" },
+]
+
+[tool.ruff]
+line-length = 500
+target-version = "py312"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "F",   # Pyflakes errors
+    "W",   # pycodestyle warnings
+    "N",   # pep8-naming
+    "UP",  # pyupgrade
+    "B",   # bugbear
+    "C4",  # flake8-comprehensions
+    "TID", # tidy-imports - useful for unused imports
+    "ISC", # flake8-implicit-str-concat
+]
+ignore = [
+    "B008", # Do not perform function calls in argument defaults. (Sometimes needed for Qt signals)
+    "N802", # Function name `_execute_get_response` should be lowercase
+    "N803", # Argument name `prompt` should be lowercase
+    "N806", # Variable `status_code` in function should be lowercase
+]
+
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"] # Allow unused imports in __init__.py files
+"setup_ubuntu.sh" = ["E"] # Ignore all pycodestyle errors for shell script
+"setup_windows.ps1" = ["E"] # Ignore all pycodestyle errors for shell script
+"tests/*" = ["E", "F", "W", "I", "N", "UP", "B", "C4", "TID", "ISC"] # Ignore all Ruff errors in the tests directory
+
+[tool.ruff.lint.isort]
+known-first-party = ["src"]
+force-sort-within-sections = true

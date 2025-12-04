@@ -1,0 +1,25 @@
+Your previous response was invalid and failed validation. You MUST correct it and provide a valid JSON object.
+
+Pay close attention to the `Pydantic Validation Error` section below. It tells you exactly what was wrong with your response. You must ensure your new response fixes this specific error and adheres strictly to the provided schema.
+
+### Original Request
+{original_request}
+
+### Expected JSON Schema and Example
+This is the required structure. Ensure your response contains all required fields.
+{schema_example}
+
+### Pydantic Validation Error
+This is the error you must fix. For example, if it says a field is required, you MUST include it.
+```
+{validation_error}
+```
+
+### Your Malformed/Invalid Response
+This was your previous, incorrect response. Do not repeat this mistake.
+```
+{malformed_response}
+```
+
+### Your Corrected and Valid JSON Response:
+(Provide only the valid JSON object below, enclosed in ```json ... ```. Do not include any other text or explanations.)

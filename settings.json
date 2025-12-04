@@ -1,0 +1,140 @@
+{
+  "active_provider": "google",
+  "llm_providers": {
+    "anthropic": {
+      "model": "claude-haiku-4-5",
+      "max_tokens": "4096",
+      "require_json_output": true
+    },
+    "google": {
+      "model": "gemini-2.5-flash",
+      "require_json_output": true
+    },
+    "openai": {
+      "model": "gpt-5-nano",
+      "require_json_output": true
+    },
+    "openrouter": {
+      "model": "X-AI/grok-4.1-fast:free",
+      "require_json_output": true
+    },
+    "x-ai": {
+      "model": "grok-4-1-fast-reasoning",
+      "require_json_output": true
+    }
+  },
+  "hotkeys": {
+    "toggle_mode": [
+      "Ctrl",
+      "Shift",
+      "A"
+    ],
+    "pause_resume": [
+      "Ctrl",
+      "Alt",
+      "P"
+    ],
+    "stop_execution": [
+      "Ctrl",
+      "Alt",
+      "S"
+    ],
+    "pause_for_feedback": [
+      "Ctrl",
+      "Alt",
+      "F"
+    ],
+    "cancel_request": [
+      "Ctrl",
+      "Shift",
+      "X"
+    ],
+    "regenerate_plan": [
+      "Ctrl",
+      "Shift",
+      "R"
+    ],
+    "edit_plan": [
+      "Ctrl",
+      "Shift",
+      "E"
+    ],
+    "cancel_plan": [
+      "Ctrl",
+      "Shift",
+      "D"
+    ],
+    "run_plan": [
+      "Ctrl",
+      "Shift",
+      "E"
+    ]
+  },
+  "compact_mode": {
+    "width": 700,
+    "height": 120,
+    "position": "bottom_center"
+  },
+  "webp_quality": 80,
+  "webp_lossless": true,
+  "cache_dir": "cache",
+  "max_retries": 3,
+  "retry_delay_seconds": 2.0,
+  "omniparser": {
+    "mode": "local",
+    "api_url": "http://127.0.0.1:5000/parse",
+    "model_path": "models/omniparser/icon_detect/model.pt",
+    "caption_model_name": "florence2",
+    "caption_model_path": "models/omniparser/icon_caption_florence",
+    "box_threshold": 0.35,
+    "text_threshold": 0.8,
+    "containment_ratio": 0.8,
+    "ocr_languages": [
+      "en",
+      "ru"
+    ],
+    "save_trace_log": true,
+    "save_pre_intent_screenshot": true,
+    "save_post_screenshot": true,
+    "trace_log_path": "logs/parser_trace.json",
+    "font_path": "cv2_default",
+    "font_size": 16,
+    "text_padding": 2
+  },
+  "allowed_apps": [
+    {
+      "appid": "Chrome",
+      "name": "Google Chrome",
+      "unique_id": "Chrome"
+    },
+    {
+      "appid": "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App",
+      "name": "Блокнот",
+      "unique_id": "Microsoft.WindowsNotepad_8wekyb3d8bbwe!App"
+    },
+    {
+      "appid": "::{645FF040-5081-101B-9F08-00AA002F954E}",
+      "name": "Корзина",
+      "unique_id": "::{645FF040-5081-101B-9F08-00AA002F954E}"
+    }
+  ],
+  "assistance": {
+    "wait_check_interval_ms": 5000,
+    "post_action_delay_ms": 1000,
+    "max_correction_attempts": 3
+  },
+  "theme": "dark",
+  "search": {},
+  "prevent_multiple_instances": true,
+  "APP_PROJECT_ROOT": "C:\\Users\\vipTe\\Project\\python\\logos",
+  "APP_CACHE_DIR": "C:\\Users\\vipTe\\Project\\python\\logos\\cache",
+  "APP_LOGS_DIR": "C:\\Users\\vipTe\\Project\\python\\logos\\logs",
+  "APP_PROMPTS_DIR": "C:\\Users\\vipTe\\Project\\python\\logos\\prompts",
+  "APP_SCREENSHOTS_DIR": "C:\\Users\\vipTe\\Project\\python\\logos\\screenshots",
+  "APP_MODELS_DIR": "C:\\Users\\vipTe\\Project\\python\\logos\\models",
+  "vision": {
+    "wait_check_interval_ms": 5000,
+    "post_action_delay_ms": 1000,
+    "max_correction_attempts": 3
+  }
+}

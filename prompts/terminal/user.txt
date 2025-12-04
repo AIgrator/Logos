@@ -1,0 +1,12 @@
+### Mission ###
+- User's Goal: {user_request}
+
+### Current State ###
+- Operating System: {os_info}
+- Current Working Directory: {current_directory}
+- Directory Listing ({directory_listing_command}):
+{directory_listing}
+
+### Command History ###
+This is the history of commands executed so far, along with their results. Use this to inform your next action.
+{history_str}

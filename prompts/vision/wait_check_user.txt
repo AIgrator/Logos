@@ -1,0 +1,5 @@
+### Wait Condition ###
+{wait_context}
+
+### Current Screen Analysis ###
+{new_screen_context}

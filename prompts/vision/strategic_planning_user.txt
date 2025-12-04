@@ -1,0 +1,14 @@
+### Mission ###
+- Original User Request: {user_request}
+
+### Current Environment ###
+#### Screen Analysis ####
+{screen_context}
+
+#### System Information ####
+- Operating System: {os_info}
+- Screen Resolution: {screen_resolution}
+- Installed Applications:
+{installed_applications}
+
+{replan_context_block}

@@ -1,0 +1,116 @@
+[
+  {
+    "task_description": "Продемонстрировать все доступные инструменты с валидными аргументами.",
+    "actions": [
+      {
+        "name": "show_warning",
+        "arguments": {
+          "message": "Это демонстрация всех доступных инструментов. Вы уверены, что хотите продолжить?"
+        }
+      },
+      {
+        "name": "click",
+        "arguments": {
+          "description": "Нажать на меню 'File'.",
+          "x1": 51,
+          "y1": 12,
+          "x2": 81,
+          "y2": 31,
+          "button": "left"
+        }
+      },
+      {
+        "name": "double_click",
+        "arguments": {
+          "description": "Дважды щелкнуть по иконке 'EXPLORER'.",
+          "x1": 59,
+          "y1": 42,
+          "x2": 392,
+          "y2": 83
+        }
+      },
+      {
+        "name": "write_text",
+        "arguments": {
+          "description": "Ввести демонстрационный текст.",
+          "text": "Это демонстрационный текст."
+        }
+      },
+      {
+        "name": "press_key",
+        "arguments": {
+          "description": "Нажать клавишу Enter для подтверждения.",
+          "key": "enter"
+        }
+      },
+      {
+        "name": "hotkey",
+        "arguments": {
+          "description": "Нажать Ctrl+A, чтобы выделить все.",
+          "keys": [
+            "ctrl",
+            "a"
+          ]
+        }
+      },
+      {
+        "name": "key_down",
+        "arguments": {
+          "description": "Зажать клавишу Shift.",
+          "key": "shift"
+        }
+      },
+      {
+        "name": "key_up",
+        "arguments": {
+          "description": "Отпустить клавишу Shift.",
+          "key": "shift"
+        }
+      },
+      {
+        "name": "scroll",
+        "arguments": {
+          "description": "Прокрутить вниз на 100 единиц.",
+          "direction": "down",
+          "amount": 100
+        }
+      },
+      {
+        "name": "scroll_page",
+        "arguments": {
+          "description": "Прокрутить на одну страницу вниз.",
+          "direction": "down"
+        }
+      },
+      {
+        "name": "launch_app",
+        "arguments": {
+          "description": "Запустить приложение 'Блокнот'.",
+          "app_name": "Блокнот"
+        }
+      },
+      {
+        "name": "wait_element",
+        "arguments": {
+          "description": "Подождать появления окна 'Блокнот'.",
+          "wait_context": "Окно с заголовком 'Безымянный — Блокнот' должно появиться на экране.",
+          "timeout": 30
+        }
+      },
+      {
+        "name": "communicate_to_user",
+        "arguments": {
+          "message": "Это информационное сообщение для пользователя.",
+          "type": "info"
+        }
+      },
+      {
+        "name": "finish",
+        "arguments": {
+          "message": "Демонстрация всех инструментов успешно завершена."
+        }
+      }
+    ],
+    "expected_outcome": "Все инструменты будут выполнены последовательно в качестве демонстрации, и в конце появится сообщение о завершении."
+  }
+]

@@ -1,0 +1,10 @@
+### User's Original Instruction ###
+{prompt}
+
+### Web Page Content ###
+--- START OF CONTENT ---
+{page_content}
+--- END OF CONTENT ---
+
+### Your Task ###
+Based *only* on the provided web page content, execute the user's original instruction.

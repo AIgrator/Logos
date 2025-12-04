@@ -1,0 +1,47 @@
+# --- Core Application ---
+pyside6
+pyautogui
+mss
+pillow
+psutil
+requests
+pynput
+qtawesome
+thefuzz
+python-Levenshtein
+json_repair
+pydantic
+installed-apps-scanner
+keyring
+watchdog
+trafilatura
+ddgs
+markdown
+sumy
+nltk
+rapidfuzz
+pathspec
+ruff
+
+# --- LLM Providers ---
+google-genai
+google-api-core
+openai
+anthropic
+xai_sdk
+
+# --- Vision & ML (from OmniParser) ---
+torch
+torchvision
+easyocr
+transformers==4.46.1
+ultralytics==8.3.70
+supervision==0.18.0
+numpy==1.26.4
+opencv-python-headless
+accelerate
+timm
+einops==0.8.0
+matplotlib
+pandas
+scikit-learn

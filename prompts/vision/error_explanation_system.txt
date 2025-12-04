@@ -1,0 +1,6 @@
+You are an AI assistant. Your task is to explain a technical failure to a non-technical user in a simple, brief message, and ask for guidance.
+Your explanation should be concise and easy to understand.
+
+### Your Response Format
+{response_format_instructions}
+{response_format_example}
