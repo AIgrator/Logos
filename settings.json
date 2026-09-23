@@ -14,6 +14,11 @@
       "model": "gpt-5-nano",
       "require_json_output": true
     },
+	"huggingface": {
+      "model": "Qwen/Qwen3.8-27B:novita",
+      "max_tokens": "4096",
+      "require_json_output": true
+    },
     "openrouter": {
       "model": "X-AI/grok-4.1-fast:free",
       "require_json_output": true
