@@ -24,6 +24,49 @@ class ModelConfigManager:
     # MODELS_URL = f"file://{os.path.abspath('models.json')}"
     CACHE_PATH = os.path.abspath('cache/models.json')
 
+    # Fallback model lists used when the remote cache is missing, incomplete,
+    # or over-filtered (e.g. only 1 junk model). Keeps UI dropdowns usable.
+    # Values mirror provider get_default_settings() + known-stable models.
+    FALLBACK_MODELS = {
+        "google": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
+        "openai": ["gpt-5-mini", "gpt-5", "gpt-5-nano"],
+        "anthropic": ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1"],
+        "x-ai": ["grok-4-fast-reasoning", "grok-4-1-fast-reasoning", "grok-4"],
+        # Hugging Face Router (OpenAI-compatible). Suffix ":provider" pins the
+        # inference provider; ids without suffix are auto-routed by HF.
+        "huggingface": [
+            "Qwen/Qwen3.8-27B:novita",
+            "Qwen/Qwen2.5-VL-3B-Instruct",
+            "openai/gpt-oss-120b",
+            "zai-org/GLM-4.5V",
+            "meta-llama/Llama-3.1-8B-Instruct",
+        ],
+        "openrouter": {
+            "Anthropic": ["claude-sonnet-4-5", "claude-haiku-4-5"],
+            "Google": ["gemini-2.5-flash", "gemini-2.5-pro"],
+            "OpenAI": ["gpt-5-mini", "gpt-5"],
+            "X-AI": ["grok-4-1-fast-reasoning"],
+            "Meta": ["muse-glimmer-30b"],
+        },
+    }
+
+    @staticmethod
+    def _is_valid_models_payload(data: dict) -> bool:
+        """Rejects junk payloads (e.g. only openrouter/1 model) so they never
+        overwrite a good cache. Requires >=2 providers with non-empty lists."""
+        if not isinstance(data, dict) or not data:
+            return False
+        usable_providers = 0
+        for _pid, info in data.items():
+            if not isinstance(info, dict):
+                continue
+            models = info.get("models") or []
+            by_provider = info.get("models_by_provider") or {}
+            total = len(models) + sum(len(v) for v in by_provider.values() if isinstance(v, list))
+            if total > 0:
+                usable_providers += 1
+        return usable_providers >= 2
+
     # This will hold the final, merged provider configuration.
     PROVIDER_CONFIG = None
 
@@ -72,8 +115,19 @@ class ModelConfigManager:
                 logger.info(f"Network request finished. Duration: {network_duration:.4f} seconds.")
 
                 response.raise_for_status()
+                payload = response.json()
+                if not ModelConfigManager._is_valid_models_payload(payload):
+                    message = (
+                        "Downloaded models.json looks like junk "
+                        f"(keys: {list(payload.keys()) if isinstance(payload, dict) else type(payload)}), "
+                        "keeping existing cache."
+                    )
+                    logger.warning(message)
+                    # Still reload from existing (good) cache so UI stays populated.
+                    ModelConfigManager._load_and_merge_configs()
+                    return False, message
                 with open(ModelConfigManager.CACHE_PATH, 'w', encoding='utf-8') as f:
-                    json.dump(response.json(), f, indent=2)
+                    json.dump(payload, f, indent=2)
                 message = "Successfully downloaded and cached models."
 
             logger.info(message)
@@ -125,6 +179,32 @@ class ModelConfigManager:
                     provider_data['models_by_provider'] = model_info['models_by_provider']
             else:
                 logger.debug(f"Provider '{provider_id}' not found in cached models. No merge performed.")
+
+        # 4. Fallback: fill empty providers so UI dropdowns never end up blank
+        # (remote generator currently over-filters to 1 junk model).
+        for provider_id, provider_data in base_config.items():
+            fb = ModelConfigManager.FALLBACK_MODELS.get(provider_id)
+            if provider_id == "openrouter":
+                by_provider = provider_data.get("models_by_provider") or {}
+                total = sum(len(v) for v in by_provider.values() if isinstance(v, list))
+                if isinstance(fb, dict):
+                    if total == 0:
+                        provider_data["models_by_provider"] = copy.deepcopy(fb)
+                        logger.warning("openrouter cache empty, applied FALLBACK_MODELS.")
+                    else:
+                        # Merge missing groups so junk cache (only Meta) still gets
+                        # Anthropic/Google/OpenAI/X-AI dropdown entries.
+                        merged = copy.deepcopy(fb)
+                        for grp, lst in by_provider.items():
+                            if isinstance(lst, list):
+                                merged[grp] = sorted(set(merged.get(grp, []) + lst))
+                        if merged != by_provider:
+                            provider_data["models_by_provider"] = merged
+                            logger.warning("openrouter cache partial, merged FALLBACK groups.")
+            else:
+                if not provider_data.get("models") and isinstance(fb, list):
+                    provider_data["models"] = list(fb)
+                    logger.warning(f"Provider '{provider_id}' cache empty, applied FALLBACK_MODELS.")
 
         t_merge_end = time.perf_counter()
         ModelConfigManager.PROVIDER_CONFIG = base_config

@@ -105,6 +105,9 @@ class LLMProviderWidget(QWidget):
             widget = QLineEdit(str(default_value) if default_value is not None else "")
         elif widget_type == "dropdown":
             widget = QComboBox()
+            # Editable so users can paste/type any model id manually
+            # (e.g. "Qwen/Qwen3.8-27B:novita"); listed items come from models.json.
+            widget.setEditable(True)
             self._update_dropdown_model_list(widget, provider_id)
         elif widget_type == "nested_dropdown":
             primary_combo = QComboBox()

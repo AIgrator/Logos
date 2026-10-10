@@ -2,24 +2,24 @@
   "active_provider": "google",
   "llm_providers": {
     "anthropic": {
-      "model": "claude-haiku-4-5",
+      "model": "claude-fable-5",
       "max_tokens": "4096",
       "require_json_output": true
     },
     "google": {
-      "model": "gemini-2.5-flash",
+      "model": "gemini-3.5-flash-lite",
       "require_json_output": true
     },
     "openai": {
-      "model": "gpt-5-nano",
+      "model": "gpt-5",
       "require_json_output": true
     },
     "openrouter": {
-      "model": "X-AI/grok-4.1-fast:free",
+      "model": "Amazon/nova-2-lite-v1",
       "require_json_output": true
     },
     "x-ai": {
-      "model": "grok-4-1-fast-reasoning",
+      "model": "grok-4",
       "require_json_output": true
     }
   },
