@@ -14,6 +14,11 @@
       "model": "gpt-5",
       "require_json_output": true
     },
+    "huggingface": {
+      "model": "Qwen/Qwen3.8-27B:novita",
+      "max_tokens": 4096,
+      "require_json_output": true
+    },
     "openrouter": {
       "model": "Amazon/nova-2-lite-v1",
       "require_json_output": true
