@@ -31,7 +31,7 @@ class ModelConfigManager:
         "google": ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"],
         "openai": ["gpt-5-mini", "gpt-5", "gpt-5-nano"],
         "anthropic": ["claude-sonnet-4-5", "claude-haiku-4-5", "claude-opus-4-1"],
-        "x-ai": ["grok-4-fast-reasoning", "grok-4-1-fast-reasoning", "grok-4"],
+        "x-ai": ["grok-4.7", "grok-4.6", "grok-4.5", "grok-4-fast-reasoning", "grok-4-1-fast-reasoning", "grok-4"],
         # Hugging Face Router (OpenAI-compatible). Suffix ":provider" pins the
         # inference provider; ids without suffix are auto-routed by HF.
         "huggingface": [
