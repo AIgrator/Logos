@@ -565,6 +565,17 @@ class VisionHandler:
                     "app_launcher": self.app_launcher,
                     "shell_allowed": bool((self.settings.get("vision", {}) or {}).get("allow_shell_commands", False)),
                 }
+                # Narrate shell/file actions in chat so the user sees WHAT runs
+                # on their machine (commands execute silently, no window).
+                if (action.get("name") or "") in ("execute_shell", "read_files", "write_file", "list_directory"):
+                    import html as _html
+                    args = action.get("arguments", {}) or {}
+                    shown = args.get("command") or args.get("file_path") or args.get("path") or ""
+                    if shown:
+                        self.ui.add_message(
+                            f"<i>Terminal:</i> <code>{_html.escape(str(shown)[:500])}</code>",
+                            force_scroll=True,
+                        )
                 result = self.executor.execute(action, ctx)
                 if not result.ok:
                     # Instructional ValueError feeds the structural
@@ -636,6 +647,18 @@ class VisionHandler:
             f"skipping screenshots and LLM evaluation."
         )
         self.ui.add_message("<i>Shell task verified by output, skipping screen analysis.</i>", force_scroll=True)
+        # The LLM evaluation round-trip is skipped, so nobody else would show
+        # the command result to the user (e.g. "write me the file name").
+        # Post it to the chat directly (truncated).
+        output = (last_shell_result.output_text or "").strip()
+        if output:
+            import html as _html
+            shown = output[-2000:]
+            prefix = "(truncated) ...\n" if len(output) > 2000 else ""
+            self.ui.add_message(
+                f"<b>Terminal output:</b><pre>{_html.escape(prefix + shown)}</pre>",
+                force_scroll=True,
+            )
         self.correction_attempts = 0
         self.current_task_index += 1
         self._execute_next_task()
