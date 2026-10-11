@@ -60,6 +60,15 @@ New modes reuse the same handler core and the same correction protocol:
 - **Unified Vision+shell toolset**: a plan step may mix clicks and
   `execute_shell`/file tools, mirroring the Anthropic reference loop.
   This resolves limitation (1) above.
+- **MCP as a toolset source**: an `MCPClientManager` exposes tools from
+  user-configured MCP servers (`mcp__<server>__<tool>`) into Terminal
+  (execution) and Chat (read-only first). Servers are allowlisted in
+  settings, side effects require confirmation, hung servers are isolated
+  by a circuit breaker. No per-app integrations are written by hand.
+- **Cross-mode pilot (Blender)**: Terminal builds through Blender MCP
+  (`create_object`, transforms, materials — headless, no GUI), Vision
+  verifies the result via a rendered preview through the existing
+  screen-evaluation loop. First scenario where two modes cooperate.
 
 ## Principle 3: thin client distribution
 
@@ -75,15 +84,63 @@ fully through native/DOM backends. Consequences:
   thin-client refactor is in progress; portable ZIP + launcher script
   as the zero-friction option (no terminal needed by end users).
 
+## Principle 4: long-lived sessions and tabs
+
+One-off tasks ("empty the recycle bin") stay as they are. Alongside them,
+Logos grows **persistent sessions**: named tasks with a goal, a history of
+what was done, and attached artifacts (letters, requirements, screenshots),
+living for weeks and surviving restarts. Returning to a session restores
+full context; watch-type sessions (e.g. tracking a developer console)
+additionally diff incoming items since the last visit. The mechanism is
+domain-independent: the Play-console example is just one instance.
+
+Sessions are presented as **tabs** (one handler + chat log per tab, any
+mode). Tab switching serializes and pauses handler state
+(Vision: plan, `current_task_index`, evaluation history) and resumes it
+losslessly. Constraint: **one display — one active Vision task** (there is
+a single physical mouse). A screen arbiter grants the display to one
+Vision session; the rest wait paused with explicit indication.
+Terminal/Chat sessions may run in the background.
+
+Escape hatch (future, proven in prototype): **virtual displays**. If the
+user installs virtual-display drivers, a session can be moved from the
+main screen to a virtual one — each display then runs its own Vision
+task in parallel (clicks on a secondary display were already demonstrated
+in the video-lecture project). Not on the near-term roadmap; recorded
+here so the arbiter is designed display-aware from the start
+(session → display binding, not a global singleton lock).
+
+## Guiding scenario: "tell the computer, get the result"
+
+The end state this plan serves: a person says what they want — a file
+created or edited, a 3D scene, a picture, Windows settings configured
+through endless settings windows — and the computer performs it,
+returning the finished result instead of instructions for the user to
+click through. (Today the user screenshots a settings window, sends it
+to a chatbot, gets back "click here", and still clicks themselves;
+Logos inverts this: the user states the goal, the agent clicks.)
+
+Voice input is the natural interface for this scenario but is
+explicitly out of scope for now — text input carries the full design
+until the execution core is ready. Voice will dock onto the same
+`start_task(user_text)` entry point later without architectural changes.
+
 ## Agreed build order
 
 1. `GroundingBackend` interface + unified Vision+shell toolset
    (foundation; unblocks everything, near-zero risk to current behavior).
 2. Browser mode on Playwright (most visible user value: sites, logins, forms).
 3. Native execution pilot for the Google provider, then Anthropic, OpenAI.
-4. Thin client (possible only after step 3 makes torch optional).
-5. Replace the local triple pipeline with a single grounding model
+4. Sessions + tabs: SQLite session store with autosave, history
+   summarization, per-tab handlers, pause/resume, display-aware screen
+   arbiter. Testable per piece without touching execution quality.
+5. Thin client (needs step 3 to make torch optional; benefits from step 4
+   since sessions already survive restarts and reinstalls).
+6. MCP client + Blender cross-mode pilot.
+7. Replace the local triple pipeline with a single grounding model
    (UI-TARS / OmniParser V2) once `local` serves only remaining providers.
+8. Virtual displays for parallel Vision tasks (only on demand; requires
+   the arbiter from step 4 to be display-aware).
 
 ## Non-goals (explicitly deferred)
 

@@ -360,6 +360,7 @@ class SettingsWindow(QDialog):
         self.wait_check_interval_spinbox.setValue(vision_settings.get("wait_check_interval_ms", 5000) / 1000.0)
         self.post_action_delay_spinbox.setValue(vision_settings.get("post_action_delay_ms", 1000) / 1000.0)
         self.max_correction_attempts_spinbox.setValue(vision_settings.get("max_correction_attempts", 3))
+        self.allow_shell_commands_checkbox.setChecked(bool(vision_settings.get("allow_shell_commands", False)))
 
         # OmniParser
         omniparser_settings = self.settings_manager.get("omniparser", {})
@@ -443,8 +444,17 @@ class SettingsWindow(QDialog):
         vision_settings = {
             "wait_check_interval_ms": int(self.wait_check_interval_spinbox.value() * 1000),
             "post_action_delay_ms": int(self.post_action_delay_spinbox.value() * 1000),
-            "max_correction_attempts": self.max_correction_attempts_spinbox.value()
+            "max_correction_attempts": self.max_correction_attempts_spinbox.value(),
+            "allow_shell_commands": self.allow_shell_commands_checkbox.isChecked(),
         }
+        # Preserve keys with no UI widget (e.g. grounding_backend) so saving
+        # settings never silently drops them.
+        try:
+            existing_vision = self.settings_manager.get("vision", {}) or {}
+            for key, value in existing_vision.items():
+                vision_settings.setdefault(key, value)
+        except Exception:
+            pass
 
         selected_button = self.position_button_group.checkedButton()
         position = selected_button.property("position_id") if selected_button else "bottom_center"
@@ -809,6 +819,12 @@ class SettingsWindow(QDialog):
         vision_layout.addWidget(QLabel("Max Correction Attempts:"), 2, 0)
         vision_layout.addWidget(self._create_help_label(max_correction_tooltip), 2, 1, Qt.AlignLeft)
         vision_layout.addWidget(self.max_correction_attempts_spinbox, 2, 3)
+
+        self.allow_shell_commands_checkbox = QCheckBox("Allow shell commands in Vision plans")
+        shell_tooltip = ("Lets Vision plans mix mouse/keyboard actions with shell and file "
+                         "commands (execute_shell, read/write files). Disabled by default.")
+        self.allow_shell_commands_checkbox.setToolTip(shell_tooltip)
+        vision_layout.addWidget(self.allow_shell_commands_checkbox, 3, 0, 1, 4)
 
         return group
 

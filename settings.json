@@ -10,17 +10,17 @@
       "model": "gemini-3.5-flash-lite",
       "require_json_output": true
     },
+    "huggingface": {
+      "model": "Qwen/Qwen3.8-27B:novita",
+      "max_tokens": "4096",
+      "require_json_output": true
+    },
     "openai": {
       "model": "gpt-5",
       "require_json_output": true
     },
-    "huggingface": {
-      "model": "Qwen/Qwen3.8-27B:novita",
-      "max_tokens": 4096,
-      "require_json_output": true
-    },
     "openrouter": {
-      "model": "Amazon/nova-2-lite-v1",
+      "model": "Anthropic/claude-haiku-4-5",
       "require_json_output": true
     },
     "x-ai": {
@@ -140,6 +140,8 @@
   "vision": {
     "wait_check_interval_ms": 5000,
     "post_action_delay_ms": 1000,
-    "max_correction_attempts": 3
+    "max_correction_attempts": 3,
+    "allow_shell_commands": false,
+    "grounding_backend": "local"
   }
 }

@@ -63,7 +63,7 @@ class AppController(QObject):
         # --------------------------
 
         # Core services (lightweight part)
-        self.brain = Brain()
+        self.brain = Brain(settings_manager)
         self.vision = None  # Will be initialized in a background thread
         self.is_vision_module_initialized = False
         self.indexer = Indexer('.')
@@ -448,7 +448,12 @@ class AppController(QObject):
             else: # Chat or Vision mode
                 for attachment in self.pending_attachments:
                     try:
-                        attachment_type = attachment.get('type')
+                        if isinstance(attachment, dict):
+                            attachment_type = attachment.get('type')
+                        else:
+                            # Raw payload (e.g. screenshot bytes queued directly).
+                            attachments_for_handler.append(attachment)
+                            continue
                         if attachment_type == 'file':
                              with open(attachment.get('path'), 'rb') as f:
                                 attachments_for_handler.append(f.read())

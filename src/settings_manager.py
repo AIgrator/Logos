@@ -142,7 +142,9 @@ class SettingsManager(QObject):
         "vision": {
             "wait_check_interval_ms": 5000,
             "post_action_delay_ms": 1000,
-            "max_correction_attempts": 3
+            "max_correction_attempts": 3,
+            "allow_shell_commands": False,
+            "grounding_backend": "local"
         },
         "theme": "dark",
         "search": {}

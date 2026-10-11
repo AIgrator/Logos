@@ -8,7 +8,7 @@ from src.computer.tools.constants import SHELL_COMMAND_EXAMPLE
 @tool_meta(
     tool={
         "name": "execute_shell",
-        "description": "Executes a command in the system's default shell. This is a powerful tool for file manipulation, system queries, and running scripts. It returns the standard output, standard error, and the exit code.",
+        "description": "Executes a command in the system's default shell. Write the command as if typed directly into the shell: do NOT wrap it in an outer 'powershell -Command \"...\"' layer and avoid nested quotes. Never hardcode user profile paths (C:\\Users\\...): use portable tokens {DESKTOP}, {HOME}, {WORKDIR}, {DOCUMENTS}, {DOWNLOADS}, expanded by the executor. Returns stdout, stderr and exit code.",
         "arguments": {
             "command": {"type": "STRING", "description": f"The command line to execute (e.g., {SHELL_COMMAND_EXAMPLE}).", "required": True}
         },
@@ -34,8 +34,33 @@ def execute_shell(self, command: str) -> dict:
     try:
         logging.info(f"Executing shell command: {command}")
 
-        # For Windows, use 'cmd /c', for others, use the default shell
-        if sys.platform == "win32":
+        # On Windows, a `powershell -Command "..."` wrapper routed through
+        # cmd.exe mangles nested quotes (the inner command can degrade into
+        # a quoted string that PowerShell merely echoes, exiting 0 while
+        # doing nothing). Run such commands via powershell.exe directly.
+        lowered = command.strip()
+        ps_prefixes = ("powershell -command", "powershell.exe -command", "pwsh -command", "pwsh.exe -command")
+        inner = None
+        for prefix in ps_prefixes:
+            if lowered.lower().startswith(prefix):
+                inner = command.strip()[len(prefix):].strip()
+                # Strip one layer of surrounding quotes if present.
+                if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in ('"', "'"):
+                    inner = inner[1:-1]
+                break
+
+        if inner is not None:
+            process = subprocess.run(
+                ['powershell', '-NoProfile', '-NonInteractive', '-Command', inner],
+                capture_output=True,
+                text=True,
+                timeout=60,
+                check=False,
+                encoding='utf-8',
+                errors='ignore',
+                cwd=self.working_directory
+            )
+        elif sys.platform == "win32":
             # Using shell=True on Windows is common, but splitting the command
             # with cmd /c is a bit safer.
             # Specify 'oem' encoding for Windows console output

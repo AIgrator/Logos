@@ -24,7 +24,14 @@ class VisionHandler:
 
     def __init__(self, controller):
         self.controller = controller
-        self.computer = Computer(mode='vision')
+        self.computer = Computer(
+            settings_manager=getattr(controller, 'settings_manager', None),
+            mode='vision',
+            working_directory=getattr(controller, 'working_directory', None),
+        )
+        from src.executor.executor import Executor
+        self.executor = Executor(self.computer, ui=None)  # ui wired below
+        self.executor.ui = controller.ui
         self.ui = controller.ui
         self.settings = controller.settings
         self.brain = controller.brain
@@ -218,7 +225,8 @@ class VisionHandler:
             os_info=self.os_info,
             is_replan=(failure_context is not None),
             plan_status=plan_status,
-            failure_context=failure_context
+            failure_context=failure_context,
+            working_directory=getattr(self.controller, "working_directory", None),
         )
 
         if not system_prompt or not user_prompt:
@@ -540,6 +548,7 @@ class VisionHandler:
         task_result_error = None
         action_result_content = None
         executed_actions_for_log = []
+        last_shell_result = None
 
         if not actions_to_execute:
             self.action_timer.singleShot(self.POST_ACTION_DELAY_MS, lambda: self._evaluate_task_result(current_task, [], None, None))
@@ -550,51 +559,42 @@ class VisionHandler:
 
         for action in actions_to_execute:
             try:
-                if action['name'] in ['click', 'double_click', 'drag_and_drop']:
-                    args = action.get('arguments', {})
-
-                    # Define points to check for collision
-                    points_to_check = []
-
-                    if action['name'] in ['click', 'double_click']:
-                        x1, y1, x2, y2 = args.get('x1'), args.get('y1'), args.get('x2'), args.get('y2')
-                        if all(v is not None for v in [x1, y1, x2, y2]):
-                            points_to_check.append(((x1 + x2) / 2, (y1 + y2) / 2))
-
-                    elif action['name'] == 'drag_and_drop':
-                        # Check start point
-                        x1_start, y1_start, x2_start, y2_start = args.get('x1_start'), args.get('y1_start'), args.get('x2_start'), args.get('y2_start')
-                        if all(v is not None for v in [x1_start, y1_start, x2_start, y2_start]):
-                            points_to_check.append(((x1_start + x2_start) / 2, (y1_start + y2_start) / 2))
-
-                        # Check end point
-                        x1_end, y1_end, x2_end, y2_end = args.get('x1_end'), args.get('y1_end'), args.get('x2_end'), args.get('y2_end')
-                        if all(v is not None for v in [x1_end, y1_end, x2_end, y2_end]):
-                            points_to_check.append(((x1_end + x2_end) / 2, (y1_end + y2_end) / 2))
-
-                    # Perform collision check for all relevant points
-                    for x, y in points_to_check:
-                        if self.ui.is_click_colliding(int(x), int(y)):
-                            self.ui.relocate_compact_window()
-                            time.sleep(0.1)  # Give window time to move
-                            break  # No need to check other points if we already moved the window
-
                 self.recent_action_history.append((action, self.pre_action_screenshot))
-                action_func = getattr(self.computer, action['name'])
-                kwargs = dict(action.get('arguments', {}) or {})
-                if action['name'] == 'launch_app':
-                    kwargs['allowed_apps_list'] = self.allowed_apps
-                    kwargs['app_launcher'] = self.app_launcher
-
-                result = action_func(**kwargs)
-                if result:
-                    action_result_content = result
+                ctx = {
+                    "allowed_apps": self.allowed_apps,
+                    "app_launcher": self.app_launcher,
+                    "shell_allowed": bool((self.settings.get("vision", {}) or {}).get("allow_shell_commands", False)),
+                }
+                result = self.executor.execute(action, ctx)
+                if not result.ok:
+                    # Instructional ValueError feeds the structural
+                    # self-correction loop exactly like before.
+                    task_result_error = ValueError(result.error or f"Tool '{action.get('name')}' failed.")
+                    break
+                if result.output_text:
+                    action_result_content = result.output_text
+                elif result.extra.get("raw"):
+                    # Compatibility: UI tools may return dicts/strings
+                    # consumed by evaluation as clipboard content.
+                    action_result_content = result.extra["raw"]
+                if result.kind == "shell":
+                    last_shell_result = result
 
                 executed_actions_for_log.append(action)
                 time.sleep(0.1)
             except Exception as e:
                 task_result_error = e
                 break
+
+        # Deterministic textual contract check for shell tasks (once per
+        # task, after all actions): catches silent no-ops (exit 0, wrong
+        # output) before LLM evaluation.
+        if task_result_error is None and last_shell_result is not None:
+            from src.executor.executor import check_textual_contract as _check_contract
+            contract_problem = _check_contract(current_task, last_shell_result)
+            if contract_problem:
+                logging.warning(f"Textual contract check failed: {contract_problem}")
+                task_result_error = ValueError(contract_problem)
 
         # If a communication action was executed, pause and wait for user guidance.
         if contains_communication:
@@ -770,7 +770,8 @@ class VisionHandler:
             correction_attempts=self.correction_attempts,
             max_correction_attempts=self.MAX_CORRECTION_ATTEMPTS,
             os_info=self.os_info,
-            action_result=action_result
+            action_result=action_result,
+            working_directory=getattr(self.controller, "working_directory", None),
         )
 
         if not system_prompt or not user_prompt:

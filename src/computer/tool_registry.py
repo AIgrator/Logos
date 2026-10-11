@@ -315,6 +315,12 @@ class ToolRegistry:
 
     def generate_all(self, force: bool = False) -> dict:
         start = time.perf_counter()
+        # Manifest fingerprint: prompt/cache files must never diverge from the
+        # manifests they are generated from. If tool membership changed since
+        # the last generation, force regeneration regardless of `force`.
+        if not force and self._manifests_changed():
+            logging.info("Tool manifests changed since last generation; forcing cache regeneration.")
+            force = True
         results = {
             'strategic': self.generate_strategic(force=force),
             'tools': self.generate_tools(force=force),
@@ -322,9 +328,46 @@ class ToolRegistry:
             'ui_tools': self.generate_ui_tools(force=force),
             'response_formats': self.generate_response_formats(force=force),
         }
+        self._write_manifest_fingerprint()
         duration = time.perf_counter() - start
         logging.info(f"ToolRegistry.generate_all completed in {duration:.3f}s")
         return results
+
+    def _manifest_fingerprint(self) -> dict:
+        """Stable fingerprint of tool membership per mode manifest."""
+        import hashlib
+        fingerprint = {}
+        for mode in ['vision', 'terminal', 'chat']:
+            try:
+                meta = self._get_filtered_metadata(mode)
+                names = sorted(meta.keys())
+                digest = hashlib.md5('\n'.join(names).encode('utf-8')).hexdigest()
+                fingerprint[mode] = {"tools": names, "digest": digest}
+            except Exception:
+                fingerprint[mode] = {"tools": [], "digest": ""}
+        return fingerprint
+
+    def _fingerprint_path(self) -> str:
+        return os.path.join(self.get_cache_dir(), '.manifest_fingerprint.json')
+
+    def _manifests_changed(self) -> bool:
+        try:
+            path = self._fingerprint_path()
+            if not os.path.exists(path):
+                return True
+            with open(path, encoding='utf-8') as f:
+                old = json.load(f)
+            return old != self._manifest_fingerprint()
+        except Exception:
+            return True
+
+    def _write_manifest_fingerprint(self) -> None:
+        try:
+            with open(self._fingerprint_path(), 'w', encoding='utf-8') as f:
+                json.dump(self._manifest_fingerprint(), f, indent=2)
+        except Exception as e:
+            import logging
+            logging.error(f"Failed to write manifest fingerprint: {e}", exc_info=True)
 
 if __name__ == '__main__':
     tr = ToolRegistry()

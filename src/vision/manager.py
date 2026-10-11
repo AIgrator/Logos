@@ -8,6 +8,7 @@ from PySide6.QtWidgets import QWidget
 
 from .parser_adapter import ParserAdapter
 from .capture import Capture
+from .grounding import create_backend
 
 class VisionManager:
     """
@@ -16,8 +17,15 @@ class VisionManager:
     """
     def __init__(self):
         self.parser_adapter = ParserAdapter()
+        self.grounding = None  # GroundingBackend; created in initialize_parser_async
         self.capture_handler = Capture()
         self.parser_initialized = False
+
+    @property
+    def grounding_backend_name(self) -> str:
+        if self.grounding is not None:
+            return self.grounding.name
+        return "local"
 
     def update_capture_settings(self, new_settings: dict):
         """
@@ -29,15 +37,28 @@ class VisionManager:
     def initialize_parser_async(self, new_settings: dict):
         """
         Initializes the parser. This is a long-running, blocking operation.
+        The grounding backend is selected via settings (default: local).
         """
         if self.parser_initialized:
             logging.info("Parser is already initialized.")
             return
 
-        logging.info("Starting heavy initialization of OmniParser...")
-        self.parser_adapter.initialize_parser(new_settings)
+        backend_name = (new_settings.get("vision", {}) or {}).get("grounding_backend", "local")
+        self.grounding = create_backend(backend_name)
+        logging.info(f"Starting heavy initialization of grounding backend '{self.grounding.name}'...")
+        if self.grounding.name == "local":
+            # Local backend reuses the shared ParserAdapter instance so OCR
+            # re-initialization from settings keeps working unchanged.
+            self.parser_adapter.initialize_parser(new_settings)
+            # Keep the adapter reachable through the backend as well.
+            try:
+                self.grounding._adapter = self.parser_adapter
+            except AttributeError:
+                pass
+        else:
+            self.grounding.initialize(new_settings)
         self.parser_initialized = True
-        logging.info("OmniParser has been successfully initialized.")
+        logging.info(f"Grounding backend '{self.grounding.name}' has been successfully initialized.")
 
     def reinitialize_ocr(self, new_settings: dict, status_callback=None):
         """Proxy method to re-initialize OCR in the parser adapter."""

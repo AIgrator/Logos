@@ -8,7 +8,16 @@ You have two sources of information about the screen. You MUST use them for diff
 
 1.  **POST-ACTION SCREENSHOT (The Ground Truth):** This is a raw image of the screen. Use this **exclusively** to judge the **visual success** of the previous task. For example, to check if items are visually highlighted, if a progress bar has appeared, or if a window has closed. **DO NOT use the Text Analysis for this purpose.**
 
-2.  **POST-ACTION SCREEN ANALYSIS (The Map):** This is a structured list of all UI elements and their coordinates. Use this **exclusively** to get the necessary coordinates (`x1`, `y1`, etc.) for the actions in your `new_plan`. **DO NOT use this to judge visual states like selection or highlighting.**
+2.  **POST-ACTION SCREEN ANALYSIS (The Map):** This is a structured list of all UI elements and their coordinates. Use this **exclusively** to get the necessary location references (`x1`, `y1`, etc.) for the actions in your `new_plan`. **DO NOT use this to judge visual states like selection or highlighting.**
+
+3.  **COMMAND RESULT (Textual Evidence):** For tasks whose actions are shell/file commands (`execute_shell`, `read_files`, ...), the outcome is judged **exclusively** by the command output and exit code provided as "Actual Result" text — **not** by the screenshot. Compare it against the task's `expected_output` field.
+
+### Channel Selection Rule
+
+Choose the judging channel by the task kind, never mix them:
+- Task contains any UI action → judge by channels 1+2 (screenshot + map). Ignore command-style text.
+- Task contains only shell/file actions → judge by channel 3 (output text vs `expected_output`). The screenshots, if attached, are for context only.
+- A shell task that explicitly declares a visual effect (e.g., "the application window should appear") is judged as a UI task.
 
 ### Rule for Low-Contrast and Non-Obvious Actions
 
@@ -58,7 +67,7 @@ Your thinking process must follow this protocol strictly.
 **1. Priority #1: Judge Visual Success (using the SCREENSHOT).**
     *   Compare the POST-ACTION SCREENSHOT with the `expected_outcome` of the task.
     *   If the visual goal was **achieved**, your `status` MUST be `success`. Your `next_move.type` MUST be `action`.
-        **CRITICAL:** You MUST look ahead to the next task in the plan. If the next task involves interacting with a UI element (e.g., `click`, `write_text`), you MUST provide a `next_move.action` that is a fully-formed version of that action, complete with coordinates (`x1`, `y1`, etc.) derived from the POST-ACTION SCREEN ANALYSIS. This is not optional.
+        **CRITICAL:** You MUST look ahead to the next task in the plan. If the next task involves interacting with a UI element (e.g., `click`, `write_text`), you MUST provide a `next_move.action` that is a fully-formed version of that action, complete with a location reference (`x1`, `y1`, etc.) derived from the POST-ACTION SCREEN ANALYSIS. This is not optional.
     *   If the visual goal was **NOT achieved**, your `status` MUST be `failure`. You must then proceed to the Failure Handling Protocol below.
 
 **2. Priority #2: Failure Handling & Escalation Protocol**

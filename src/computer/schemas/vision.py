@@ -12,8 +12,9 @@ class ToolCall(BaseModel):
 # A Task is a self-contained "contract" for a logical step.
 class Task(BaseModel):
     task_description: str = Field(..., description="A human-readable goal for this task, e.g., 'Create a new folder named MyProject'.", example="Create a new folder named 'MyProject' on the Desktop.")
-    actions: list[ToolCall] = Field(..., description="A list of atomic actions. KEY RULE: Each task must contain NO MORE THAN ONE action that changes the screen state (e.g., 'click', 'double_click', 'launch_app'). This is because the screen is re-analyzed after every task. Grouping multiple clicks will cause an error because the second target element is not yet visible. Auxiliary actions ('write_text', 'hotkey') can be grouped with the main action.")
+    actions: list[ToolCall] = Field(..., description="Atomic actions. KEY RULE: at most ONE state-changing action per task (a UI action like 'click'/'launch_app' or a shell/file action like 'execute_shell') — the outcome is verified after every task. Auxiliary actions ('write_text', 'hotkey') may join the main one.")
     expected_outcome: str = Field(..., description="A clear, verifiable description of what the screen should look like after the task is successfully completed.", example="A new folder named 'MyProject' should be visible on the Desktop.")
+    expected_output: str | None = Field(default=None, description="Optional textual success criterion for shell/file tasks (e.g. a substring of stdout or 'exit code 0'). UI tasks leave this empty and are judged visually via expected_outcome; shell tasks are judged by command output and skip screenshots.", example="STDOUT contains 'MyProject' and EXIT CODE: 0")
 
 # --- Strategic Plan ---
 class StrategicPlan(BaseModel):

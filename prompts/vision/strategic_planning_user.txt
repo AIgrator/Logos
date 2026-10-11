@@ -8,6 +8,7 @@
 #### System Information ####
 - Operating System: {os_info}
 - Screen Resolution: {screen_resolution}
+- Task Working Directory: {working_directory}
 - Installed Applications:
 {installed_applications}
 

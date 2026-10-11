@@ -31,5 +31,6 @@ Please analyze the attached "POST-ACTION SCREENSHOT" and compare it against the 
 
 #### System Information ####
 - Operating System: {os_info}
+- Task Working Directory: {working_directory}
 - Execution History:
 {history_str}
