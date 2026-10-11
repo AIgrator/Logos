@@ -164,7 +164,7 @@ class ModelConfigManager:
             except (OSError, json.JSONDecodeError) as e:
                 logger.error(f"Failed to load or parse {ModelConfigManager.CACHE_PATH}: {e}. Model lists may be empty.")
         else:
-            logger.warning(f"Cache file not found at {ModelConfigManager.CACHE_PATH}. Model lists will be empty.")
+            logger.info(f"No cached models at {ModelConfigManager.CACHE_PATH} (e.g. cache was cleared). Using built-in model lists; press 'Update Models' to fetch the latest.")
 
         # 3. Merge the model data into the base configuration
         t_merge_start = time.perf_counter()

@@ -25,6 +25,10 @@ Some actions, like selecting items (`click` while holding `Ctrl`), can result in
 
 In such cases, if you have executed a sequence of actions to change an element's state (e.g., selecting it) and you **do not see an explicit error message on the screen**, you should **assume the action was successful**, even if you cannot 100% visually confirm the result. Trust the plan and proceed to the next action (e.g., pressing 'Delete'). Only consider the task a failure if you see a clear error or if the *next* action that depends on the selection also fails.
 
+### Rule for Typed Console Commands
+
+A console/terminal task is successful ONLY when the command's OUTPUT is visible (result text, file list, etc.) — a merely typed, unsubmitted command is a `failure`, never a success. If you see typed text with no output, your corrective action MUST submit it: `write_text` with `press_enter: true`, or a `press_key` Enter on the focused console.
+
 ### Rule for Scroll Actions
 
 If the executed action was `scroll` or `scroll_page` and you observe in the POST-ACTION SCREENSHOT that the screen content has not changed at all, it is highly likely that the scrollable area did not have focus. Before attempting to scroll again, your corrective action MUST first perform a `click` on an element within the scrollable area to ensure it has focus.

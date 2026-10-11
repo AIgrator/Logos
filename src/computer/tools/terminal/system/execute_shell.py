@@ -8,7 +8,7 @@ from src.computer.tools.constants import SHELL_COMMAND_EXAMPLE
 @tool_meta(
     tool={
         "name": "execute_shell",
-        "description": "Executes a command in the system's default shell. Write the command as if typed directly into the shell: do NOT wrap it in an outer 'powershell -Command \"...\"' layer and avoid nested quotes. Never hardcode user profile paths (C:\\Users\\...): use portable tokens {DESKTOP}, {HOME}, {WORKDIR}, {DOCUMENTS}, {DOWNLOADS}, expanded by the executor. Returns stdout, stderr and exit code.",
+        "description": "Executes a command in the system's default shell (cmd.exe on Windows, sh/bash elsewhere). Write plain shell syntax for THAT shell: on Windows use cmd commands (mkdir, dir, echo) or 'powershell -Command \"...\"' for cmdlets. Never hardcode user profile paths (C:\\Users\\...): use portable tokens {DESKTOP}, {HOME}, {WORKDIR}, {DOCUMENTS}, {DOWNLOADS}, expanded by the executor. Returns stdout, stderr and exit code.",
         "arguments": {
             "command": {"type": "STRING", "description": f"The command line to execute (e.g., {SHELL_COMMAND_EXAMPLE}).", "required": True}
         },
@@ -50,6 +50,12 @@ def execute_shell(self, command: str) -> dict:
                 break
 
         if inner is not None:
+            # Make cmdlet errors terminating: by default powershell.exe
+            # returns exit code 0 even when a cmdlet fails (e.g. removing
+            # a non-existent path), which would fake a success. With
+            # $ErrorActionPreference='Stop' failures surface as exit code 1
+            # and the textual contract check catches them.
+            inner = "$ErrorActionPreference = 'Stop'; " + inner
             process = subprocess.run(
                 ['powershell', '-NoProfile', '-NonInteractive', '-Command', inner],
                 capture_output=True,

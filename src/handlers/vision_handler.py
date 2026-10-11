@@ -912,13 +912,16 @@ class VisionHandler:
             self.ui.add_message("<i>Execution paused. You can make manual changes and then press Resume.</i>")
             self.ui.set_paused(True)
 
-    def pause_for_feedback(self):
+    def pause_for_feedback(self, is_communication: bool = False):
         """Pauses execution and switches to full UI to allow the user to provide text guidance."""
         if self.state in [VisionState.EXECUTING, VisionState.EVALUATING, VisionState.WAITING_FOR_ELEMENT, VisionState.PAUSED]:
             self.is_paused_for_guidance = True
             self.pre_pause_state = self.state
             self._set_state(VisionState.PAUSED_ON_ERROR)
-            self.ui.add_message("<i>Execution paused. Please provide guidance in the input field.</i>")
+            if is_communication:
+                self.ui.add_message("<i>Assistant is waiting for your reply in the input field.</i>")
+            else:
+                self.ui.add_message("<i>Execution paused. Please provide guidance in the input field.</i>")
             self.controller.handle_vision_error()
         else:
             logging.warning(f"Cannot pause for feedback from current state: {self.state.name}")

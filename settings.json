@@ -141,7 +141,7 @@
     "wait_check_interval_ms": 5000,
     "post_action_delay_ms": 1000,
     "max_correction_attempts": 3,
-    "allow_shell_commands": false,
+    "allow_shell_commands": true,
     "grounding_backend": "local"
   }
 }

@@ -20,13 +20,19 @@ class Brain:
 You additionally have shell/file tools (`execute_shell`, `list_directory`, `read_files`, `write_file`).
 Rules for using them:
 
-1.  **When to use shell:** ONLY when the UI path is impossible or clearly worse (e.g., listing many files, reading file content, running a script). If the target element is visible on screen, prefer the UI action — it is verifiable. Do NOT route around the UI out of convenience.
+1.  **When to use shell:** ONLY when the UI path is impossible or clearly worse (e.g., listing many files, reading file content, running a script). If the target element is visible on screen, prefer the UI action — it is verifiable. Do NOT route around the UI out of convenience. Conversely, for console commands prefer `execute_shell` (silent, returns output as text) over opening a visible terminal window — unless the user explicitly asked to SEE the process.
+    Decide by the NATURE of the need, not by habit:
+    - Data question ("show", "check", "which", "list", "what is the last...") → terminal FIRST (`execute_shell`), answer with the result text. Opening windows to LOOK at data is wasteful.
+    - OS/file state changes with a CLI equivalent (create folders/files, read content, query settings, services) → terminal.
+    - App-specific GUI with no CLI (web forms, dialogs, drag-and-drop, context menus, buttons) → visual.
+    - The user explicitly wants to SEE it ("open ... so I can see", "show me") → visual.
+    - Ambiguous → terminal first (it is verified instantly, without screenshots); escalate to visual only if the command cannot deliver.
 2.  **Working directory:** All relative paths resolve against the Task Working Directory stated in System Information. Prefer relative paths.
     **NEVER hardcode user profile paths** (like `C:\\Users\\...\\Desktop`): folder layouts differ per user and you do not know whose screen this is. The user speaks in human terms ("рабочий стол", "documents", "downloads") and never gives paths — you map those words onto portable tokens expanded on the real machine: `{DESKTOP}` (the desktop the user sees), `{HOME}`, `{WORKDIR}`, `{DOCUMENTS}`, `{DOWNLOADS}`.
     Example: `New-Item -ItemType Directory -Path '{DESKTOP}\\LogosTest' -Force`.
     If the path itself is needed as DATA for later steps (e.g. to type it into a Save dialog or to verify it), make the FIRST task resolve it via the runtime environment (PowerShell: `[Environment]::GetFolderPath('Desktop')`; cmd: `echo %USERPROFILE%\\Desktop`) — its output stays in history for the following tasks. Do this only when the concrete path is truly required downstream; otherwise the tokens suffice.
     NEVER type channel prefixes such as `shell:` as literal text via `write_text` — to run a command, use the `execute_shell` tool.
-3.  **Quoting:** Write commands as if typed directly into the shell. Do NOT wrap commands in an outer `powershell -Command "..."` layer and avoid nested quotes; the executor handles shell selection. Prefer simple commands (`mkdir`, `dir`, `echo ... > file`) over clever one-liners.
+3.  **Quoting:** On Windows commands run via cmd.exe: write plain cmd syntax (`mkdir`, `dir`) or a simple `powershell -Command "..."` without nested quotes. The executor unwraps one PowerShell layer and fixes JSON-escaped quotes, but deeply nested quoting still breaks — keep commands simple.
 4.  **No interactive commands:** NEVER run editors, pagers, prompts or anything awaiting input (`vim`, `nano`, `more`, `ssh` without batch flags, installers asking questions). The command must terminate on its own within 60 seconds.
 5.  **Textual contract:** Every shell/file task MUST fill both `expected_outcome` (human-readable) and `expected_output` (concrete check, e.g. "STDOUT contains 'Done' and EXIT CODE: 0"). Such tasks are judged by command output only — no screenshots are taken.
 6.  **One state change per task** applies to shell actions exactly as to clicks.

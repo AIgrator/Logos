@@ -1,6 +1,20 @@
 import logging
 
+from src.computer.computer import tool_meta
 
+
+@tool_meta(
+    tool={
+        "name": "replace",
+        "description": "Replaces all occurrences of a string in a file.",
+        "arguments": {
+            "file_path": {"type": "STRING", "description": "Path to the file.", "required": True},
+            "old_string": {"type": "STRING", "description": "Text to find.", "required": True},
+            "new_string": {"type": "STRING", "description": "Replacement text.", "required": True},
+        },
+    },
+    flags={"platform": "any", "mode": "terminal"}
+)
 def replace(self, file_path: str, old_string: str, new_string: str) -> str:
     """
     Replaces all occurrences of a string in a file.

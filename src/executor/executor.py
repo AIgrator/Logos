@@ -15,6 +15,8 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from src.computer.tools.locations import PATH_TOKENS, expand_path_tokens  # noqa: F401  (re-export)
+
 logger = logging.getLogger(__name__)
 
 # Tools whose result is judged textually, not visually.
@@ -62,55 +64,6 @@ class ActionResult:
         return None
 
 
-# Portable location tokens for shell commands. The model writes portable
-# commands using these tokens; the executor (which knows the machine)
-# expands them. Folder layouts differ per user, so hardcoded profile
-# paths like C:\Users\NAME\Desktop are forbidden by the prompt rules.
-# The user speaks in human terms ("рабочий стол", "документы") and never
-# provides paths — the model maps those words onto these tokens.
-PATH_TOKENS = ("{DESKTOP}", "{HOME}", "{WORKDIR}", "{DOCUMENTS}", "{DOWNLOADS}")
-
-
-def expand_path_tokens(command: str, working_directory: str | None) -> str:
-    """Replace {DESKTOP}/{HOME}/{WORKDIR}/{DOCUMENTS}/{DOWNLOADS} with real paths."""
-    import os
-    if not command or "{" not in command:
-        return command
-    home = ""
-    try:
-        home = os.path.expanduser("~")
-        if home == "~":
-            home = ""
-    except Exception:
-        home = ""
-
-    def _existing(*parts: str) -> str:
-        path = os.path.join(*parts) if parts else ""
-        try:
-            if path and os.path.isdir(path):
-                return path
-        except Exception:
-            pass
-        return ""
-
-    desktop = _existing(home, "Desktop") if home else ""
-    if not desktop:
-        desktop = r"C:\Users\Public\Desktop"
-    documents = _existing(home, "Documents") if home else ""
-    downloads = _existing(home, "Downloads") if home else ""
-    mapping = {
-        "{DESKTOP}": desktop,
-        "{HOME}": home,
-        "{WORKDIR}": working_directory or "",
-        "{DOCUMENTS}": documents,
-        "{DOWNLOADS}": downloads,
-    }
-    for token, value in mapping.items():
-        if token in command:
-            command = command.replace(token, value)
-    return command
-
-
 def task_kind(actions: list) -> str:
     """Classify a task by how its outcome must be verified.
 
@@ -148,18 +101,34 @@ def expects_visual_result(task: dict) -> bool:
     return any(keyword in text for keyword in VISUAL_INTENT_KEYWORDS)
 
 
+def _has_textual_checks(expected: str) -> bool:
+    """True when expected_output contains at least one machine-checkable form
+    (EXIT CODE / STDOUT contains / STDERR contains). Free prose alone
+    proves nothing and must NOT trigger auto-success."""
+    import re
+    if re.search(r"EXIT\s*CODE:\s*(-?\d+)", expected):
+        return True
+    for stream in ("STDOUT", "STDERR"):
+        if re.search(re.escape(stream) + r"\s+contains\s+['\"]", expected):
+            return True
+    return False
+
+
 def check_textual_contract(task: dict, result: "ActionResult") -> str | None:
     """Deterministically verify a shell task against its `expected_output`.
 
-    Parses two check forms (both optional, combined with AND):
-    - "EXIT CODE: <int>" — must equal result.exit_code;
+    Exit code defaults to expected 0 unless the contract states another
+    code explicitly; STDOUT/STDERR-contains clauses are AND-combined.
+    Parses:
+    - "EXIT CODE: <int>" — must equal result.exit_code (default: 0);
     - "STDOUT contains '<text>'" / 'STDERR contains "<text>"' — substring
       must appear in the formatted command output.
 
     Returns None when everything matches (or there is nothing to check),
     otherwise a human/LLM-readable mismatch description. This runs *before*
     the LLM evaluation so silent no-ops (exit 0, wrong output) cannot pass
-    as success.
+    as success — and so failed commands (non-zero exit) can never
+    auto-succeed.
     """
     import re
 
@@ -169,12 +138,11 @@ def check_textual_contract(task: dict, result: "ActionResult") -> str | None:
 
     problems = []
     match = re.search(r"EXIT\s*CODE:\s*(-?\d+)", expected)
-    if match:
-        want = int(match.group(1))
-        if result.exit_code != want:
-            problems.append(
-                f"expected EXIT CODE {want} but got {result.exit_code}."
-            )
+    want = int(match.group(1)) if match else 0
+    if result.exit_code != want:
+        problems.append(
+            f"expected EXIT CODE {want} but got {result.exit_code}."
+        )
     for stream in ("STDOUT", "STDERR"):
         for quote in ("'", '"'):
             pattern = re.compile(re.escape(stream) + r"\s+contains\s+" + quote + r"(.*?)" + quote)
@@ -273,6 +241,12 @@ class Executor:
                 kwargs.get("command", ""),
                 getattr(self.computer, "working_directory", None),
             )
+            # Models often emit JSON-escaped quotes (\\") inside the command
+            # string. Left as-is they reach PowerShell/cmd literally and break
+            # quoting (silent wrong behavior). Normalize them.
+            if '\\"' in command:
+                command = command.replace('\\"', '"')
+                logger.info("Normalized JSON-escaped quotes in shell command.")
             kwargs["command"] = command
             self._check_shell_safety(command)
 

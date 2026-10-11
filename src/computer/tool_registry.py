@@ -334,15 +334,22 @@ class ToolRegistry:
         return results
 
     def _manifest_fingerprint(self) -> dict:
-        """Stable fingerprint of tool membership per mode manifest."""
+        """Stable fingerprint of tool definitions per mode manifest.
+
+        Hashes names AND descriptions AND arguments (not just membership):
+        any prompt-visible change forces regeneration, so the model always
+        sees the current contract (e.g. a new `press_enter` argument).
+        """
         import hashlib
         fingerprint = {}
         for mode in ['vision', 'terminal', 'chat']:
             try:
                 meta = self._get_filtered_metadata(mode)
-                names = sorted(meta.keys())
-                digest = hashlib.md5('\n'.join(names).encode('utf-8')).hexdigest()
-                fingerprint[mode] = {"tools": names, "digest": digest}
+                canonical = json.dumps(meta, sort_keys=True, default=str)
+                fingerprint[mode] = {
+                    "tools": sorted(meta.keys()),
+                    "digest": hashlib.md5(canonical.encode('utf-8')).hexdigest(),
+                }
             except Exception:
                 fingerprint[mode] = {"tools": [], "digest": ""}
         return fingerprint

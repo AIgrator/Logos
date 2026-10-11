@@ -1016,7 +1016,7 @@ class AppController(QObject):
 
         # Ensure all execution-related UI is turned off
         self.ui.show_thinking_ui(False)
-        self.ui.set_vision_mode_active(True)
+        self.ui.set_active_mode('vision')
         self.ui.set_paused(False) # Ensure pause icon is reset
 
         # Switch to full mode so the user has room to type
