@@ -9,7 +9,7 @@ from src.computer.computer import tool_meta
 @tool_meta(
     tool={
         "name": "write_text",
-        "description": "Types text into the currently focused input field. It can use the clipboard for speed or simulate individual key presses for compatibility.",
+        "description": "Types text into the currently focused input field. On Windows uses layout-independent UNICODE injection by default (works with any alphabet); 'clipboard' pastes via Ctrl+V for very long texts instead.",
         "arguments": {
             "description": {"type": "STRING", "description": "e.g., 'Typing the filename 'mydocument.txt'", "required": True},
             "text": {"type": "STRING", "description": "The text to type.", "required": True},
@@ -30,16 +30,30 @@ def write_text(self, **kwargs):
         use_direct_method = True
     elif method == 'clipboard':
         use_direct_method = False
+    elif sys.platform == 'win32':
+        # Default on Windows: UNICODE injection (layout-independent, verified
+        # visually incl. Cyrillic). pyautogui.write() is layout-dependent and
+        # clipboard+Ctrl+V paste proved unreliable for system dialogs here.
+        use_direct_method = True
     elif sys.platform == 'linux':
         use_direct_method = True
 
     if use_direct_method:
-        try:
-            logging.info(f"Typing text directly: '{text}'")
-            pyautogui.write(text, interval=0.01)
-        except Exception as e:
-            logging.error(f"Error writing text directly: {e}")
-            raise
+        if sys.platform == 'win32':
+            from src.computer.tools.win_keys import send_text_pynput
+            try:
+                logging.info(f"Typing text via pynput: '{text}'")
+                send_text_pynput(text)
+            except Exception as e:
+                logging.error(f"Error writing text via pynput: {e}")
+                raise
+        else:
+            try:
+                logging.info(f"Typing text directly: '{text}'")
+                pyautogui.write(text, interval=0.01)
+            except Exception as e:
+                logging.error(f"Error writing text directly: {e}")
+                raise
     else:
         original_clipboard = pyperclip.paste()
         try:

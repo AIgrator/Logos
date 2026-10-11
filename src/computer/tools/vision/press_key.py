@@ -1,8 +1,21 @@
 import logging
+import sys
 import pyautogui
 
 from src.computer.computer import tool_meta
 from src.computer.tools.constants import KEYBOARD_KEYS
+
+
+def _press_single(key: str) -> None:
+    """Single key press: pynput first (verified), pyautogui fallback."""
+    if sys.platform == 'win32':
+        try:
+            from src.computer.tools.win_keys import press_key_pynput
+            press_key_pynput(key)
+            return
+        except Exception as e:
+            logging.warning(f"pynput press failed for '{key}', falling back to pyautogui: {e}")
+    pyautogui.press(key)
 
 @tool_meta(
     tool={
@@ -31,7 +44,7 @@ def press_key(self, **kwargs):
                     if k not in KEYBOARD_KEYS:
                         raise ValueError(f"Invalid key '{k}'. See KEYBOARD_KEYS for supported values.")
                     logging.info(f"Performing key press from list: '{k}'")
-                    pyautogui.press(k)
+                    _press_single(k)
                 return
             else:
                 raise ValueError("'keys' argument must be a list or string.")
@@ -39,7 +52,7 @@ def press_key(self, **kwargs):
         if key not in KEYBOARD_KEYS:
             raise ValueError(f"Invalid key '{key}'. See KEYBOARD_KEYS for supported values.")
         logging.info(f"Performing single key press: '{key}'")
-        pyautogui.press(key)
+        _press_single(key)
     except Exception as e:
         logging.error(f"Error pressing key(s) '{key or keys}': {e}")
         raise

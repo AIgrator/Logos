@@ -601,9 +601,45 @@ class VisionHandler:
             logging.info("Pausing after communicate_to_user action.")
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self.controller.handle_vision_error()
+        elif self._try_shell_autosuccess(current_task, executed_actions_for_log, last_shell_result):
+            # Pure-shell task with a verified textual contract: no screenshots,
+            # no LLM round-trip. The loop continues with the next task.
+            pass
         else:
             # Otherwise, proceed with the standard evaluation flow.
             self.action_timer.singleShot(self.POST_ACTION_DELAY_MS, lambda: self._evaluate_task_result(current_task, executed_actions_for_log, task_result_error, action_result_content))
+
+    def _try_shell_autosuccess(self, current_task: dict, executed_actions: list, last_shell_result) -> bool:
+        """Fast path for pure-shell tasks with a verifiable textual contract.
+
+        When every executed action is textual (shell/info), the task declares
+        `expected_output`, and the deterministic contract check already passed,
+        the outcome is proven by the command output itself: screenshots and
+        an LLM evaluation round-trip would add nothing but cost. Mark the
+        task done and advance the plan.
+        """
+        from src.executor.executor import task_kind, check_textual_contract, expects_visual_result
+        if not executed_actions or last_shell_result is None:
+            return False
+        if task_kind(executed_actions) != "shell":
+            return False
+        if not (isinstance(current_task, dict) and current_task.get("expected_output")):
+            return False
+        if expects_visual_result(current_task):
+            # Shell task with a declared visual effect (e.g. "open the folder
+            # so the user sees it"): screenshots and LLM evaluation stay.
+            return False
+        if check_textual_contract(current_task, last_shell_result) is not None:
+            return False
+        logging.info(
+            f"Shell task auto-verified (exit {last_shell_result.exit_code}), "
+            f"skipping screenshots and LLM evaluation."
+        )
+        self.ui.add_message("<i>Shell task verified by output, skipping screen analysis.</i>", force_scroll=True)
+        self.correction_attempts = 0
+        self.current_task_index += 1
+        self._execute_next_task()
+        return True
 
     def _execute_next_task(self):
         if self.current_task_index >= len(self.action_plan):

@@ -127,6 +127,27 @@ def task_kind(actions: list) -> str:
     return "shell"
 
 
+# Substrings (EN + RU) signalling that a task outcome must be SEEN, not
+# just read from command output. Used to keep screenshot evaluation for
+# shell tasks with a visual effect ("open the folder so the user sees it").
+# Biased wide on purpose: a false negative only costs screenshots (old
+# behavior), a false positive would skip a needed visual check.
+VISUAL_INTENT_KEYWORDS = (
+    "window", "screen", "display", "open", "visible", "dialog",
+    "appear", "show", "click",
+    "окно", "экран", "дисплей", "открыт", "открыть", "открой",
+    "видим", "видно", "диалог", "показ", "показать", "покажи",
+)
+
+
+def expects_visual_result(task: dict) -> bool:
+    """True when the task's expected outcome describes something to SEE."""
+    text = ""
+    if isinstance(task, dict):
+        text = f"{task.get('expected_outcome', '')} {task.get('task_description', '')}".lower()
+    return any(keyword in text for keyword in VISUAL_INTENT_KEYWORDS)
+
+
 def check_textual_contract(task: dict, result: "ActionResult") -> str | None:
     """Deterministically verify a shell task against its `expected_output`.
 

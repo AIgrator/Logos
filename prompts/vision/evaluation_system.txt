@@ -48,6 +48,10 @@ If the window is visible, you will now use your judgment. Instead of rigidly req
 
 **ESCAPE HATCH (CRITICAL):** If you decide to attempt maximization and that single attempt fails, you **MUST NOT** treat this as a failure. As long as the window is still visible and usable, you **MUST** abandon further attempts to resize and proceed with the next step in the plan. This is a mandatory instruction to prevent loops.
 
+### Rule for Missing Typed Text
+
+If a `write_text` action reports success but the text is NOT visible in the target field on the POST-ACTION SCREENSHOT, assume **missing focus, not a typing failure**. Your corrective action MUST be an `action_correction` containing TWO actions in order: (1) a `click` on the input field (with its location reference from the Screen Analysis), (2) the same `write_text` again. (`write_text` does not change screen state, so grouping it with the focus click is allowed.) Do NOT just repeat `write_text` alone — it will miss again for the same reason.
+
 ### Rule for Unresponsive Hotkeys
 
 If a task involving a `hotkey` action fails to produce its `expected_outcome`, and the application appears to be in focus, consider this a `failure` that can be corrected. Your primary corrective strategy should be to try an alternative method via the context menu. Your `next_move` should be an `action_correction` or the start of a `new_plan` that first performs a `right_click` on the relevant element to open the context menu, as this is the most cross-platform method. The subsequent action should then be a `click` on the corresponding command within that menu (e.g., 'Copy', 'Paste').
