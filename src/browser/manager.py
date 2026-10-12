@@ -239,8 +239,20 @@ class BrowserManager:
                     continue
                 tag = (loc.evaluate("e => e.tagName.toLowerCase()") or "").strip()
                 explicit_role = (loc.get_attribute("role") or "").strip()
-                role = explicit_role or _TAG_TO_ROLE.get(tag, "") or tag or "element"
+                input_type = (loc.get_attribute("type") or "").strip().lower() if tag == "input" else ""
+                if tag == "input" and input_type in ("radio", "checkbox"):
+                    # Real control type beats the generic "textbox": a bare
+                    # "textbox: 1" hid answer radios from the model entirely.
+                    role = explicit_role or input_type
+                elif tag == "input" and input_type in ("submit", "button", "image"):
+                    role = explicit_role or "button"
+                else:
+                    role = explicit_role or _TAG_TO_ROLE.get(tag, "") or tag or "element"
+                label_text = ""
+                if tag in ("input", "select", "textarea"):
+                    label_text = self._labeled_text(loc)
                 name = (loc.get_attribute("aria-label")
+                        or label_text
                         or loc.get_attribute("placeholder")
                         or loc.get_attribute("value")
                         or loc.get_attribute("alt")
@@ -291,6 +303,33 @@ class BrowserManager:
                     shown.add(j)
                     out.append((">> " if j == i else "   ") + lines[j])
         return f"Matches for '{query}':\n" + "\n".join(out)
+
+    @staticmethod
+    def _labeled_text(loc) -> str:
+        """Visible label for a form control: label[for], wrapping <label>,
+        else short parent text. Empty string when nothing suitable."""
+        try:
+            text = loc.evaluate("""e => {
+                const t = el => ((el && el.innerText) || '').trim();
+                if (e.id) {
+                    const l = document.querySelector(`label[for="${CSS.escape(e.id)}"]`);
+                    const s = t(l);
+                    if (s) return s;
+                }
+                let p = e.parentElement, hops = 0;
+                while (p && hops < 3) {
+                    if (p.tagName.toLowerCase() === 'label') {
+                        const s = t(p);
+                        if (s) return s;
+                    }
+                    p = p.parentElement; hops++;
+                }
+                const direct = e.parentElement ? t(e.parentElement).split('\\n')[0] : '';
+                return direct.length <= 60 ? direct : '';
+            }""") or ""
+            return text.strip()
+        except Exception:
+            return ""
 
     def _ref(self, ref: int):
         try:
