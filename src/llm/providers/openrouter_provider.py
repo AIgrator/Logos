@@ -7,8 +7,8 @@ import base64
 import io
 import requests
 from PIL import Image
-from src.llm.base_provider import BaseLLMProvider
-from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from ..base_provider import BaseLLMProvider
+from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
 
 class OpenRouterProvider(BaseLLMProvider):
     """
@@ -105,7 +105,7 @@ class OpenRouterProvider(BaseLLMProvider):
             status_code = e.response.status_code
             error_message = f"OpenRouter HTTP error ({status_code}) during web search: {e.response.text}"
             if status_code == 429:
-                raise RetryableError(error_message, retry_after=extract_retry_after(response=e.response, message=error_message)) from e
+                raise FatalError(f"OpenRouter quota exhausted: {error_message}") from e
             if 400 <= status_code < 500:
                 raise FatalError(error_message) from e
             else: # Treat 5xx and other errors as potentially retryable
@@ -208,7 +208,7 @@ class OpenRouterProvider(BaseLLMProvider):
         return messages
 
     def _execute_get_response(self, prompt: str, attachments: list = None, system_prompt: str = None, history: list = None, schema_name: str | None = None):
-        from src.llm.llm_parsing import repair_json_string
+        from ..llm_parsing import repair_json_string
         headers = {
             "Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json",
             "HTTP-Referer": "https://github.com/AIgrator/Logos", "X-Title": "Logos"
@@ -317,7 +317,7 @@ class OpenRouterProvider(BaseLLMProvider):
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code
             if status_code == 429:
-                raise RetryableError(f"OpenRouter rate limit ({status_code}): {e.response.text}", retry_after=extract_retry_after(response=e.response, message=e.response.text)) from e
+                raise FatalError(f"OpenRouter quota exhausted ({status_code}): {e.response.text}") from e
             if 400 <= status_code < 500:
                 raise FatalError(f"OpenRouter client error ({status_code}): {e.response.text}") from e
             elif 500 <= status_code < 600:
@@ -391,7 +391,7 @@ class OpenRouterProvider(BaseLLMProvider):
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code
             if status_code == 429:
-                raise RetryableError(f"OpenRouter rate limit ({status_code}): {e}", retry_after=extract_retry_after(response=e.response, message=str(e))) from e
+                raise FatalError(f"OpenRouter quota exhausted ({status_code}): {e}") from e
             if 400 <= status_code < 500:
                 raise FatalError(f"OpenRouter client error ({status_code}): {e}") from e
             elif 500 <= status_code < 600:

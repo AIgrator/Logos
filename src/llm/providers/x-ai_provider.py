@@ -8,9 +8,9 @@ import io
 from PIL import Image
 
 from openai import OpenAI, APIError, AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError
-from src.llm.base_provider import BaseLLMProvider
-from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
-from src.llm.exceptions import RETRYABLE_STATUS_CODES as _RETRYABLE_CODES
+from ..base_provider import BaseLLMProvider
+from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from ..exceptions import RETRYABLE_STATUS_CODES as _RETRYABLE_CODES
 
 logger = logging.getLogger(__name__)
 
@@ -271,12 +271,12 @@ class XAIProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"XAI authentication error: {e}") from e
         except RateLimitError as e:
-            raise RetryableError(f"XAI rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
+            raise FatalError(f"XAI rate limit/quota exhausted: {e}") from e
         except APIConnectionError as e:
             raise RetryableError(f"XAI connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"XAI timeout error: {e}") from e
-        except APIError as e:  # General API errors (e.g., 400, 404); 5xx/429 are transient
+        except APIError as e:  # General API errors (e.g., 400, 404); 5xx are transient, 429 is quota
             _code = getattr(e, 'status_code', None)
             if _code in _RETRYABLE_CODES:
                 raise RetryableError(f"XAI transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
@@ -416,7 +416,7 @@ class XAIProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"XAI authentication error: {e}") from e
         except RateLimitError as e:
-            raise RetryableError(f"XAI rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
+            raise FatalError(f"XAI rate limit/quota exhausted: {e}") from e
         except APIConnectionError as e:
             raise RetryableError(f"XAI connection error: {e}") from e
         except APITimeoutError as e:

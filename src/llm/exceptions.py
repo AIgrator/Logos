@@ -69,9 +69,66 @@ def extract_retry_after(response=None, message: str = "") -> float | None:
     return None
 
 
-#: HTTP statuses that mean "try again later" at every provider
+#: HTTP statuses that are auto-retried at every provider
 #: (529 is Anthropic-specific overload).
-RETRYABLE_STATUS_CODES = frozenset({408, 425, 429, 500, 502, 503, 504, 529})
+#: NOTE: 429 is deliberately NOT here. Original design rule, restored:
+#: 429 = quota/limits (money) -> FatalError + honest quota card, no auto-retry.
+#: 503/overload = transient fault -> RetryableError + countdown + retry.
+RETRYABLE_STATUS_CODES = frozenset({408, 425, 500, 502, 503, 504, 529})
+
+
+def is_quota_error(exc_or_message) -> bool:
+    """True when an error looks like exhausted quota/limits, not a transient fault.
+
+    Catches quota/billing wording ("quota exceeded", "billing", "out of
+    credits", ...) as well as bare 429 codes. Used as a backstop so that a
+    quota error which slipped into RetryableError still gets quota treatment
+    (no futile auto-retry loop) instead of an "overloaded" card.
+    """
+    import re
+    if isinstance(exc_or_message, str):
+        text = exc_or_message
+    else:
+        text = f"{type(exc_or_message).__name__} {exc_or_message}"
+    lowered = text.lower()
+    markers = (
+        "quota", "billing", "payment", "out of credits", "insufficient_quota",
+        "exceeded your current quota", "check your plan and billing",
+        "resource_exhausted", "resource exhausted",
+        "rate limit", "rate_limit", "ratelimit", "too many requests",
+    )
+    if any(marker in lowered for marker in markers):
+        return True
+    return re.search(r"\b429\b", text) is not None
+
+#: Server-demanded waits longer than this are NOT auto-retried.
+#: The worker caps backoff at this value, so anything above means
+#: "come back much later" (e.g. daily free-tier quota with
+#: retryDelay of hours), not "retry in a bit". Such cases get an
+#: honest quota-wall card instead of futile retries.
+MAX_AUTO_WAIT_SECONDS = 120.0
+
+
+def format_wait(seconds: float | None) -> str:
+    """Human-readable duration for server-demanded waits.
+
+    42 -> "42s", 150 -> "2m 30s", 52334 -> "14h 32m".
+    """
+    if seconds is None:
+        return "unknown time"
+    total = max(0, int(seconds))
+    if total < 60:
+        return f"{total}s"
+    if total < 3600:
+        minutes, secs = divmod(total, 60)
+        return f"{minutes}m {secs}s" if secs else f"{minutes}m"
+    if total < 86400:
+        hours, rest = divmod(total, 3600)
+        minutes = rest // 60
+        return f"{hours}h {minutes}m" if minutes else f"{hours}h"
+    days, rest = divmod(total, 86400)
+    hours = rest // 3600
+    return f"{days}d {hours}h" if hours else f"{days}d"
 
 
 def is_transient_error(exc: BaseException) -> bool:

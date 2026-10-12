@@ -23,7 +23,7 @@ import pkgutil
 from dataclasses import dataclass
 from types import ModuleType
 from typing import Optional, Union
-from src.llm.base_provider import BaseLLMProvider
+from .base_provider import BaseLLMProvider
 
 logger = logging.getLogger(__name__)
 

@@ -7,8 +7,8 @@ import pathlib
 import requests
 from typing import Any
 from PIL import Image
-from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
-from src.llm.base_provider import BaseLLMProvider
+from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from ..base_provider import BaseLLMProvider
 
 logger = logging.getLogger(__name__)
 
@@ -264,7 +264,7 @@ class HuggingFaceProvider(BaseLLMProvider):
             status_code = e.response.status_code
             error_text = e.response.text
             if status_code == 429:
-                raise RetryableError(f"HuggingFace rate limit ({status_code}): {error_text}", retry_after=extract_retry_after(response=e.response, message=error_text)) from e
+                raise FatalError(f"HuggingFace quota exhausted ({status_code}): {error_text}") from e
             if 400 <= status_code < 500:
                 raise FatalError(f"HuggingFace client error ({status_code}): {error_text}") from e
             elif 500 <= status_code < 600:
@@ -366,7 +366,7 @@ class HuggingFaceProvider(BaseLLMProvider):
                 status_code = e.response.status_code
                 error_text = e.response.text
                 if status_code == 429:
-                    raise RetryableError(f"HuggingFace rate limit ({status_code}): {error_text}", retry_after=extract_retry_after(response=e.response, message=error_text)) from e
+                    raise FatalError(f"HuggingFace quota exhausted ({status_code}): {error_text}") from e
                 if 400 <= status_code < 500:
                     raise FatalError(f"HuggingFace client error ({status_code}): {error_text}") from e
                 elif 500 <= status_code < 600:

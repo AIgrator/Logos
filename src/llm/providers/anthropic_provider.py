@@ -7,10 +7,10 @@ import mimetypes
 import pathlib
 from typing import Any
 from PIL import Image
-from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
-from src.llm.exceptions import RETRYABLE_STATUS_CODES as _RETRYABLE_CODES
+from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from ..exceptions import RETRYABLE_STATUS_CODES as _RETRYABLE_CODES
 from anthropic import Anthropic, APIError, AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError, InternalServerError
-from src.llm.base_provider import BaseLLMProvider
+from ..base_provider import BaseLLMProvider
 logging.getLogger('anthropic._base_client').setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
 
@@ -233,14 +233,14 @@ class AnthropicProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"Anthropic authentication error: {e}") from e
         except RateLimitError as e:
-            raise RetryableError(f"Anthropic rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
+            raise FatalError(f"Anthropic rate limit/quota exhausted: {e}") from e
         except APIConnectionError as e:
             raise RetryableError(f"Anthropic connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"Anthropic timeout error: {e}") from e
         except InternalServerError as e:
             raise RetryableError(f"Anthropic internal server error: {e}") from e
-        except APIError as e:  # General API errors; 5xx/429 (incl. 529 overload) are transient
+        except APIError as e:  # General API errors; 5xx (incl. 529 overload) are transient, 429 is quota
             _code = getattr(e, 'status_code', None)
             if _code in _RETRYABLE_CODES:
                 raise RetryableError(f"Anthropic transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
@@ -376,14 +376,14 @@ class AnthropicProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"Anthropic authentication error: {e}") from e
         except RateLimitError as e:
-            raise RetryableError(f"Anthropic rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
+            raise FatalError(f"Anthropic rate limit/quota exhausted: {e}") from e
         except APIConnectionError as e:
             raise RetryableError(f"Anthropic connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"Anthropic timeout error: {e}") from e
         except InternalServerError as e:
             raise RetryableError(f"Anthropic internal server error: {e}") from e
-        except APIError as e:  # General API errors; 5xx/429 (incl. 529 overload) are transient
+        except APIError as e:  # General API errors; 5xx (incl. 529 overload) are transient, 429 is quota
             _code = getattr(e, 'status_code', None)
             if _code in _RETRYABLE_CODES:
                 raise RetryableError(f"Anthropic transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e

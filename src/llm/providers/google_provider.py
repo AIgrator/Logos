@@ -6,10 +6,10 @@ from google import genai
 from google.genai import types as genai_types
 
 from collections.abc import Mapping, Sequence
-from src.llm.base_provider import BaseLLMProvider
-from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from ..base_provider import BaseLLMProvider
+from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
 from google.api_core import exceptions as google_exceptions
-from src.llm.llm_parsing import repair_json_string
+from ..llm_parsing import repair_json_string
 
 class GoogleProvider(BaseLLMProvider):
     """
@@ -160,7 +160,7 @@ class GoogleProvider(BaseLLMProvider):
         except google_exceptions.PermissionDenied as e:
             raise FatalError(f"Google API Permission Denied (Google Search): {e}") from e
         except google_exceptions.ResourceExhausted as e:
-            raise RetryableError(f"Google API rate limit/quota exhausted (Google Search, retryable): {e}", retry_after=extract_retry_after(message=str(e))) from e
+            raise FatalError(f"Google API Resource Exhausted (Quota for Google Search): {e}") from e
         except google_exceptions.InternalServerError as e:
             raise RetryableError(f"Google API Internal Server Error (Google Search): {e}") from e
         except google_exceptions.ServiceUnavailable as e:
@@ -322,7 +322,7 @@ class GoogleProvider(BaseLLMProvider):
         except google_exceptions.PermissionDenied as e:
             raise FatalError(f"Google API Permission Denied: {e}") from e
         except google_exceptions.ResourceExhausted as e:
-            raise RetryableError(f"Google API rate limit/quota exhausted (retryable): {e}", retry_after=extract_retry_after(message=str(e))) from e
+            raise FatalError(f"Google API Resource Exhausted (Quota): {e}") from e
         except google_exceptions.InternalServerError as e:
             raise RetryableError(f"Google API Internal Server Error: {e}") from e
         except google_exceptions.ServiceUnavailable as e:
@@ -429,7 +429,7 @@ class GoogleProvider(BaseLLMProvider):
         except google_exceptions.PermissionDenied as e:
             raise FatalError(f"Google API Permission Denied: {e}") from e
         except google_exceptions.ResourceExhausted as e:
-            raise RetryableError(f"Google API rate limit/quota exhausted (retryable): {e}", retry_after=extract_retry_after(message=str(e))) from e
+            raise FatalError(f"Google API Resource Exhausted (Quota): {e}") from e
         except google_exceptions.InternalServerError as e:
             raise RetryableError(f"Google API Internal Server Error: {e}") from e
         except google_exceptions.ServiceUnavailable as e:

@@ -5,8 +5,8 @@ import copy
 from datetime import datetime
 
 from .llm_parsing import repair_json_string, validate_object, universal_fallback_parser
-from .exceptions import FatalError, RetryableError
-from .error_formatter import format_llm_error
+from .exceptions import FatalError, RetryableError, MAX_AUTO_WAIT_SECONDS, extract_retry_after, format_wait, is_quota_error
+from .error_formatter import format_llm_error, format_quota_wall
 from time import perf_counter
 from llm import import_real_provider_classes
 
@@ -158,6 +158,58 @@ class LLMWorker(QObject):
         except Exception as e:
             logging.error(f"Error calling cancel_stream for provider '{provider_id}': {e}", exc_info=True)
 
+    def _log_llm_error(self, llm_logger, raw_llm_logger, *, error, attempt,
+                       max_retries, mode, schema_name, retry_after=None, reaction=""):
+        """Writes every failed LLM response to both log files.
+
+        Successes are already logged as RESPONSE entries; without this,
+        429/503/fatal errors are only visible in the console log and cannot
+        be analyzed afterwards. `attempt` is 1-based; pass attempt=0 when
+        no attempt was made (e.g. provider not configured).
+        """
+        try:
+            provider = self.provider.get_provider_id() if self.provider else "none"
+        except Exception:
+            provider = "unknown"
+        try:
+            model = self.provider.model if self.provider else "none"
+        except Exception:
+            model = "unknown"
+        error_type = type(error).__name__
+        message = str(error)
+        comm_payload = {
+            "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            "direction": "ERROR",
+            "provider": provider,
+            "model": model,
+            "mode": mode,
+            "expected_schema": schema_name,
+            "attempt": f"{attempt}/{max_retries}",
+            "error_type": error_type,
+            "error_message": message,
+            "retry_after": retry_after,
+            "reaction": reaction,
+        }
+        raw_payload = {
+            "type": "error",
+            "timestamp": comm_payload["timestamp"],
+            "provider": provider,
+            "model": model,
+            "attempt": comm_payload["attempt"],
+            "error_type": error_type,
+            "message": message,
+            "retry_after": retry_after,
+            "reaction": reaction,
+        }
+        try:
+            llm_logger.info(json.dumps(comm_payload, ensure_ascii=False, indent=2))
+        except Exception:
+            pass
+        try:
+            raw_llm_logger.info(json.dumps(raw_payload, ensure_ascii=False, indent=2))
+        except Exception:
+            pass
+
     @Slot(str, str)
     def log_tool_response(self, tool_name, response_text):
         """Logs the response from a tool execution, like web_search."""
@@ -190,6 +242,16 @@ class LLMWorker(QObject):
         if not self.provider:
             error_message = "LLM provider is not configured. Please check your settings."
             logging.error(error_message)
+            self._log_llm_error(
+                logging.getLogger('llm_communication'),
+                logging.getLogger('llm_raw_response'),
+                error=RuntimeError(error_message),
+                attempt=0,
+                max_retries=self.settings.get("max_retries", 3),
+                mode='Structured' if schema_name else 'Streaming',
+                schema_name=schema_name,
+                reaction="abort: no provider configured",
+            )
             self.error_occurred.emit(error_message)
             return
 
@@ -260,11 +322,25 @@ class LLMWorker(QObject):
                             object_to_validate = repaired_object
                         else:
                             logging.error("Failed to repair raw text into a JSON object.")
+                            self._log_llm_error(
+                                llm_logger, raw_llm_logger,
+                                error=RuntimeError("Failed to repair raw text into a JSON object; raw model text is in the preceding entries."),
+                                attempt=attempt + 1, max_retries=max_retries,
+                                mode='Structured', schema_name=schema_name,
+                                reaction="plain-text fallback passed to handler",
+                            )
                             self.plain_text_response_received.emit(raw_text_for_fallback)
                             return
 
                     if not object_to_validate:
                         logging.error("No valid object to process after attempting all fallbacks.")
+                        self._log_llm_error(
+                            llm_logger, raw_llm_logger,
+                            error=RuntimeError("No valid object to process after attempting all fallbacks; raw model output is in the preceding entries."),
+                            attempt=attempt + 1, max_retries=max_retries,
+                            mode='Structured', schema_name=schema_name,
+                            reaction="plain-text fallback passed to handler",
+                        )
                         self.plain_text_response_received.emit(raw_text_for_fallback)
                         return
 
@@ -325,6 +401,13 @@ class LLMWorker(QObject):
                         if validation_error:
                             error_msg = f"Self-correction failed. The LLM did not provide a valid object on the second attempt for schema '{schema_name}'. Final error: {validation_error}"
                             logging.error(error_msg)
+                            self._log_llm_error(
+                                llm_logger, raw_llm_logger,
+                                error=RuntimeError(error_msg),
+                                attempt=attempt + 1, max_retries=max_retries,
+                                mode='Structured', schema_name=schema_name,
+                                reaction="abort: self-correction failed, error card shown",
+                            )
                             self.error_occurred.emit(error_msg)
                             return
 
@@ -437,6 +520,14 @@ class LLMWorker(QObject):
                 logging.error(error_message, exc_info=True)
 
                 if self.is_cancelled:
+                    self._log_llm_error(
+                        llm_logger, raw_llm_logger, error=e,
+                        attempt=attempt + 1, max_retries=max_retries,
+                        mode='Structured' if schema_name else 'Streaming',
+                        schema_name=schema_name,
+                        retry_after=getattr(e, "retry_after", None),
+                        reaction="cancelled by user during backoff",
+                    )
                     return
 
                 if attempt < max_retries - 1:
@@ -447,8 +538,69 @@ class LLMWorker(QObject):
                         suggested = float(suggested) if suggested else 0
                     except (TypeError, ValueError):
                         suggested = 0
-                    wait_seconds = min(max(retry_delay_seconds, suggested), 120.0)
+                    if is_quota_error(str(e)):
+                        # Quota/limits (original rule: 429 = money, not transient):
+                        # never auto-retry; honest card instead. A huge
+                        # server-stated wait gets the quota-wall card.
+                        if suggested > MAX_AUTO_WAIT_SECONDS:
+                            wall_human = format_wait(suggested)
+                            logging.error(
+                                f"Quota exhausted, server asks to wait ~{wall_human}; "
+                                f"not retrying. Error: {e}"
+                            )
+                            self._log_llm_error(
+                                llm_logger, raw_llm_logger, error=e,
+                                attempt=attempt + 1, max_retries=max_retries,
+                                mode='Structured' if schema_name else 'Streaming',
+                                schema_name=schema_name,
+                                retry_after=getattr(e, "retry_after", None),
+                                reaction=f"abort: quota exhausted, server asks to wait ~{wall_human}",
+                            )
+                            if not self.is_cancelled:
+                                self.error_occurred.emit(format_quota_wall(provider_name, e, suggested))
+                            break
+                        logging.error(f"Quota/limits error, not retrying: {e}")
+                        self._log_llm_error(
+                            llm_logger, raw_llm_logger, error=e,
+                            attempt=attempt + 1, max_retries=max_retries,
+                            mode='Structured' if schema_name else 'Streaming',
+                            schema_name=schema_name,
+                            retry_after=getattr(e, "retry_after", None),
+                            reaction="abort: quota/limits error, quota card shown",
+                        )
+                        if not self.is_cancelled:
+                            self.error_occurred.emit(format_llm_error(provider_name, e))
+                        break
+                    if suggested > MAX_AUTO_WAIT_SECONDS:
+                        # Quota wall (e.g. daily free-tier limit with a
+                        # retryDelay of hours): auto-retrying is pointless,
+                        # show an honest card instead of futile retries.
+                        wall_human = format_wait(suggested)
+                        logging.error(
+                            f"Quota wall: server asks to wait ~{wall_human}, "
+                            f"aborting auto-retry. Error: {e}"
+                        )
+                        self._log_llm_error(
+                            llm_logger, raw_llm_logger, error=e,
+                            attempt=attempt + 1, max_retries=max_retries,
+                            mode='Structured' if schema_name else 'Streaming',
+                            schema_name=schema_name,
+                            retry_after=getattr(e, "retry_after", None),
+                            reaction=f"abort: quota wall, server asks to wait ~{wall_human}",
+                        )
+                        if not self.is_cancelled:
+                            self.error_occurred.emit(format_quota_wall(provider_name, e, suggested))
+                        break
+                    wait_seconds = min(max(retry_delay_seconds, suggested), MAX_AUTO_WAIT_SECONDS)
                     logging.info(f"Attempt {attempt + 1} of {max_retries} failed. Retrying in {wait_seconds} seconds...")
+                    self._log_llm_error(
+                        llm_logger, raw_llm_logger, error=e,
+                        attempt=attempt + 1, max_retries=max_retries,
+                        mode='Structured' if schema_name else 'Streaming',
+                        schema_name=schema_name,
+                        retry_after=getattr(e, "retry_after", None),
+                        reaction=f"automatic retry in {wait_seconds}s",
+                    )
                     self.retry_attempt.emit(attempt + 1, max_retries, str(e), wait_seconds)
                     import time
                     remaining = wait_seconds
@@ -459,6 +611,14 @@ class LLMWorker(QObject):
                     retry_delay_seconds *= 2  # Exponential backoff
                 else:
                     logging.error(f"All {max_retries} retry attempts failed for a retryable error.")
+                    self._log_llm_error(
+                        llm_logger, raw_llm_logger, error=e,
+                        attempt=attempt + 1, max_retries=max_retries,
+                        mode='Structured' if schema_name else 'Streaming',
+                        schema_name=schema_name,
+                        retry_after=getattr(e, "retry_after", None),
+                        reaction="abort: all retries failed, error card shown",
+                    )
                     formatted_error = format_llm_error(provider_name, e)
                     if not self.is_cancelled:
                         self.error_occurred.emit(formatted_error)
@@ -468,6 +628,31 @@ class LLMWorker(QObject):
                 error_message = f"A fatal error occurred in LLMWorker: {e}"
                 logging.error(error_message, exc_info=True)
 
+                fatal_wait = extract_retry_after(message=str(e))
+                if fatal_wait and fatal_wait > MAX_AUTO_WAIT_SECONDS:
+                    # Quota wall surfaced as Fatal (e.g. 429 with retryDelay
+                    # of hours): show the wait instead of a bare quota card.
+                    wall_human = format_wait(fatal_wait)
+                    logging.error(f"Quota wall: server asks to wait ~{wall_human}.")
+                    self._log_llm_error(
+                        llm_logger, raw_llm_logger, error=e,
+                        attempt=attempt + 1, max_retries=max_retries,
+                        mode='Structured' if schema_name else 'Streaming',
+                        schema_name=schema_name,
+                        retry_after=fatal_wait,
+                        reaction=f"abort: quota wall, server asks to wait ~{wall_human}",
+                    )
+                    if not self.is_cancelled:
+                        self.error_occurred.emit(format_quota_wall(provider_name, e, fatal_wait))
+                    break
+
+                self._log_llm_error(
+                    llm_logger, raw_llm_logger, error=e,
+                    attempt=attempt + 1, max_retries=max_retries,
+                    mode='Structured' if schema_name else 'Streaming',
+                    schema_name=schema_name,
+                    reaction="abort: fatal error, error card shown",
+                )
                 if not self.is_cancelled:
                     formatted_error = format_llm_error(provider_name, e)
                     self.error_occurred.emit(formatted_error)
@@ -479,6 +664,32 @@ class LLMWorker(QObject):
                 error_message = f"An unexpected generic error occurred in LLMWorker: {e}"
                 logging.error(error_message, exc_info=True)
 
+                wall_wait = extract_retry_after(message=str(e))
+                if wall_wait and wall_wait > MAX_AUTO_WAIT_SECONDS:
+                    wall_human = format_wait(wall_wait)
+                    logging.error(
+                        f"Quota wall in generic handler: server asks to wait ~{wall_human}."
+                    )
+                    self._log_llm_error(
+                        llm_logger, raw_llm_logger, error=e,
+                        attempt=attempt + 1, max_retries=max_retries,
+                        mode='Structured' if schema_name else 'Streaming',
+                        schema_name=schema_name,
+                        retry_after=wall_wait,
+                        reaction=f"abort: quota wall, server asks to wait ~{wall_human}",
+                    )
+                    if not self.is_cancelled:
+                        self.error_occurred.emit(format_quota_wall(provider_name, e, wall_wait))
+                    break
+
+                self._log_llm_error(
+                    llm_logger, raw_llm_logger, error=e,
+                    attempt=attempt + 1, max_retries=max_retries,
+                    mode='Structured' if schema_name else 'Streaming',
+                    schema_name=schema_name,
+                    retry_after=getattr(e, "retry_after", None),
+                    reaction="abort: unexpected error, error card shown",
+                )
                 if not self.is_cancelled:
                     formatted_error = format_llm_error(provider_name, e)
                     self.error_occurred.emit(formatted_error)

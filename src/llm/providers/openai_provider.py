@@ -8,10 +8,10 @@ import pathlib
 import io
 from PIL import Image
 from openai import OpenAI, APIError, AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError
-from src.llm.base_provider import BaseLLMProvider
-from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
-from src.llm.exceptions import RETRYABLE_STATUS_CODES as _RETRYABLE_CODES
-from src.llm.llm_parsing import repair_json_string
+from ..base_provider import BaseLLMProvider
+from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from ..exceptions import RETRYABLE_STATUS_CODES as _RETRYABLE_CODES
+from ..llm_parsing import repair_json_string
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +113,12 @@ class OpenAIProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"OpenAI authentication error during web search: {e}") from e
         except RateLimitError as e:
-            raise RetryableError(f"OpenAI rate limit error during web search (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
+            raise FatalError(f"OpenAI rate limit/quota exhausted during web search: {e}") from e
         except APIConnectionError as e:
             raise RetryableError(f"OpenAI connection error during web search: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"OpenAI timeout error during web search: {e}") from e
-        except APIError as e:  # General API errors; 5xx/429 are transient
+        except APIError as e:  # General API errors; 5xx are transient, 429 is quota
             _code = getattr(e, 'status_code', None)
             if _code in _RETRYABLE_CODES:
                 raise RetryableError(f"OpenAI transient API error ({_code}) during web search: {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
@@ -340,12 +340,12 @@ class OpenAIProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"OpenAI authentication error: {e}") from e
         except RateLimitError as e:
-            raise RetryableError(f"OpenAI rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
+            raise FatalError(f"OpenAI rate limit/quota exhausted: {e}") from e
         except APIConnectionError as e:
             raise RetryableError(f"OpenAI connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"OpenAI timeout error: {e}") from e
-        except APIError as e:  # General API errors (e.g., 400, 404, etc.); 5xx/429 are transient
+        except APIError as e:  # General API errors (e.g., 400, 404, etc.); 5xx are transient, 429 is quota
             _code = getattr(e, 'status_code', None)
             if _code in _RETRYABLE_CODES:
                 raise RetryableError(f"OpenAI transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
@@ -430,12 +430,12 @@ class OpenAIProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"OpenAI authentication error: {e}") from e
         except RateLimitError as e:
-            raise RetryableError(f"OpenAI rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
+            raise FatalError(f"OpenAI rate limit/quota exhausted: {e}") from e
         except APIConnectionError as e:
             raise RetryableError(f"OpenAI connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"OpenAI timeout error: {e}") from e
-        except APIError as e:  # General API errors (e.g., 400, 404, etc.); 5xx/429 are transient
+        except APIError as e:  # General API errors (e.g., 400, 404, etc.); 5xx are transient, 429 is quota
             _code = getattr(e, 'status_code', None)
             if _code in _RETRYABLE_CODES:
                 raise RetryableError(f"OpenAI transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e

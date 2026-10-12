@@ -104,6 +104,7 @@ ignore = [
 "setup_ubuntu.sh" = ["E"] # Ignore all pycodestyle errors for shell script
 "setup_windows.ps1" = ["E"] # Ignore all pycodestyle errors for shell script
 "tests/*" = ["E", "F", "W", "I", "N", "UP", "B", "C4", "TID", "ISC"] # Ignore all Ruff errors in the tests directory
+"src/llm/providers/*" = ["TID252"] # Relative imports keep a single module identity for exceptions (llm.* vs src.llm.* duality breaks `except RetryableError` in llm_worker)
 
 [tool.ruff.lint.isort]
 known-first-party = ["src"]

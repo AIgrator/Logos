@@ -1,8 +1,28 @@
 import re
 import html
-from .exceptions import RetryableError
+from .exceptions import RetryableError, format_wait
 
 RETRY_LINK = "<br><a href=\"retry:last\">↻ Retry request</a>"
+
+
+def format_quota_wall(provider_name: str, error: Exception, wait_seconds: float) -> str:
+    """Honest card for 'quota exhausted for a long time'.
+
+    Used when the server demands a wait far beyond what auto-retry can
+    honor (e.g. RetryInfo retryDelay of hours on a free-tier 429), so
+    hammering Retry is pointless. No Retry link on purpose: re-send the
+    request manually once quota is restored (or another provider is set).
+    """
+    provider_display_name = provider_name.replace('-', ' ').replace('_', ' ').title()
+    wait_human = format_wait(wait_seconds)
+    excerpt = re.sub(r"\s+", " ", str(error)).strip()
+    if len(excerpt) > 300:
+        excerpt = excerpt[:300] + "..."
+    return (f"<b>{provider_display_name}: quota exhausted for ~{wait_human}:</b><br>"
+            f"The server asks to wait about {wait_human} (daily/longer-term limit, "
+            f"not a momentary overload) — retrying right now is pointless. "
+            f"Switch provider/model, check billing, or wait."
+            f"<br><i>Server says: {html.escape(excerpt)}</i>")
 
 def format_llm_error(provider_name: str, error: Exception) -> str:
     """
@@ -25,12 +45,26 @@ def format_llm_error(provider_name: str, error: Exception) -> str:
         return (f"<b>Authentication Error with {provider_display_name}:</b><br>"
                 f"The API key is incorrect or invalid. Please verify your key in the settings.")
 
+    # Quota or Billing Issues (money/account side: 429 = limits, retrying will NOT help).
+    # Checked BEFORE overload: original design rule, restored. No Retry link
+    # on purpose — re-send manually once quota is restored.
+    quota_patterns = [
+        r'quota', r'insufficient_quota', r'quota_failure',
+        r'resource_exhausted', r'resource exhausted',
+        r'rate limit', r'429',
+        r'billing', r'402', r'out of credits', r'payment',
+        r'exceeded your current quota',
+    ]
+    if any(re.search(p, error_str) for p in quota_patterns):
+        return (f"<b>Quota Error with {provider_display_name}:</b><br>"
+                f"You may have exceeded your usage limit or there's a billing issue. "
+                f"Please check your account on the {provider_display_name} website.")
+
     # Temporary overload (provider is busy, NOT a billing problem).
-    # Checked BEFORE quota patterns: 429/503/overload mean "try again later".
     overload_patterns = [
         r'503', r'529', r'unavailable', r'overloaded', r'overload',
-        r'high demand', r'try again', r'resource_exhausted',
-        r'server error', r'service unavailable', r'rate limit', r'429',
+        r'high demand', r'try again',
+        r'server error', r'service unavailable',
     ]
     if (any(re.search(p, error_str) for p in overload_patterns)
             or isinstance(error, RetryableError)):
@@ -44,19 +78,9 @@ def format_llm_error(provider_name: str, error: Exception) -> str:
                     f"Please check your internet connection if the issue persists."
                     f"{RETRY_LINK}")
         return (f"<b>{provider_display_name} is temporarily overloaded:</b><br>"
-                f"The provider is rate-limiting or busy right now — this is not a billing issue. "
+                f"The provider is busy right now — this is not a billing issue. "
                 f"Wait a minute and try again (the app already retried automatically)."
                 f"{RETRY_LINK}")
-
-    # Quota or Billing Issues (money/account side, retrying will NOT help)
-    quota_patterns = [
-        r'insufficient_quota', r'billing', r'402',
-        r'quota_exceeded', r'out of credits', r'payment',
-    ]
-    if any(re.search(p, error_str) for p in quota_patterns):
-        return (f"<b>Quota Error with {provider_display_name}:</b><br>"
-                f"You may have exceeded your usage limit or there's a billing issue. "
-                f"Please check your account on the {provider_display_name} website.")
 
     # Bad Request / Invalid Model
     model_patterns = [
