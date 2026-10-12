@@ -9,7 +9,8 @@ import io
 from PIL import Image
 from openai import OpenAI, APIError, AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError
 from src.llm.base_provider import BaseLLMProvider
-from src.llm.exceptions import FatalError, RetryableError
+from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from src.llm.exceptions import RETRYABLE_STATUS_CODES as _RETRYABLE_CODES
 from src.llm.llm_parsing import repair_json_string
 
 logger = logging.getLogger(__name__)
@@ -112,15 +113,20 @@ class OpenAIProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"OpenAI authentication error during web search: {e}") from e
         except RateLimitError as e:
-            raise FatalError(f"OpenAI rate limit error during web search: {e}") from e
+            raise RetryableError(f"OpenAI rate limit error during web search (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
         except APIConnectionError as e:
             raise RetryableError(f"OpenAI connection error during web search: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"OpenAI timeout error during web search: {e}") from e
-        except APIError as e:
+        except APIError as e:  # General API errors; 5xx/429 are transient
+            _code = getattr(e, 'status_code', None)
+            if _code in _RETRYABLE_CODES:
+                raise RetryableError(f"OpenAI transient API error ({_code}) during web search: {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
             raise FatalError(f"OpenAI API error during web search: {e}") from e
         except Exception as e:
             logging.error(f"An unexpected error occurred in OpenAI provider (web_search): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"OpenAI transient error (web_search): {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in OpenAI provider (web_search): {e}") from e
 
     def _get_tools_from_cache(self):
@@ -334,15 +340,20 @@ class OpenAIProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"OpenAI authentication error: {e}") from e
         except RateLimitError as e:
-            raise FatalError(f"OpenAI rate limit error: {e}") from e
+            raise RetryableError(f"OpenAI rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
         except APIConnectionError as e:
             raise RetryableError(f"OpenAI connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"OpenAI timeout error: {e}") from e
-        except APIError as e: # General API errors (e.g., 400, 404, etc.)
+        except APIError as e:  # General API errors (e.g., 400, 404, etc.); 5xx/429 are transient
+            _code = getattr(e, 'status_code', None)
+            if _code in _RETRYABLE_CODES:
+                raise RetryableError(f"OpenAI transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
             raise FatalError(f"OpenAI API error: {e}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred in OpenAI provider (get_response): {e}", exc_info=True)
+            logging.error(f"An unexpected error occurred in OpenAI provider (get_response): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"OpenAI transient error (get_response): {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in OpenAI provider: {e}") from e
 
     def cancel_stream(self, generation_id: str = None):
@@ -419,18 +430,23 @@ class OpenAIProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"OpenAI authentication error: {e}") from e
         except RateLimitError as e:
-            raise FatalError(f"OpenAI rate limit error: {e}") from e
+            raise RetryableError(f"OpenAI rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
         except APIConnectionError as e:
             raise RetryableError(f"OpenAI connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"OpenAI timeout error: {e}") from e
-        except APIError as e: # General API errors (e.g., 400, 404, etc.)
+        except APIError as e:  # General API errors (e.g., 400, 404, etc.); 5xx/429 are transient
+            _code = getattr(e, 'status_code', None)
+            if _code in _RETRYABLE_CODES:
+                raise RetryableError(f"OpenAI transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
             raise FatalError(f"OpenAI API error: {e}") from e
         except Exception as e:
             if self.is_cancelling:
                 logger.info("Stream gracefully cancelled by user request (exception suppressed).")
             else:
-                logger.error(f"An unexpected error occurred in OpenAI provider that will be re-raised: {e}", exc_info=True)
+                logging.error(f"An unexpected error occurred in OpenAI provider that will be re-raised: {e}", exc_info=True)
+                if is_transient_error(e):
+                    raise RetryableError(f"OpenAI transient error: {e}", retry_after=extract_retry_after(message=str(e))) from e
                 raise FatalError(f"An unexpected error in OpenAI provider: {e}") from e
         finally:
             logger.info("OpenAI stream finished or cancelled. Clearing stream reference.")

@@ -143,5 +143,10 @@
     "max_correction_attempts": 3,
     "allow_shell_commands": true,
     "grounding_backend": "local"
+  },
+  "browser": {
+    "headless": false,
+    "profile_dir": "cache/browser_profile",
+    "default_timeout_ms": 30000
   }
 }

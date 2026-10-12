@@ -7,7 +7,8 @@ import mimetypes
 import pathlib
 from typing import Any
 from PIL import Image
-from src.llm.exceptions import FatalError, RetryableError
+from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from src.llm.exceptions import RETRYABLE_STATUS_CODES as _RETRYABLE_CODES
 from anthropic import Anthropic, APIError, AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError, InternalServerError
 from src.llm.base_provider import BaseLLMProvider
 logging.getLogger('anthropic._base_client').setLevel(logging.INFO)
@@ -232,17 +233,22 @@ class AnthropicProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"Anthropic authentication error: {e}") from e
         except RateLimitError as e:
-            raise FatalError(f"Anthropic rate limit error: {e}") from e
+            raise RetryableError(f"Anthropic rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
         except APIConnectionError as e:
             raise RetryableError(f"Anthropic connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"Anthropic timeout error: {e}") from e
         except InternalServerError as e:
             raise RetryableError(f"Anthropic internal server error: {e}") from e
-        except APIError as e:  # General API errors (e.g., 400)
+        except APIError as e:  # General API errors; 5xx/429 (incl. 529 overload) are transient
+            _code = getattr(e, 'status_code', None)
+            if _code in _RETRYABLE_CODES:
+                raise RetryableError(f"Anthropic transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
             raise FatalError(f"Anthropic API error: {e}") from e
         except Exception as e:
             logger.error(f"An unexpected error occurred in Anthropic provider (get_response): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"Anthropic transient error (get_response): {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in Anthropic provider: {e}") from e
 
     def cancel_stream(self, generation_id: str = None):
@@ -370,20 +376,25 @@ class AnthropicProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"Anthropic authentication error: {e}") from e
         except RateLimitError as e:
-            raise FatalError(f"Anthropic rate limit error: {e}") from e
+            raise RetryableError(f"Anthropic rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
         except APIConnectionError as e:
             raise RetryableError(f"Anthropic connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"Anthropic timeout error: {e}") from e
         except InternalServerError as e:
             raise RetryableError(f"Anthropic internal server error: {e}") from e
-        except APIError as e:  # General API errors (e.g., 400)
+        except APIError as e:  # General API errors; 5xx/429 (incl. 529 overload) are transient
+            _code = getattr(e, 'status_code', None)
+            if _code in _RETRYABLE_CODES:
+                raise RetryableError(f"Anthropic transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
             raise FatalError(f"Anthropic API error: {e}") from e
         except Exception as e:
             if self.is_cancelling:
                 logger.info("Stream gracefully cancelled by user request (exception suppressed).")
             else:
                 logger.error(f"An unexpected error occurred in Anthropic provider that will be re-raised: {e}", exc_info=True)
+                if is_transient_error(e):
+                    raise RetryableError(f"Anthropic transient error: {e}", retry_after=extract_retry_after(message=str(e))) from e
                 raise FatalError(f"An unexpected error in Anthropic provider: {e}") from e
         finally:
             logger.info("Anthropic stream finished or cancelled. Clearing stream reference.")

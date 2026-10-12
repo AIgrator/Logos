@@ -8,7 +8,7 @@ import io
 import requests
 from PIL import Image
 from src.llm.base_provider import BaseLLMProvider
-from src.llm.exceptions import FatalError, RetryableError
+from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
 
 class OpenRouterProvider(BaseLLMProvider):
     """
@@ -104,6 +104,8 @@ class OpenRouterProvider(BaseLLMProvider):
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code
             error_message = f"OpenRouter HTTP error ({status_code}) during web search: {e.response.text}"
+            if status_code == 429:
+                raise RetryableError(error_message, retry_after=extract_retry_after(response=e.response, message=error_message)) from e
             if 400 <= status_code < 500:
                 raise FatalError(error_message) from e
             else: # Treat 5xx and other errors as potentially retryable
@@ -112,6 +114,8 @@ class OpenRouterProvider(BaseLLMProvider):
             raise RetryableError(f"OpenRouter network error during web search: {e}") from e
         except Exception as e:
             logging.error(f"An unexpected error occurred in OpenRouter provider (web_search): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"OpenRouter transient error (web_search): {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in OpenRouter provider (web_search): {e}") from e
 
     def _get_tools_from_cache(self):
@@ -312,6 +316,8 @@ class OpenRouterProvider(BaseLLMProvider):
 
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code
+            if status_code == 429:
+                raise RetryableError(f"OpenRouter rate limit ({status_code}): {e.response.text}", retry_after=extract_retry_after(response=e.response, message=e.response.text)) from e
             if 400 <= status_code < 500:
                 raise FatalError(f"OpenRouter client error ({status_code}): {e.response.text}") from e
             elif 500 <= status_code < 600:
@@ -322,6 +328,8 @@ class OpenRouterProvider(BaseLLMProvider):
             raise RetryableError(f"OpenRouter network error: {e}") from e
         except Exception as e:
             logging.error(f"An unexpected error occurred in OpenRouter provider (get_response): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"OpenRouter transient error (get_response): {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in OpenRouter provider: {e}") from e
 
     def stream_response(self, prompt: str, attachments: list = None, system_prompt: str = None, history: list = None, callbacks=None):
@@ -382,6 +390,8 @@ class OpenRouterProvider(BaseLLMProvider):
 
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code
+            if status_code == 429:
+                raise RetryableError(f"OpenRouter rate limit ({status_code}): {e}", retry_after=extract_retry_after(response=e.response, message=str(e))) from e
             if 400 <= status_code < 500:
                 raise FatalError(f"OpenRouter client error ({status_code}): {e}") from e
             elif 500 <= status_code < 600:
@@ -393,6 +403,8 @@ class OpenRouterProvider(BaseLLMProvider):
             raise RetryableError(f"OpenRouter network error: {e}") from e
         except Exception as e:
             logging.error(f"An unexpected error occurred in OpenRouter provider that will be re-raised: {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"OpenRouter transient error: {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in OpenRouter provider: {e}") from e
         finally:
             logging.info(f"Stream finished. Resetting generation ID from {self.current_generation_id}")

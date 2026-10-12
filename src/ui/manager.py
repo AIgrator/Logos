@@ -246,6 +246,7 @@ class UIManager(QWidget):
     terminal_mode_selected = Signal()
     vision_mode_selected = Signal()
     browser_mode_selected = Signal()
+    retry_requested = Signal()
     attachment_removed = Signal(int)
     cancel_requested = Signal()
     toggle_fullscreen_button_clicked = Signal()
@@ -299,6 +300,7 @@ class UIManager(QWidget):
         self.layout.addWidget(self.custom_title_bar)
 
         self.chat_widget = ChatWidget(self.controller.theme_manager)
+        self.chat_widget.retry_requested.connect(self.retry_requested.emit)
         self.layout.addWidget(self.chat_widget, 1)
 
         self.attachment_scroll_area = NonScrollableScrollArea()
@@ -1034,6 +1036,15 @@ class UIManager(QWidget):
 
     def update_timer(self, seconds: int):
         self.chat_widget.update_timer(seconds)
+
+    def show_retry_countdown(self, attempt_num: int, max_attempts: int, wait_seconds: float):
+        self.chat_widget.show_retry_countdown(attempt_num, max_attempts, wait_seconds)
+
+    def update_retry_countdown(self, remaining: float):
+        self.chat_widget.update_retry_countdown(remaining)
+
+    def stop_retry_countdown(self):
+        self.chat_widget.stop_retry_countdown()
 
     def set_approve_button_visible(self, visible):
         self.approve_plan_button.setVisible(visible)

@@ -7,7 +7,7 @@ from google.genai import types as genai_types
 
 from collections.abc import Mapping, Sequence
 from src.llm.base_provider import BaseLLMProvider
-from src.llm.exceptions import FatalError, RetryableError
+from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
 from google.api_core import exceptions as google_exceptions
 from src.llm.llm_parsing import repair_json_string
 
@@ -160,13 +160,15 @@ class GoogleProvider(BaseLLMProvider):
         except google_exceptions.PermissionDenied as e:
             raise FatalError(f"Google API Permission Denied (Google Search): {e}") from e
         except google_exceptions.ResourceExhausted as e:
-            raise FatalError(f"Google API Resource Exhausted (Quota for Google Search): {e}") from e
+            raise RetryableError(f"Google API rate limit/quota exhausted (Google Search, retryable): {e}", retry_after=extract_retry_after(message=str(e))) from e
         except google_exceptions.InternalServerError as e:
             raise RetryableError(f"Google API Internal Server Error (Google Search): {e}") from e
         except google_exceptions.ServiceUnavailable as e:
             raise RetryableError(f"Google API Service Unavailable (Google Search): {e}") from e
         except Exception as e:
             logging.error(f"An unexpected error occurred in Gemini provider (execute_google_search): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"Gemini provider transient error (execute_google_search): {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in Gemini provider (execute_google_search): {e}") from e
 
     def _prepare_contents(self, prompt, attachments=None, history=None):
@@ -320,13 +322,15 @@ class GoogleProvider(BaseLLMProvider):
         except google_exceptions.PermissionDenied as e:
             raise FatalError(f"Google API Permission Denied: {e}") from e
         except google_exceptions.ResourceExhausted as e:
-            raise FatalError(f"Google API Resource Exhausted (Quota): {e}") from e
+            raise RetryableError(f"Google API rate limit/quota exhausted (retryable): {e}", retry_after=extract_retry_after(message=str(e))) from e
         except google_exceptions.InternalServerError as e:
             raise RetryableError(f"Google API Internal Server Error: {e}") from e
         except google_exceptions.ServiceUnavailable as e:
             raise RetryableError(f"Google API Service Unavailable: {e}") from e
         except Exception as e:
             logging.error(f"An unexpected error occurred in Gemini provider (get_response): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"Gemini provider transient error (get_response): {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in Gemini provider (get_response): {e}") from e
 
     def stream_response(self, prompt: str, attachments: list = None, system_prompt: str = None, history: list = None, schema_name: str = None, callbacks=None):
@@ -425,13 +429,15 @@ class GoogleProvider(BaseLLMProvider):
         except google_exceptions.PermissionDenied as e:
             raise FatalError(f"Google API Permission Denied: {e}") from e
         except google_exceptions.ResourceExhausted as e:
-            raise FatalError(f"Google API Resource Exhausted (Quota): {e}") from e
+            raise RetryableError(f"Google API rate limit/quota exhausted (retryable): {e}", retry_after=extract_retry_after(message=str(e))) from e
         except google_exceptions.InternalServerError as e:
             raise RetryableError(f"Google API Internal Server Error: {e}") from e
         except google_exceptions.ServiceUnavailable as e:
             raise RetryableError(f"Google API Service Unavailable: {e}") from e
         except Exception as e:
             logging.error(f"An unexpected error occurred in Gemini provider that will be re-raised: {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"Gemini provider transient error: {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in Gemini provider: {e}") from e
 
     def cancel_stream(self, generation_id: str = None):

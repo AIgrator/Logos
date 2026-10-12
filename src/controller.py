@@ -99,6 +99,7 @@ class AppController(QObject):
         # Handlers
         comp_start = time.perf_counter()
         self.computer = Computer(self.settings_manager, mode="chat")
+        self._last_llm_request = None  # (user_prompt, attachments, system_prompt, history, schema) for Retry
         self.vision_handler = VisionHandler(self)
         self.terminal_handler = TerminalHandler(self, self.theme_manager, working_directory=self.working_directory)
         self.browser_handler = BrowserHandler(self, working_directory=self.working_directory)
@@ -136,6 +137,7 @@ class AppController(QObject):
         self.llm_worker.planning_response_received.connect(self._handle_plan_response)
         self.llm_worker.plain_text_response_received.connect(self._handle_plain_text_response)
         self.llm_worker.retry_attempt.connect(self._handle_retry_attempt)
+        self.llm_worker.retry_countdown.connect(self._handle_retry_countdown)
         self.llm_worker.error_occurred.connect(self.handle_llm_error)
         self.llm_request_sent.connect(self.llm_worker.execute_request)
 
@@ -165,6 +167,7 @@ class AppController(QObject):
         self.ui.terminal_mode_selected.connect(self._activate_terminal_mode)
         self.ui.vision_mode_selected.connect(self._activate_vision_mode)
         self.ui.browser_mode_selected.connect(self._activate_browser_mode)
+        self.ui.retry_requested.connect(self._handle_retry_request)
         self.ui.cancel_requested.connect(self.handle_cancel_request)
         self.ui.pause_resume_clicked.connect(self._handle_pause_resume)
         self.ui.pause_for_feedback_clicked.connect(self._handle_pause_for_feedback)
@@ -408,10 +411,20 @@ class AppController(QObject):
 
     def handle_user_input(self, user_text):
         if not self.llm_worker.provider:
-            self.ui.add_message(
-                "<i>To get started, please go to <b>Settings</b>, select an AI provider, and enter your API key.</i>",
-                force_scroll=True
-            )
+            active = (self.settings.get("active_provider") or "")
+            providers = self.settings.get("llm_providers", {}) or {}
+            has_key = bool((providers.get(active) or {}).get("api_key"))
+            if active and has_key:
+                # Configured, but the background thread has not finished yet.
+                self.ui.add_message(
+                    "<i>The AI provider is still initializing, please wait a few seconds and send again.</i>",
+                    force_scroll=True
+                )
+            else:
+                self.ui.add_message(
+                    "<i>To get started, please go to <b>Settings</b>, select an AI provider, and enter your API key.</i>",
+                    force_scroll=True
+                )
             return
 
         if not user_text and not self.pending_attachments:
@@ -483,6 +496,7 @@ class AppController(QObject):
             self.chat_handler.start_chat(user_text, attachments_for_handler)
 
     def handle_response_chunk(self, chunk):
+        self.ui.stop_retry_countdown()
         self.current_handler.handle_response_chunk(chunk)
 
     def _handle_chat_response(self, full_response):
@@ -534,10 +548,15 @@ class AppController(QObject):
         else:
             logging.info("Ignoring plain text response as we are not in vision mode.")
 
-    def _handle_retry_attempt(self, attempt_num, max_attempts, error):
+    def _handle_retry_attempt(self, attempt_num, max_attempts, error, wait_seconds):
         """Updates the UI to show that a retry is happening."""
         logging.info(f"Handling retry attempt {attempt_num}/{max_attempts} in UI.")
-        self.ui.show_thinking_ui(True, f"Network error, retrying ({attempt_num}/{max_attempts})...")
+        self.thinking_timer.stop()
+        self.ui.show_retry_countdown(attempt_num, max_attempts, wait_seconds)
+
+    def _handle_retry_countdown(self, remaining):
+        """Updates the visible countdown to the next automatic retry."""
+        self.ui.update_retry_countdown(remaining)
 
     def handle_llm_error(self, error_message):
         """
@@ -545,6 +564,7 @@ class AppController(QObject):
         Routes the error to the appropriate handler based on the current state.
         """
         self.thinking_timer.stop()
+        self.ui.stop_retry_countdown()
         self.ui.show_thinking_ui(False)
 
         if self.state == ControllerState.VISION:
@@ -553,18 +573,43 @@ class AppController(QObject):
         elif self.state == ControllerState.CHATTING:
             self.chat_handler.handle_fatal_error(error_message)
         else:
-            # Fallback for IDLE state or any other unexpected state
+            # Fallback for IDLE state or agent modes without a dedicated
+            # fatal-error path (TERMINAL/BROWSER). Show the error but keep
+            # the current mode state: dropping to IDLE would orphan the
+            # handler loop and break the Retry button (the retried response
+            # would arrive "in chat mode" and be ignored).
             self.ui.add_message(
                 f"<b>A critical error occurred:</b> {error_message}<br>"
                 "Please try your request again.",
                 force_scroll=True
             )
-            self._set_state(ControllerState.IDLE)
+            if self.state not in (ControllerState.TERMINAL, ControllerState.BROWSER, ControllerState.VISION):
+                self._set_state(ControllerState.IDLE)
+
+    def _send_llm_request(self, user_prompt, attachments, system_prompt, history, schema_name):
+        """Store the request for the Retry button, then emit it to the worker."""
+        self._last_llm_request = (user_prompt, attachments, system_prompt, history, schema_name)
+        self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name)
+
+    def _handle_retry_request(self):
+        """Re-send the last LLM request (Retry button on transient-error cards)."""
+        if not self._last_llm_request:
+            logging.warning("Retry requested but no previous LLM request is stored.")
+            return
+        if self.thinking_timer.isActive():
+            logging.info("Retry requested while a request is in flight; ignoring.")
+            return
+        logging.info("Retrying last LLM request on user demand.")
+        self.ui.add_message("<i>Retrying last request...</i>", force_scroll=True)
+        self.ui.show_thinking_ui(True, message="Retrying...")
+        user_prompt, attachments, system_prompt, history, schema_name = self._last_llm_request
+        self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name)
 
     def handle_cancel_request(self):
         if self.llm_worker:
             self.llm_worker.cancel()
         self.thinking_timer.stop()
+        self.ui.stop_retry_countdown()
         self.ui.show_thinking_ui(False)
         self.ui.add_message("<i>Request cancelled.</i>", force_scroll=True)
 

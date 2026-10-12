@@ -9,7 +9,8 @@ from PIL import Image
 
 from openai import OpenAI, APIError, AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError
 from src.llm.base_provider import BaseLLMProvider
-from src.llm.exceptions import FatalError, RetryableError
+from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from src.llm.exceptions import RETRYABLE_STATUS_CODES as _RETRYABLE_CODES
 
 logger = logging.getLogger(__name__)
 
@@ -136,6 +137,8 @@ class XAIProvider(BaseLLMProvider):
             # More specific error handling for HTTP errors
             error_details = e.response.text
             logging.error(f"XAI API error during web search: {e.response.status_code} - {error_details}")
+            if e.response.status_code in _RETRYABLE_CODES:
+                raise RetryableError(f"XAI transient error during web search ({e.response.status_code}): {error_details}", retry_after=extract_retry_after(response=e.response, message=error_details)) from e
             raise FatalError(f"XAI API error during web search: {e.response.status_code} - {error_details}") from e
         except httpx.RequestError as e:
             # For network-level errors
@@ -143,6 +146,8 @@ class XAIProvider(BaseLLMProvider):
             raise RetryableError(f"XAI connection error during web search: {e}") from e
         except Exception as e:
             logging.error(f"An unexpected error occurred in XAI provider (web_search): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"XAI transient error (web_search): {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in XAI provider (web_search): {e}") from e
 
     def _get_tools_from_cache(self):
@@ -266,15 +271,20 @@ class XAIProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"XAI authentication error: {e}") from e
         except RateLimitError as e:
-            raise FatalError(f"XAI rate limit error: {e}") from e
+            raise RetryableError(f"XAI rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
         except APIConnectionError as e:
             raise RetryableError(f"XAI connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"XAI timeout error: {e}") from e
-        except APIError as e: # General API errors (e.g., 400, 404, etc.)
+        except APIError as e:  # General API errors (e.g., 400, 404); 5xx/429 are transient
+            _code = getattr(e, 'status_code', None)
+            if _code in _RETRYABLE_CODES:
+                raise RetryableError(f"XAI transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
             raise FatalError(f"XAI API error: {e}") from e
         except Exception as e:
-            logger.error(f"An unexpected error occurred in XAI provider (get_response): {e}", exc_info=True)
+            logging.error(f"An unexpected error occurred in XAI provider (get_response): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"XAI transient error (get_response): {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in XAI provider: {e}") from e
 
     def cancel_stream(self, generation_id: str = None):
@@ -406,18 +416,23 @@ class XAIProvider(BaseLLMProvider):
         except AuthenticationError as e:
             raise FatalError(f"XAI authentication error: {e}") from e
         except RateLimitError as e:
-            raise FatalError(f"XAI rate limit error: {e}") from e
+            raise RetryableError(f"XAI rate limit error (retryable): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
         except APIConnectionError as e:
             raise RetryableError(f"XAI connection error: {e}") from e
         except APITimeoutError as e:
             raise RetryableError(f"XAI timeout error: {e}") from e
         except APIError as e:
+            _code = getattr(e, 'status_code', None)
+            if _code in _RETRYABLE_CODES:
+                raise RetryableError(f"XAI transient API error ({_code}): {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
             raise FatalError(f"XAI API error: {e}") from e
         except Exception as e:
             if self.is_cancelling:
                 logger.info("Stream gracefully cancelled by user request (exception suppressed).")
             else:
                 logger.error(f"An unexpected error occurred in XAI provider (stream_response): {e}", exc_info=True)
+                if is_transient_error(e):
+                    raise RetryableError(f"XAI transient error: {e}", retry_after=extract_retry_after(message=str(e))) from e
                 raise FatalError(f"An unexpected error in XAI provider: {e}") from e
         finally:
             logger.info("XAI stream finished or cancelled. Clearing stream reference.")

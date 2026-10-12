@@ -160,7 +160,7 @@ class TerminalHandler:
             self.stop()
             return
 
-        self.controller.llm_request_sent.emit(
+        self.controller._send_llm_request(
             user_prompt,
             [],  # No attachments in terminal mode
             system_prompt,

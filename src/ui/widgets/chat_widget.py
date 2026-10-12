@@ -3,7 +3,7 @@ import logging
 import sys
 import uuid
 
-from PySide6.QtCore import Qt, QPoint, QRect, QTime, QTimer
+from PySide6.QtCore import Qt, QPoint, QRect, QTime, QTimer, Signal
 from PySide6.QtGui import (
     QAbstractTextDocumentLayout,
     QKeySequence,
@@ -30,6 +30,8 @@ class ChatWidget(QAbstractScrollArea):
     and support for text selection and copying via context menu.
     Includes autoscroll functionality during text selection.
     """
+    retry_requested = Signal()
+
     def __init__(self, theme_manager, parent=None):
         super().__init__(parent)
         self.theme_manager = theme_manager
@@ -43,6 +45,7 @@ class ChatWidget(QAbstractScrollArea):
         self.current_assistant_name = "Assistant"
         self.click_count = 0
         self.last_click_time = 0
+        self._retry_countdown_msg_idx = -1
 
         # Autoscroll functionality
         self.autoscroll_timer = QTimer(self)
@@ -112,6 +115,10 @@ class ChatWidget(QAbstractScrollArea):
                         block_id, new_state = parts[1], parts[2]
                         self._toggle_collapsible_block(block_id, new_state)
                         return # Stop further processing
+
+                if anchor and anchor.startswith("retry:"):
+                    self.retry_requested.emit()
+                    return # Stop further processing
 
             # --- Standard Text Selection Logic ---
             current_time = QTime.currentTime().msecsSinceStartOfDay()
@@ -416,6 +423,57 @@ class ChatWidget(QAbstractScrollArea):
             self._update_scroll_bar()
         else:
             self.is_streaming = False
+
+    def show_retry_countdown(self, attempt_num: int, max_attempts: int, wait_seconds: float):
+        """Shows a visible countdown to the next automatic retry in the chat."""
+        self.stop_retry_countdown()
+        self._retry_countdown_attempt = attempt_num
+        self._retry_countdown_max = max_attempts
+        initial = max(1, int(wait_seconds))
+        content = (f"<i>Provider busy — automatic retry in {initial}s "
+                   f"(attempt {attempt_num}/{max_attempts})...</i>")
+        doc = QTextDocument(self)
+        doc.setHtml(content)
+        self.messages.append({'type': 'simple', 'doc': doc, 'raw_content': content})
+        self._retry_countdown_msg_idx = len(self.messages) - 1
+        self._update_scroll_bar()
+        self.viewport().update()
+
+    def update_retry_countdown(self, remaining: float):
+        """Updates the countdown message with the remaining seconds."""
+        if self._retry_countdown_msg_idx < 0:
+            return
+        if self._retry_countdown_msg_idx >= len(self.messages):
+            self._retry_countdown_msg_idx = -1
+            self._retry_countdown_attempt = 0
+            self._retry_countdown_max = 0
+            return
+        seconds_left = max(0, int(remaining))
+        msg = self.messages[self._retry_countdown_msg_idx]
+        if seconds_left > 0:
+            content = msg['raw_content']
+            import re
+            new_content = re.sub(r"in \d+s", f"in {seconds_left}s", content)
+            if new_content == content:
+                new_content = (f"<i>Provider busy — automatic retry in {seconds_left}s "
+                               f"(attempt {self._retry_countdown_attempt}/{self._retry_countdown_max})...</i>")
+            msg['raw_content'] = new_content
+            msg['doc'].setHtml(new_content)
+        else:
+            msg['raw_content'] = "<i>Retrying now...</i>"
+            msg['doc'].setHtml(msg['raw_content'])
+        self._update_scroll_bar()
+        self.viewport().update()
+
+    def stop_retry_countdown(self):
+        """Removes the countdown message (retry succeeded or failed)."""
+        if self._retry_countdown_msg_idx < 0:
+            return
+        if self._retry_countdown_msg_idx < len(self.messages):
+            self.messages.pop(self._retry_countdown_msg_idx)
+        self._retry_countdown_msg_idx = -1
+        self._update_scroll_bar()
+        self.viewport().update()
 
     def update_timer(self, seconds: int):
         if self.is_streaming and self.messages and "..." in self.messages[-1].get('raw_content', ''):

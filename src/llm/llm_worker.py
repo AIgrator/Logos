@@ -22,7 +22,8 @@ class LLMWorker(QObject):
     planning_response_received = Signal(str, object, str)  # reasoning, tool_calls (object), schema_name
     tool_call_received = Signal(dict)
     plain_text_response_received = Signal(str)  # For when a plan was expected but not received
-    retry_attempt = Signal(int, int, str)  # attempt_num, max_attempts, error
+    retry_attempt = Signal(int, int, str, float)  # attempt_num, max_attempts, error, wait_seconds
+    retry_countdown = Signal(float)  # remaining seconds before the next automatic retry
     error_occurred = Signal(str)
 
     def __init__(self, settings_manager, settings):
@@ -34,12 +35,16 @@ class LLMWorker(QObject):
 
         # Provider is created lazily in the worker thread to avoid blocking the main GUI thread.
         self.provider = None
+        # True once a provider instance is ready; distinguishes "still
+        # initializing" from "not configured" for user-facing messages.
+        self.provider_ready = False
 
     @Slot(dict)
     def update_settings_and_provider(self, new_settings):
         """Updates the settings and recreates the LLM provider."""
         self.settings = new_settings
         self.provider = self._create_llm_provider(new_settings)
+        self.provider_ready = self.provider is not None
         logging.info("LLMWorker settings and provider have been updated.")
 
     def _create_llm_provider(self, settings):
@@ -97,6 +102,7 @@ class LLMWorker(QObject):
             import_real_provider_classes()
 
             self.provider = self._create_llm_provider(self.settings)
+            self.provider_ready = self.provider is not None
             duration = perf_counter() - start
             logging.info(f"LLMWorker.prepare_provider completed in {duration:.3f}s")
         except Exception as e:
@@ -434,10 +440,22 @@ class LLMWorker(QObject):
                     return
 
                 if attempt < max_retries - 1:
-                    logging.info(f"Attempt {attempt + 1} of {max_retries} failed. Retrying in {retry_delay_seconds} seconds...")
-                    self.retry_attempt.emit(attempt + 1, max_retries, str(e))
+                    # Honor the server-suggested wait (Retry-After / RetryInfo)
+                    # instead of the blind backoff when present (capped).
+                    suggested = getattr(e, "retry_after", None)
+                    try:
+                        suggested = float(suggested) if suggested else 0
+                    except (TypeError, ValueError):
+                        suggested = 0
+                    wait_seconds = min(max(retry_delay_seconds, suggested), 120.0)
+                    logging.info(f"Attempt {attempt + 1} of {max_retries} failed. Retrying in {wait_seconds} seconds...")
+                    self.retry_attempt.emit(attempt + 1, max_retries, str(e), wait_seconds)
                     import time
-                    time.sleep(retry_delay_seconds)
+                    remaining = wait_seconds
+                    while remaining > 0 and not self.is_cancelled:
+                        time.sleep(min(1.0, remaining))
+                        remaining = max(0.0, remaining - 1.0)
+                        self.retry_countdown.emit(remaining)
                     retry_delay_seconds *= 2  # Exponential backoff
                 else:
                     logging.error(f"All {max_retries} retry attempts failed for a retryable error.")

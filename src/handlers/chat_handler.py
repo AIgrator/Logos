@@ -20,7 +20,7 @@ class ChatHandler:
         self.controller.thinking_time = 0
         self.controller.thinking_timer.start(1000)
 
-        self.controller.llm_request_sent.emit(
+        self.controller._send_llm_request(
             user_text,
             attachments,
             None,  # No system prompt in chat mode

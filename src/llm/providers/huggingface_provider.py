@@ -7,7 +7,7 @@ import pathlib
 import requests
 from typing import Any
 from PIL import Image
-from src.llm.exceptions import FatalError, RetryableError
+from src.llm.exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
 from src.llm.base_provider import BaseLLMProvider
 
 logger = logging.getLogger(__name__)
@@ -94,8 +94,8 @@ class HuggingFaceProvider(BaseLLMProvider):
 
     def _resolve_model_name(self) -> str:
         """
-        Returns the model string as configured. 
-        If no provider suffix (e.g. ':novita', ':together') is present, leaves it clean 
+        Returns the model string as configured.
+        If no provider suffix (e.g. ':novita', ':together') is present, leaves it clean
         unless a specific default rule applies.
         """
         model_name = self.model.strip() if self.model else "Qwen/Qwen3.8-27B:novita"
@@ -263,6 +263,8 @@ class HuggingFaceProvider(BaseLLMProvider):
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code
             error_text = e.response.text
+            if status_code == 429:
+                raise RetryableError(f"HuggingFace rate limit ({status_code}): {error_text}", retry_after=extract_retry_after(response=e.response, message=error_text)) from e
             if 400 <= status_code < 500:
                 raise FatalError(f"HuggingFace client error ({status_code}): {error_text}") from e
             elif 500 <= status_code < 600:
@@ -273,6 +275,8 @@ class HuggingFaceProvider(BaseLLMProvider):
             raise RetryableError(f"HuggingFace network error: {e}") from e
         except Exception as e:
             logger.error(f"An unexpected error occurred in HuggingFace provider (get_response): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"HuggingFace transient error (get_response): {e}", retry_after=extract_retry_after(message=str(e))) from e
             raise FatalError(f"An unexpected error in HuggingFace provider: {e}") from e
 
     def cancel_stream(self, generation_id: str = None):
@@ -361,6 +365,8 @@ class HuggingFaceProvider(BaseLLMProvider):
             else:
                 status_code = e.response.status_code
                 error_text = e.response.text
+                if status_code == 429:
+                    raise RetryableError(f"HuggingFace rate limit ({status_code}): {error_text}", retry_after=extract_retry_after(response=e.response, message=error_text)) from e
                 if 400 <= status_code < 500:
                     raise FatalError(f"HuggingFace client error ({status_code}): {error_text}") from e
                 elif 500 <= status_code < 600:
@@ -377,6 +383,8 @@ class HuggingFaceProvider(BaseLLMProvider):
                 logger.info("Stream gracefully cancelled by user request (exception suppressed).")
             else:
                 logger.error(f"An unexpected error occurred in HuggingFace provider: {e}", exc_info=True)
+                if is_transient_error(e):
+                    raise RetryableError(f"HuggingFace transient error: {e}", retry_after=extract_retry_after(message=str(e))) from e
                 raise FatalError(f"An unexpected error in HuggingFace provider: {e}") from e
         finally:
             logger.info("HuggingFace stream finished or cancelled. Clearing stream reference.")

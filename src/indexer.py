@@ -112,13 +112,24 @@ class Indexer(QObject):
         except ValueError:
             return True
 
-        parts = set(relative_path.split(os.sep))
+        # Normalize separators: .gitignore patterns use '/', os paths on
+        # Windows use '\'. Without this, prefix/fnmatch checks below silently
+        # miss (e.g. 'cache\models.json' vs pattern 'cache/').
+        relative_path = relative_path.replace(os.sep, '/')
+
+        parts = set(relative_path.split('/'))
         if not self.hardcoded_ignore_dirs.isdisjoint(parts):
             return True
 
         for pattern in self.ignore_patterns:
             if fnmatch.fnmatch(relative_path, pattern):
                 return True
+            # Directory patterns from .gitignore ("logs/", "cache/") never
+            # match via fnmatch — match them as path prefixes instead.
+            # Without this, every log write triggers a full reindex.
+            if pattern.endswith('/'):
+                if relative_path == pattern.rstrip('/') or (relative_path + '/').startswith(pattern):
+                    return True
         return False
 
     def build_index(self):

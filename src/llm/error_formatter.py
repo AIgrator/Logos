@@ -2,6 +2,8 @@ import re
 import html
 from .exceptions import RetryableError
 
+RETRY_LINK = "<br><a href=\"retry:last\">↻ Retry request</a>"
+
 def format_llm_error(provider_name: str, error: Exception) -> str:
     """
     Formats a raw LLM provider exception into a user-friendly HTML message.
@@ -23,10 +25,33 @@ def format_llm_error(provider_name: str, error: Exception) -> str:
         return (f"<b>Authentication Error with {provider_display_name}:</b><br>"
                 f"The API key is incorrect or invalid. Please verify your key in the settings.")
 
-    # Quota or Billing Issues
+    # Temporary overload (provider is busy, NOT a billing problem).
+    # Checked BEFORE quota patterns: 429/503/overload mean "try again later".
+    overload_patterns = [
+        r'503', r'529', r'unavailable', r'overloaded', r'overload',
+        r'high demand', r'try again', r'resource_exhausted',
+        r'server error', r'service unavailable', r'rate limit', r'429',
+    ]
+    if (any(re.search(p, error_str) for p in overload_patterns)
+            or isinstance(error, RetryableError)):
+        network_markers = (
+            'connection', 'network', 'timeout', 'timed out', 'dns',
+            'could not resolve', 'econn', 'socket',
+        )
+        if any(m in error_str for m in network_markers):
+            return (f"<b>Network Error with {provider_display_name}:</b><br>"
+                    f"Could not connect to the provider. The application will automatically retry. "
+                    f"Please check your internet connection if the issue persists."
+                    f"{RETRY_LINK}")
+        return (f"<b>{provider_display_name} is temporarily overloaded:</b><br>"
+                f"The provider is rate-limiting or busy right now — this is not a billing issue. "
+                f"Wait a minute and try again (the app already retried automatically)."
+                f"{RETRY_LINK}")
+
+    # Quota or Billing Issues (money/account side, retrying will NOT help)
     quota_patterns = [
-        r'quota', r'rate limit', r'insufficient_quota', r'billing',
-        r'402', r'429'
+        r'insufficient_quota', r'billing', r'402',
+        r'quota_exceeded', r'out of credits', r'payment',
     ]
     if any(re.search(p, error_str) for p in quota_patterns):
         return (f"<b>Quota Error with {provider_display_name}:</b><br>"
@@ -42,14 +67,6 @@ def format_llm_error(provider_name: str, error: Exception) -> str:
         return (f"<b>Invalid Request with {provider_display_name}:</b><br>"
                 f"The request is invalid. This could be due to an unsupported model or a malformed request. "
                 f"Please check your model settings.")
-
-    # --- Category 2: Retryable Errors (Might resolve on its own) ---
-
-    # Network Errors
-    if isinstance(error, RetryableError):
-        return (f"<b>Network Error with {provider_display_name}:</b><br>"
-                f"Could not connect to the provider. The application will automatically retry. "
-                f"Please check your internet connection if the issue persists.")
 
     # --- Category 3: Fallback for Uncategorized Errors ---
 

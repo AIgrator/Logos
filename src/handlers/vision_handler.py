@@ -233,7 +233,7 @@ class VisionHandler:
             self._handle_unrecoverable_error("Could not load strategic prompts.")
             return
 
-        self.controller.llm_request_sent.emit(
+        self.controller._send_llm_request(
             user_prompt,
             self.controller.pending_attachments,
             system_prompt,
@@ -336,7 +336,7 @@ class VisionHandler:
             return
 
         self._set_state(VisionState.FINDING_WAIT_ORIGIN)
-        self.controller.llm_request_sent.emit(user_prompt, attachments, system_prompt, [], "wait_origin_result")
+        self.controller._send_llm_request(user_prompt, attachments, system_prompt, [], "wait_origin_result")
 
     def _handle_initial_plan(self, plan: list | None):
         if not plan:
@@ -838,7 +838,7 @@ class VisionHandler:
             self._handle_unrecoverable_error("Could not load evaluation prompts.")
             return
 
-        self.controller.llm_request_sent.emit(
+        self.controller._send_llm_request(
             user_prompt,
             [pre_action_bytes, post_action_bytes],
             system_prompt,
@@ -887,7 +887,7 @@ class VisionHandler:
             self.controller.handle_vision_error()
             return
 
-        self.controller.llm_request_sent.emit(user_prompt, [], system_prompt, [], "error_explanation")
+        self.controller._send_llm_request(user_prompt, [], system_prompt, [], "error_explanation")
 
         self._set_state(VisionState.PAUSED_ON_ERROR)
         self.controller.handle_vision_error()
@@ -1026,7 +1026,7 @@ class VisionHandler:
             return
 
         logging.info("Sending wait check prompt to LLM.")
-        self.controller.llm_request_sent.emit(user_prompt, [], system_prompt, [], "wait_check_result")
+        self.controller._send_llm_request(user_prompt, [], system_prompt, [], "wait_check_result")
 
     def handle_fatal_error(self, formatted_error_message: str):
         """
