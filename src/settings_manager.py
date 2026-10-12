@@ -146,6 +146,11 @@ class SettingsManager(QObject):
             "allow_shell_commands": False,
             "grounding_backend": "local"
         },
+        "browser": {
+            "headless": False,
+            "profile_dir": "cache/browser_profile",
+            "default_timeout_ms": 30000
+        },
         "theme": "dark",
         "search": {}
     }

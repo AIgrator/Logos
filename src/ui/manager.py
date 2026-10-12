@@ -245,6 +245,7 @@ class UIManager(QWidget):
     chat_mode_selected = Signal()
     terminal_mode_selected = Signal()
     vision_mode_selected = Signal()
+    browser_mode_selected = Signal()
     attachment_removed = Signal(int)
     cancel_requested = Signal()
     toggle_fullscreen_button_clicked = Signal()
@@ -390,6 +391,9 @@ class UIManager(QWidget):
         self.vision_mode_action.setEnabled(False)
         self.vision_mode_action.setToolTip("Initializing vision module...")
         self.mode_menu.addAction(self.vision_mode_action)
+        self.browser_mode_action = self.mode_action_group.addAction("Browser Mode")
+        self.browser_mode_action.setCheckable(True)
+        self.mode_menu.addAction(self.browser_mode_action)
         self.mode_button.setMenu(self.mode_menu)
 
         self.pause_icon = None
@@ -476,6 +480,7 @@ class UIManager(QWidget):
         self.chat_mode_action.triggered.connect(self._on_chat_mode_selected)
         self.terminal_mode_action.triggered.connect(self._on_terminal_mode_selected)
         self.vision_mode_action.triggered.connect(self._on_vision_mode_selected)
+        self.browser_mode_action.triggered.connect(self._on_browser_mode_selected)
         self.cancel_button.clicked.connect(self.cancel_requested.emit)
 
         self.custom_title_bar.pause_resume_clicked.connect(self.pause_resume_clicked.emit)
@@ -825,6 +830,10 @@ class UIManager(QWidget):
         self.mode_button.setText("Vision")
         self.vision_mode_selected.emit()
 
+    def _on_browser_mode_selected(self):
+        self.mode_button.setText("Browser")
+        self.browser_mode_selected.emit()
+
     def set_active_mode(self, mode: str):
         is_terminal = (mode == 'terminal')
         self.add_folder_action.setVisible(is_terminal)
@@ -846,6 +855,11 @@ class UIManager(QWidget):
             self.mode_button.setText("Vision")
             self.screenshot_action.setEnabled(True)
             self.screenshot_action.setToolTip("")
+        elif mode == 'browser':
+            self.browser_mode_action.setChecked(True)
+            self.mode_button.setText("Browser")
+            self.screenshot_action.setEnabled(False)
+            self.screenshot_action.setToolTip("Screenshots are not available in Browser Mode")
 
     def set_vision_mode_loading(self, is_loading: bool):
         if is_loading:

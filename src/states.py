@@ -12,6 +12,7 @@ class ControllerState(Enum):
     CHATTING = auto()
     TERMINAL = auto()
     VISION = auto()
+    BROWSER = auto()
 
 class VisionState(Enum):
     IDLE = auto()

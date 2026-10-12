@@ -130,6 +130,12 @@ Rules for using them:
     def get_terminal_tools(self): return self._get_cached_prompt('terminal_tools', 'cache/terminal/tools.txt')
     # -------------------------------------------------
 
+    # --- Browser Prompts ---
+    def get_browser_system_template(self): return self._get_cached_prompt('browser_system', 'prompts/browser/system.txt')
+    def get_browser_user_template(self): return self._get_cached_prompt('browser_user', 'prompts/browser/user.txt')
+    def get_browser_tools(self): return self._get_cached_prompt('browser_tools', 'cache/browser/tools.txt')
+    # -------------------------------------------------
+
     def _format_prompt_with_schema(self, prompt_template: str, schema_name: str, replacements: dict = None) -> str:
         """Helper to format a prompt with instructions and example from RESPONSE_FORMATS."""
         response_formats = self.get_response_formats()
@@ -376,6 +382,45 @@ Rules for using them:
                 "current_directory": current_directory_prompt,
                 "directory_listing_command": directory_listing_command,
                 "directory_listing": directory_listing_prompt,
+                "history_str": history_str
+            })
+
+        return system_prompt, user_prompt
+
+    def get_browser_response_formats(self):
+        """Loads browser response formats from the generated cache file."""
+        try:
+            with open("cache/browser/response_formats.json", encoding="utf-8") as f:
+                return json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError) as e:
+            logging.error(f"Could not load browser response formats: {e}")
+            return {}
+
+    def get_browser_prompts(self, user_request: str, os_info: str, history: list, current_url: str = "not open yet") -> tuple[str, str]:
+        """Formats the system and user prompts for the browser agent."""
+        system_template = self.get_browser_system_template()
+        user_template = self.get_browser_user_template()
+
+        if "template not found" in system_template or "template not found" in user_template:
+            return None, None
+
+        response_formats = self.get_browser_response_formats()
+        schema_info = response_formats.get("browser_tool_code", {})
+        instructions = schema_info.get("instructions", "")
+        example = schema_info.get("example", "")
+        response_format_block = f"{instructions}\n\n{example}"
+
+        system_prompt = self._apply_replacements(system_template, {
+            "available_tools": self.get_browser_tools(),
+            "response_format_instructions": response_format_block
+        })
+
+        history_str = "\n".join(history) if history else "No commands executed yet."
+
+        user_prompt = self._apply_replacements(user_template, {
+                "user_request": user_request,
+                "os_info": os_info,
+                "current_url": current_url,
                 "history_str": history_str
             })
 

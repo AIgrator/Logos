@@ -332,7 +332,7 @@ class LLMWorker(QObject):
                     }
                     llm_logger.info(json.dumps(log_payload, ensure_ascii=False, indent=2))
 
-                    payload = validated_payload.get('payload', {}) if final_schema_name == 'terminal_tool_code' else validated_payload
+                    payload = validated_payload.get('payload', {}) if final_schema_name in ('terminal_tool_code', 'browser_tool_code') else validated_payload
                     reasoning = payload.get('payload', {}).get('evaluation', {}).get('reason', '') if final_schema_name == 'evaluation' else ""
 
                     self.planning_response_received.emit(reasoning, payload, final_schema_name)

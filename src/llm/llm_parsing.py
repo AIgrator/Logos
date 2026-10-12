@@ -12,9 +12,10 @@ from difflib import SequenceMatcher
 # Import the Pydantic models and the schema map
 from src.computer.schemas.vision import SCHEMA_MAP as VISUAL_SCHEMA_MAP, Evaluation
 from src.computer.schemas.terminal import SCHEMA_MAP as TERMINAL_SCHEMA_MAP, ToolCall as TerminalToolCall
+from src.computer.schemas.browser import SCHEMA_MAP as BROWSER_SCHEMA_MAP
 
 # Combine both schema maps into one for the validator to use
-SCHEMA_MAP = {**VISUAL_SCHEMA_MAP, **TERMINAL_SCHEMA_MAP}
+SCHEMA_MAP = {**VISUAL_SCHEMA_MAP, **TERMINAL_SCHEMA_MAP, **BROWSER_SCHEMA_MAP}
 
 # --- Constants for Fuzzy Matching ---
 SIMILARITY_THRESHOLD = 0.8
@@ -157,8 +158,8 @@ def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, st
         logging.error(error_msg)
         return None, error_msg
 
-    if isinstance(data_object, dict) and schema_name == 'terminal_tool_code':
-        # Universal repair logic for various malformed tool calls in terminal mode
+    if isinstance(data_object, dict) and schema_name in ('terminal_tool_code', 'browser_tool_code'):
+        # Universal repair logic for various malformed tool calls in agent modes
         if 'name' in data_object and 'arguments' in data_object and 'action' not in data_object:
             logging.warning("Detected a naked tool call for terminal_tool_code. Wrapping it.")
             data_object = {'action': data_object}

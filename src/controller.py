@@ -18,6 +18,7 @@ from ui.settings_window import SettingsWindow
 from handlers.chat_handler import ChatHandler
 from handlers.vision_handler import VisionHandler
 from handlers.terminal_handler import TerminalHandler
+from handlers.browser_handler import BrowserHandler
 from states import ControllerState, VisionState
 from hotkey_manager import HotkeyManager
 from src.computer.computer import Computer
@@ -100,6 +101,7 @@ class AppController(QObject):
         self.computer = Computer(self.settings_manager, mode="chat")
         self.vision_handler = VisionHandler(self)
         self.terminal_handler = TerminalHandler(self, self.theme_manager, working_directory=self.working_directory)
+        self.browser_handler = BrowserHandler(self, working_directory=self.working_directory)
         comp_duration = time.perf_counter() - comp_start
         logging.info(f"LocalDesktopComputer initialized in {comp_duration:.3f}s")
 
@@ -162,6 +164,7 @@ class AppController(QObject):
         self.ui.chat_mode_selected.connect(self._activate_chat_mode)
         self.ui.terminal_mode_selected.connect(self._activate_terminal_mode)
         self.ui.vision_mode_selected.connect(self._activate_vision_mode)
+        self.ui.browser_mode_selected.connect(self._activate_browser_mode)
         self.ui.cancel_requested.connect(self.handle_cancel_request)
         self.ui.pause_resume_clicked.connect(self._handle_pause_resume)
         self.ui.pause_for_feedback_clicked.connect(self._handle_pause_for_feedback)
@@ -474,6 +477,8 @@ class AppController(QObject):
                 self.vision_handler.start_task(user_text, attachments_for_handler)
         elif self.state == ControllerState.TERMINAL:
             self.terminal_handler.start_task(user_text)
+        elif self.state == ControllerState.BROWSER:
+            self.browser_handler.start_task(user_text)
         else:
             self.chat_handler.start_chat(user_text, attachments_for_handler)
 
@@ -494,6 +499,8 @@ class AppController(QObject):
             self.vision_handler.handle_plan_response(reasoning, tool_calls_obj, schema_name)
         elif self.state == ControllerState.TERMINAL:
             self.terminal_handler.handle_llm_response(reasoning, tool_calls_obj, schema_name)
+        elif self.state == ControllerState.BROWSER:
+            self.browser_handler.handle_llm_response(reasoning, tool_calls_obj, schema_name)
         else:
             logging.warning("Received a plan response while in chat mode. Ignoring.")
 
@@ -649,6 +656,10 @@ class AppController(QObject):
         if self.current_handler == self.vision_handler:
             self.vision_handler.stop()
 
+        # Same for the browser handler (closes the controlled browser).
+        if self.current_handler == getattr(self, 'browser_handler', None):
+            self.browser_handler.stop()
+
         self._set_state(new_state)
         self.current_handler = new_handler
 
@@ -661,6 +672,11 @@ class AppController(QObject):
         self._cleanup_and_switch_handler(self.terminal_handler, ControllerState.TERMINAL)
         self.ui.set_active_mode('terminal')
         self.ui.add_message("<i>Terminal mode enabled. I will now use terminal commands to accomplish tasks.</i>", force_scroll=True)
+
+    def _activate_browser_mode(self):
+        self._cleanup_and_switch_handler(self.browser_handler, ControllerState.BROWSER)
+        self.ui.set_active_mode('browser')
+        self.ui.add_message("<i>Browser mode enabled. Describe the web task you want me to perform.</i>", force_scroll=True)
 
     def _activate_vision_mode(self):
         self._cleanup_and_switch_handler(self.vision_handler, ControllerState.VISION)

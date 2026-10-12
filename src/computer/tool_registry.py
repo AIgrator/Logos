@@ -79,7 +79,7 @@ class ToolRegistry:
 
     def generate_strategic(self, force: bool = False) -> dict:
         generated_files = {}
-        for mode in ['vision', 'terminal']:
+        for mode in ['vision', 'terminal', 'browser']:
             out = os.path.join(self.get_cache_dir(), mode, 'strategic_tools.txt')
             generated_files[mode] = out
             if not force and os.path.exists(out):
@@ -109,7 +109,7 @@ class ToolRegistry:
 
     def generate_tools(self, force: bool = False) -> dict:
         generated_files = {}
-        for mode in ['vision', 'terminal']:
+        for mode in ['vision', 'terminal', 'browser']:
             dest = os.path.join(self.get_cache_dir(), mode, 'tools.txt')
             generated_files[mode] = dest
             if not force and os.path.exists(dest):
@@ -147,7 +147,7 @@ class ToolRegistry:
 
     def generate_gemini(self, force: bool = False) -> dict:
         generated_files = {}
-        for mode in ['vision', 'terminal']:
+        for mode in ['vision', 'terminal', 'browser']:
             out = os.path.join(self.get_cache_dir(), mode, 'gemini_tools.py')
             generated_files[mode] = out
             if not force and os.path.exists(out):
@@ -252,7 +252,7 @@ class ToolRegistry:
 
     def generate_ui_tools(self, force: bool = False) -> dict:
         generated_files = {}
-        for mode in ['vision', 'terminal']:
+        for mode in ['vision', 'terminal', 'browser']:
             out = os.path.join(self.get_cache_dir(), mode, 'ui_tools.json')
             generated_files[mode] = out
             if not force and os.path.exists(out):
@@ -287,7 +287,7 @@ class ToolRegistry:
         Generates JSON files with response format instructions for the LLM for all modes.
         """
         generated_files = {}
-        for mode in ['vision', 'terminal', 'chat']:
+        for mode in ['vision', 'terminal', 'chat', 'browser']:
             out = os.path.join(self.get_cache_dir(), mode, 'response_formats.json')
             generated_files[mode] = out
             if not force and os.path.exists(out):
@@ -299,6 +299,8 @@ class ToolRegistry:
                     from src.computer.schemas.vision import generate_response_formats_dict
                 elif mode == 'chat':
                     from src.computer.schemas.chat import generate_response_formats_dict
+                elif mode == 'browser':
+                    from src.computer.schemas.browser import generate_response_formats_dict
                 else:  # terminal
                     from src.computer.schemas.terminal import generate_response_formats_dict
 
@@ -342,7 +344,7 @@ class ToolRegistry:
         """
         import hashlib
         fingerprint = {}
-        for mode in ['vision', 'terminal', 'chat']:
+        for mode in ['vision', 'terminal', 'chat', 'browser']:
             try:
                 meta = self._get_filtered_metadata(mode)
                 canonical = json.dumps(meta, sort_keys=True, default=str)
