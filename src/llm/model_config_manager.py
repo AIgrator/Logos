@@ -43,7 +43,8 @@ class ModelConfigManager:
         ],
         "openrouter": {
             "Anthropic": ["claude-sonnet-5.5", "claude-haiku-5.5", "claude-opus-5.5"],
-            "Google": ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash"],
+            "Google": ["gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.6-flash",
+                       "gemma-4-31b-it:free", "gemma-4-26b-a4b-it:free"],
             "OpenAI": ["gpt-5-mini", "gpt-5", "gpt-5.6-sol"],
             "X-AI": ["grok-4.7", "grok-4.6", "grok-4-1-fast-reasoning"],
             "Meta": ["muse-spark-1.3", "muse-glimmer-30b", "llama-4-maverick"],

@@ -180,7 +180,9 @@ class SettingsWindow(QDialog):
             "apps": ("fa5s.th-large", "Applications"),
             "hotkeys": ("fa5s.keyboard", "Hotkeys"),
             "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
+            "browser": ("fa5s.globe", "Browser"),
             "vision": ("fa5s.robot", "Vision"),
+            "context": ("fa5s.file-alt", "Context"),
             "omniparser": ("fa5s.eye", "OmniParser"),
             "debug": ("fa5s.bug", "Debug")
         }
@@ -227,7 +229,9 @@ class SettingsWindow(QDialog):
             "apps": self._create_apps_section(),
             "hotkeys": self._create_hotkeys_section(),
             "compact": self._create_compact_mode_section(),
+            "browser": self._create_browser_section(),
             "vision": self._create_vision_section(),
+            "context": self._create_context_section(),
             "omniparser": self._create_omniparser_section(),
             "debug": self._create_debug_section()
         }
@@ -355,6 +359,12 @@ class SettingsWindow(QDialog):
         else:
             self.dark_theme_radio.setChecked(True)
 
+        # Browser (ad blocking defaults to ON)
+        browser_settings = self.settings_manager.get("browser", {})
+        self.block_ads_checkbox.setChecked(bool(browser_settings.get("block_ads", True)))
+        self.browser_headless_checkbox.setChecked(bool(browser_settings.get("headless", False)))
+        self.browser_timeout_spinbox.setValue(int(browser_settings.get("default_timeout_ms", 30000) or 30000))
+
         # Vision
         vision_settings = self.settings_manager.get("vision", {})
         self.wait_check_interval_spinbox.setValue(vision_settings.get("wait_check_interval_ms", 5000) / 1000.0)
@@ -389,6 +399,13 @@ class SettingsWindow(QDialog):
         self.edit_plan_hotkey.set_key_sequence(hotkey_settings.get("edit_plan", "Ctrl+Shift+E"))
         self.cancel_plan_hotkey.set_key_sequence(hotkey_settings.get("cancel_plan", "Ctrl+Shift+D"))
         self.run_plan_hotkey.set_key_sequence(hotkey_settings.get("run_plan", "Ctrl+Return"))
+
+        # Context (agent history compaction; all defaults = send everything)
+        context_settings = self.settings_manager.get("context", {})
+        self.history_keep_last_spinbox.setValue(context_settings.get("history_keep_last_n", 0))
+        self.history_max_chars_spinbox.setValue(context_settings.get("history_max_result_chars", 0))
+        self.history_dedup_checkbox.setChecked(bool(context_settings.get("history_dedup_snapshots", False)))
+        self.history_trim_tracebacks_checkbox.setChecked(bool(context_settings.get("history_trim_tracebacks", False)))
 
         # Compact Mode
         compact_mode_settings = self.settings_manager.get("compact_mode", {})
@@ -441,6 +458,20 @@ class SettingsWindow(QDialog):
             "run_plan": self.run_plan_hotkey.get_key_sequence()
         }
 
+        browser_settings = {
+            "block_ads": self.block_ads_checkbox.isChecked(),
+            "headless": self.browser_headless_checkbox.isChecked(),
+            "default_timeout_ms": self.browser_timeout_spinbox.value(),
+        }
+        # Preserve keys with no UI widget (e.g. profile_dir) so saving
+        # settings never silently drops them.
+        try:
+            existing_browser = self.settings_manager.get("browser", {}) or {}
+            for key, value in existing_browser.items():
+                browser_settings.setdefault(key, value)
+        except Exception:
+            pass
+
         vision_settings = {
             "wait_check_interval_ms": int(self.wait_check_interval_spinbox.value() * 1000),
             "post_action_delay_ms": int(self.post_action_delay_spinbox.value() * 1000),
@@ -453,6 +484,20 @@ class SettingsWindow(QDialog):
             existing_vision = self.settings_manager.get("vision", {}) or {}
             for key, value in existing_vision.items():
                 vision_settings.setdefault(key, value)
+        except Exception:
+            pass
+
+        context_settings = {
+            "history_keep_last_n": self.history_keep_last_spinbox.value(),
+            "history_max_result_chars": self.history_max_chars_spinbox.value(),
+            "history_dedup_snapshots": self.history_dedup_checkbox.isChecked(),
+            "history_trim_tracebacks": self.history_trim_tracebacks_checkbox.isChecked(),
+        }
+        # Preserve keys with no UI widget so saving never silently drops them.
+        try:
+            existing_context = self.settings_manager.get("context", {}) or {}
+            for key, value in existing_context.items():
+                context_settings.setdefault(key, value)
         except Exception:
             pass
 
@@ -479,7 +524,9 @@ class SettingsWindow(QDialog):
             "retry_delay_seconds": self.retry_delay_spinbox.value(),
             "prevent_multiple_instances": self.prevent_multiple_instances_checkbox.isChecked(),
             "vision": vision_settings,
+            "browser": browser_settings,
             "compact_mode": compact_mode_settings,
+            "context": context_settings,
             "webp_lossless": self.webp_lossless_checkbox.isChecked(),
             "webp_quality": self.webp_quality_spinbox.value(),
             "theme": theme,
@@ -825,6 +872,90 @@ class SettingsWindow(QDialog):
                          "commands (execute_shell, read/write files). Disabled by default.")
         self.allow_shell_commands_checkbox.setToolTip(shell_tooltip)
         vision_layout.addWidget(self.allow_shell_commands_checkbox, 3, 0, 1, 4)
+
+        return group
+
+    def _create_context_section(self):
+        """Creates the Context (agent history compaction) settings section."""
+        group = QGroupBox("Agent History (browser mode)")
+        context_layout = QGridLayout(group)
+        context_layout.setColumnStretch(2, 1)
+
+        self.history_keep_last_spinbox = QSpinBox()
+        self.history_keep_last_spinbox.setRange(0, 200)
+        self.history_keep_last_spinbox.setFixedWidth(80)
+        keep_last_tooltip = (
+            "How many of the latest history steps are sent in full. Older steps "
+            "are condensed to one line each (command + outcome). 0 = send the "
+            "entire history (default, most expensive)."
+        )
+        context_layout.addWidget(QLabel("Keep last N steps full:"), 0, 0)
+        context_layout.addWidget(self._create_help_label(keep_last_tooltip), 0, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.history_keep_last_spinbox, 0, 3)
+
+        self.history_max_chars_spinbox = QSpinBox()
+        self.history_max_chars_spinbox.setRange(0, 20000)
+        self.history_max_chars_spinbox.setSingleStep(500)
+        self.history_max_chars_spinbox.setFixedWidth(80)
+        max_chars_tooltip = (
+            "Max characters per single history entry (longer entries are cut "
+            "head+tail with a marker). 0 = unlimited (default)."
+        )
+        context_layout.addWidget(QLabel("Max chars per entry:"), 1, 0)
+        context_layout.addWidget(self._create_help_label(max_chars_tooltip), 1, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.history_max_chars_spinbox, 1, 3)
+
+        self.history_dedup_checkbox = QCheckBox()
+        dedup_tooltip = (
+            "Drop consecutive identical page snapshots, keeping one copy with "
+            "an '(unchanged)' note. Snapshots repeat a lot and cost tokens."
+        )
+        context_layout.addWidget(QLabel("Dedup repeated snapshots:"), 2, 0)
+        context_layout.addWidget(self._create_help_label(dedup_tooltip), 2, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.history_dedup_checkbox, 2, 3)
+
+        self.history_trim_tracebacks_checkbox = QCheckBox()
+        trim_tooltip = (
+            "Cut long Python tracebacks in tool errors to head+tail lines. "
+            "The error type and location (what teaches the model) are kept."
+        )
+        context_layout.addWidget(QLabel("Trim long tracebacks:"), 3, 0)
+        context_layout.addWidget(self._create_help_label(trim_tooltip), 3, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.history_trim_tracebacks_checkbox, 3, 3)
+
+        return group
+
+    def _create_browser_section(self):
+        """Creates the Browser settings section."""
+        group = QGroupBox("Browser")
+        browser_layout = QGridLayout(group)
+        browser_layout.setColumnStretch(2, 1)
+
+        self.block_ads_checkbox = QCheckBox()
+        block_ads_tooltip = (
+            "Block advertising requests using EasyList filter rules (no extension needed). "
+            "ON by default. Turn OFF if a site gates content behind ads or a subscription: "
+            "without this choice some pages withhold content after ad views."
+        )
+        browser_layout.addWidget(QLabel("Block ads:"), 0, 0)
+        browser_layout.addWidget(self._create_help_label(block_ads_tooltip), 0, 1, Qt.AlignLeft)
+        browser_layout.addWidget(self.block_ads_checkbox, 0, 3)
+
+        self.browser_headless_checkbox = QCheckBox()
+        headless_tooltip = "Run the controlled browser without a visible window. Applies on next browser start."
+        browser_layout.addWidget(QLabel("Headless:"), 1, 0)
+        browser_layout.addWidget(self._create_help_label(headless_tooltip), 1, 1, Qt.AlignLeft)
+        browser_layout.addWidget(self.browser_headless_checkbox, 1, 3)
+
+        self.browser_timeout_spinbox = QSpinBox()
+        self.browser_timeout_spinbox.setRange(5000, 120000)
+        self.browser_timeout_spinbox.setSingleStep(5000)
+        self.browser_timeout_spinbox.setSuffix(" ms")
+        self.browser_timeout_spinbox.setFixedWidth(100)
+        timeout_tooltip = "Action timeout for browser tools. Applies on next browser start."
+        browser_layout.addWidget(QLabel("Action timeout:"), 2, 0)
+        browser_layout.addWidget(self._create_help_label(timeout_tooltip), 2, 1, Qt.AlignLeft)
+        browser_layout.addWidget(self.browser_timeout_spinbox, 2, 3)
 
         return group
 

@@ -31,6 +31,7 @@ class ChatWidget(QAbstractScrollArea):
     Includes autoscroll functionality during text selection.
     """
     retry_requested = Signal()
+    continue_requested = Signal()
 
     def __init__(self, theme_manager, parent=None):
         super().__init__(parent)
@@ -118,6 +119,10 @@ class ChatWidget(QAbstractScrollArea):
 
                 if anchor and anchor.startswith("retry:"):
                     self.retry_requested.emit()
+                    return # Stop further processing
+
+                if anchor and anchor.startswith("continue:"):
+                    self.continue_requested.emit()
                     return # Stop further processing
 
             # --- Standard Text Selection Logic ---

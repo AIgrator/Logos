@@ -4,6 +4,9 @@ __pycache__/
 *.pyo
 *.pyd
 
+# Linter caches (rewritten on every ruff run — must not trigger reindex)
+.ruff_cache/
+
 # Virtual Environments
 .venv/
 venv/

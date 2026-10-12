@@ -387,6 +387,70 @@ Rules for using them:
 
         return system_prompt, user_prompt
 
+    # --- Agent history compaction (Settings → Context) ---
+
+    @staticmethod
+    def _compact_history_entry(entry: str, max_chars: int, trim_tb: bool) -> str:
+        text = entry if isinstance(entry, str) else str(entry)
+        if trim_tb and "Traceback (most recent call last):" in text:
+            lines = text.splitlines()
+            if len(lines) > 10:
+                kept = lines[:3] + [f"[... {len(lines) - 8} traceback lines trimmed ...]"] + lines[-5:]
+                text = "\n".join(kept)
+        if max_chars > 0 and len(text) > max_chars:
+            head = max_chars // 2
+            text = text[:head] + f"\n...[{len(text) - max_chars} chars trimmed]...\n" + text[-(max_chars - head):]
+        return text
+
+    @staticmethod
+    def _dedup_snapshot_entries(entries: list) -> list:
+        out, last_snapshot = [], None
+        for entry in entries:
+            if (isinstance(entry, str) and entry.startswith("**Tool Result:**")
+                    and "Interactive elements:" in entry):
+                if entry == last_snapshot:
+                    out.append("**Tool Result:** (snapshot unchanged since previous step)")
+                    continue
+                last_snapshot = entry
+            out.append(entry)
+        return out
+
+    @staticmethod
+    def _condense_history_entry(entry: str, limit: int = 160) -> str:
+        lines = (entry if isinstance(entry, str) else str(entry)).strip().splitlines()
+        first_line = lines[0] if lines else ""
+        if len(first_line) > limit:
+            first_line = first_line[:limit] + "..."
+        return f"[older step] {first_line}"
+
+    def compact_browser_history(self, history: list) -> list:
+        """Optionally compacts browser agent history to cut transmitted context.
+
+        All options default to no-op (full history is sent). The last N steps
+        stay verbatim; older steps condense to one line each. Facts and error
+        outcomes are preserved — only bulk (repeated snapshots, long
+        tracebacks, huge texts) is cut. Configure in Settings → Context.
+        """
+        try:
+            cfg = {}
+            if self._settings_manager is not None:
+                cfg = self._settings_manager.get("context", {}) or {}
+            keep_last = int(cfg.get("history_keep_last_n", 0) or 0)
+            max_chars = int(cfg.get("history_max_result_chars", 0) or 0)
+            dedup = bool(cfg.get("history_dedup_snapshots", False))
+            trim_tb = bool(cfg.get("history_trim_tracebacks", False))
+        except Exception:
+            return history
+        if not history or (keep_last <= 0 and max_chars <= 0 and not dedup and not trim_tb):
+            return history
+        compacted = [self._compact_history_entry(e, max_chars, trim_tb) for e in history]
+        if dedup:
+            compacted = self._dedup_snapshot_entries(compacted)
+        if keep_last > 0 and len(compacted) > keep_last:
+            head, tail = compacted[:-keep_last], compacted[-keep_last:]
+            compacted = [self._condense_history_entry(e) for e in head] + tail
+        return compacted
+
     def get_browser_response_formats(self):
         """Loads browser response formats from the generated cache file."""
         try:
@@ -415,7 +479,8 @@ Rules for using them:
             "response_format_instructions": response_format_block
         })
 
-        history_str = "\n".join(history) if history else "No commands executed yet."
+        compacted = self.compact_browser_history(history) if history else []
+        history_str = "\n".join(compacted) if compacted else "No commands executed yet."
 
         user_prompt = self._apply_replacements(user_template, {
                 "user_request": user_request,

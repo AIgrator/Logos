@@ -135,7 +135,8 @@ class OpenAIProvider(BaseLLMProvider):
 
         schema_files = [
             'cache/terminal/response_formats.json',
-            'cache/vision/response_formats.json'
+            'cache/vision/response_formats.json',
+            'cache/browser/response_formats.json'
         ]
         all_schemas = {}
 
@@ -155,7 +156,7 @@ class OpenAIProvider(BaseLLMProvider):
                 continue
 
         if not all_schemas:
-            logger.error("No tool schemas could be loaded. Please ensure 'cache/terminal/response_formats.json' and/or 'cache/vision/response_formats.json' exist and are valid.")
+            logger.error("No tool schemas could be loaded. Please ensure 'cache/terminal/response_formats.json', 'cache/vision/response_formats.json' and/or 'cache/browser/response_formats.json' exist and are valid.")
             return []
 
         formatted_tools = []

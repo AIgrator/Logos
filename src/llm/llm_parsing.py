@@ -12,7 +12,7 @@ from difflib import SequenceMatcher
 # Import the Pydantic models and the schema map
 from src.computer.schemas.vision import SCHEMA_MAP as VISUAL_SCHEMA_MAP, Evaluation
 from src.computer.schemas.terminal import SCHEMA_MAP as TERMINAL_SCHEMA_MAP, ToolCall as TerminalToolCall
-from src.computer.schemas.browser import SCHEMA_MAP as BROWSER_SCHEMA_MAP
+from src.computer.schemas.browser import SCHEMA_MAP as BROWSER_SCHEMA_MAP, ToolCall as BrowserToolCall
 
 # Combine both schema maps into one for the validator to use
 SCHEMA_MAP = {**VISUAL_SCHEMA_MAP, **TERMINAL_SCHEMA_MAP, **BROWSER_SCHEMA_MAP}
@@ -36,8 +36,11 @@ VISION_TOOL_NAMES = [
 # Dynamically get valid tool names from the Pydantic schema for terminal mode
 TERMINAL_TOOL_NAMES = list(TerminalToolCall.model_fields['name'].annotation.__args__)
 
-# Create a unified set of all known tool names from both modes
-VALID_TOOL_NAMES = set(TERMINAL_TOOL_NAMES + VISION_TOOL_NAMES)
+# Dynamically get valid tool names from the Pydantic schema for browser mode
+BROWSER_TOOL_NAMES = list(BrowserToolCall.model_fields['name'].annotation.__args__)
+
+# Create a unified set of all known tool names from all modes
+VALID_TOOL_NAMES = set(TERMINAL_TOOL_NAMES + VISION_TOOL_NAMES + BROWSER_TOOL_NAMES)
 
 TOOL_NAME_SYNONYMS = ['name', 'action', 'tool_name', 'function_name', 'tool', 'command']
 ARGUMENTS_SYNONYMS = ['arguments', 'args', 'parameters', 'params', 'payload', 'inputs']
@@ -171,6 +174,24 @@ def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, st
                 logging.warning(f"Detected a malformed/flattened tool call ('{tool_name}'). Reconstructing it.")
                 reconstructed_call = {'name': tool_name, 'arguments': args}
                 data_object = {'action': reconstructed_call}
+
+            # Hoist: models sometimes bury "name" one level too deep, inside
+            # "arguments" ({"action": {"arguments": {"name": ..., ...}}}) —
+            # lift it up to the action level instead of failing validation.
+            holders = [data_object]
+            payload = data_object.get('payload')
+            if isinstance(payload, dict):
+                holders.append(payload)
+            for holder in holders:
+                action_obj = holder.get('action')
+                if (isinstance(action_obj, dict) and 'name' not in action_obj
+                        and isinstance(action_obj.get('arguments'), dict)
+                        and isinstance(action_obj['arguments'].get('name'), str)):
+                    nested_name = action_obj['arguments']['name']
+                    logging.warning(f"Detected 'name' nested inside arguments ('{nested_name}'). Hoisting it.")
+                    fixed_action = dict(action_obj)
+                    fixed_action['name'] = nested_name
+                    holder['action'] = fixed_action
 
     if isinstance(data_object, list) and schema_name == 'strategic_plan':
         object_to_validate = {"type": "strategic_plan", "payload": data_object}

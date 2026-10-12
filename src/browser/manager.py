@@ -26,14 +26,25 @@ class BrowserManager:
     """Synchronous Playwright wrapper with persistent profile."""
 
     def __init__(self, headless: bool = False, profile_dir: str = "cache/browser_profile",
-                 timeout_ms: int = 30000):
+                 timeout_ms: int = 30000, block_ads: bool = True,
+                 easylist_path: str | None = None):
         self.headless = headless
         self.profile_dir = profile_dir
         self.timeout_ms = timeout_ms
+        self.block_ads = block_ads
+        self._easylist_path = easylist_path
+        self._ad_engine_obj = None  # lazy EasyListEngine (built on first use)
         self._pw = None
         self._browser = None
         self._page = None
-        self._refs = {}  # ref -> playwright ElementHandle
+        self._refs = {}  # ref -> playwright Locator
+        self._last_snapshot = []  # last snapshot elements (for browser_find)
+        self._last_screenshot_path = None  # set by capture, consumed once by next LLM request
+        self._pending_dialog = None  # (accept, prompt_text) armed by browser_handle_dialog
+        self._pending_tabs_note = None  # new-tab(s) notice, consumed once by click result
+        self._last_dialog = None  # last auto-dismissed dialog note
+        self._last_dialog_result = None  # last armed-handling outcome note
+        self._dialog_pages = set()  # id(page) with the dialog router installed
 
     # -- lifecycle ------------------------------------------------------
 
@@ -48,9 +59,59 @@ class BrowserManager:
             args=["--disable-blink-features=AutomationControlled"],
         )
         pages = self._browser.pages
-        self._page = pages[0] if pages else self._browser.new_page()
-        self._page.set_default_timeout(self.timeout_ms)
-        logger.info(f"Browser launched (headless={self.headless}).")
+        self._use_page(pages[0] if pages else self._browser.new_page())
+        self._apply_ad_routing()
+        logger.info(f"Browser launched (headless={self.headless}, block_ads={self.block_ads}).")
+
+    def _ad_engine(self):
+        """Lazily builds the EasyList engine (cached file, background refresh)."""
+        if self._ad_engine_obj is None:
+            from .adblock import EasyListEngine, DEFAULT_CACHE_FILE
+            self._ad_engine_obj = EasyListEngine(
+                cache_path=self._easylist_path or DEFAULT_CACHE_FILE)
+            self._ad_engine_obj.ensure_loaded()
+        return self._ad_engine_obj
+
+    def set_block_ads(self, enabled: bool) -> None:
+        """Toggles ad-request blocking live (no browser restart needed)."""
+        self.block_ads = bool(enabled)
+        if self._browser is not None:
+            self._apply_ad_routing()
+        logger.info(f"Browser ad blocking {'enabled' if self.block_ads else 'disabled'}.")
+
+    def _apply_ad_routing(self) -> None:
+        """Routes all requests through the EasyList decision (or removes routing)."""
+        try:
+            self._browser.unroute_all(behavior="wait")
+        except Exception:
+            pass
+        if not self.block_ads:
+            return
+        try:
+            self._browser.route("**/*", self._route_handler)
+            logger.info("Browser ad-request routing installed.")
+        except Exception as e:
+            logger.warning(f"Could not install ad-request routing: {e}")
+
+    def _route_handler(self, route) -> None:
+        try:
+            request = route.request
+            frame_url = ""
+            try:
+                frame_url = (request.frame.url or "") if request.frame else ""
+            except Exception:
+                pass
+            if self._ad_engine().should_block(
+                    request.url, request.resource_type, frame_url):
+                logger.debug(f"Blocked ad request: {request.url[:160]}")
+                route.abort()
+                return
+        except Exception as e:
+            logger.warning(f"Ad route handler failed: {e}")
+        try:
+            route.continue_()
+        except Exception:
+            pass
 
     def close(self) -> None:
         try:
@@ -65,6 +126,8 @@ class BrowserManager:
             pass
         self._browser = self._page = self._pw = None
         self._refs = {}
+        self._last_snapshot = []
+        self._last_screenshot_path = None
 
     def _require_page(self):
         if self._page is None:
@@ -76,6 +139,63 @@ class BrowserManager:
         if self._page is None:
             self.launch()
 
+    def _use_page(self, page) -> None:
+        """Makes page the active one: timeouts, dialog router, refs expire."""
+        self._page = page
+        self._page.set_default_timeout(self.timeout_ms)
+        self._install_dialog_router(page)
+        self._refs = {}
+        self._last_snapshot = []
+        self._last_screenshot_path = None  # stale image is worse than none
+
+    def _install_dialog_router(self, page) -> None:
+        """Records JS dialogs; auto-dismiss preserves default Playwright behavior."""
+        try:
+            if id(page) in self._dialog_pages:
+                return
+            manager = self
+
+            def _router(dialog):
+                try:
+                    pending, manager._pending_dialog = manager._pending_dialog, None
+                    if pending is not None:
+                        accept, prompt_text = pending
+                        if dialog.type == "prompt" and prompt_text is not None:
+                            dialog.accept(prompt_text)
+                        elif accept:
+                            dialog.accept()
+                        else:
+                            dialog.dismiss()
+                        manager._last_dialog_result = (
+                            f"Handled {dialog.type} dialog: {dialog.message[:300]}"
+                        )
+                    else:
+                        manager._last_dialog = (
+                            f"Auto-dismissed {dialog.type} dialog: {dialog.message[:300]}"
+                        )
+                        dialog.dismiss()
+                except Exception as e:
+                    logger.warning(f"Dialog router failed: {e}")
+
+            page.on("dialog", _router)
+            self._dialog_pages.add(id(page))
+        except Exception as e:
+            logger.warning(f"Could not install dialog router: {e}")
+
+    def consume_dialog_note(self) -> str:
+        """Returns and clears pending dialog notes (called after page actions)."""
+        notes = []
+        if self._last_dialog_result:
+            notes.append(self._last_dialog_result)
+            self._last_dialog_result = None
+        if self._last_dialog:
+            notes.append(self._last_dialog)
+            self._last_dialog = None
+        if self._pending_tabs_note:
+            notes.append(self._pending_tabs_note)
+            self._pending_tabs_note = None
+        return " ".join(notes)
+
     # -- navigation -----------------------------------------------------
 
     def goto(self, url: str, wait: str = "domcontentloaded") -> None:
@@ -83,6 +203,8 @@ class BrowserManager:
         page = self._require_page()
         logger.info(f"Browser goto: {url}")
         self._refs = {}  # refs expire on every navigation
+        self._last_snapshot = []
+        self._last_screenshot_path = None
         page.goto(url, wait_until=wait)
 
     def title(self) -> str:
@@ -130,7 +252,45 @@ class BrowserManager:
             except Exception:
                 continue
         logger.info(f"Browser snapshot: {len(elements)} interactive elements.")
+        self._last_snapshot = elements
         return elements
+
+    def find_in_snapshot(self, text: str | None = None, pattern: str | None = None,
+                         context_lines: int = 2) -> str:
+        """Cheap substring/regex search over the latest snapshot (with ref context)."""
+        import re
+        if not self._last_snapshot:
+            raise ValueError("No snapshot taken yet. Call browser_snapshot first.")
+        if pattern:
+            try:
+                rx = re.compile(pattern)
+            except re.error as e:
+                raise ValueError(f"browser_find: invalid regex '{pattern}': {e}") from e
+
+            def matches(s: str) -> bool:
+                return bool(rx.search(s))
+
+            query = pattern
+        elif text:
+            needle = text.lower()
+
+            def matches(s: str) -> bool:
+                return needle in s.lower()
+
+            query = text
+        else:
+            raise ValueError("browser_find needs one of: 'text', 'pattern'.")
+        lines = [f"[{e['ref']}] {e['role']}: {e['name'] or '(no label)'}" for e in self._last_snapshot]
+        hits = [i for i, line in enumerate(lines) if matches(line)]
+        if not hits:
+            return f"No matches for '{query}' in the latest snapshot ({len(lines)} elements)."
+        out, shown = [], set()
+        for i in hits:
+            for j in range(max(0, i - context_lines), min(len(lines), i + context_lines + 1)):
+                if j not in shown:
+                    shown.add(j)
+                    out.append((">> " if j == i else "   ") + lines[j])
+        return f"Matches for '{query}':\n" + "\n".join(out)
 
     def _ref(self, ref: int):
         try:
@@ -146,13 +306,179 @@ class BrowserManager:
     def click(self, ref: int) -> None:
         loc = self._ref(ref)
         logger.info(f"Browser click ref={ref}")
+        try:
+            opener_url = self._page.url if self._page else ""
+        except Exception:
+            opener_url = ""
+        before = {id(p) for p in self._browser.pages}
         loc.click(timeout=self.timeout_ms)
         self._refs = {}  # a click may navigate: force a fresh snapshot
+        self._last_snapshot = []
+        new_pages = [p for p in self._browser.pages if id(p) not in before]
+        if new_pages:
+            marks = []
+            for p in new_pages:
+                try:
+                    url, title = p.url, (p.title() or "")
+                except Exception:
+                    url, title = "", ""
+                marks.append(self._tab_mark(url, title, opener_url))
+            self._pending_tabs_note = f"New tab(s) opened by this click: {'; '.join(marks)}"
+
+    def _looks_like_ad(self, url: str, title: str = "", opener_url: str = "") -> bool:
+        """EasyList $popup match (opener-aware), else offline host-hint fallback."""
+        try:
+            engine = self._ad_engine()
+            if engine.rule_count > 0:
+                if engine.matches_popup(url, opener_url):
+                    return True
+        except Exception as e:
+            logger.warning(f"Ad-popup check failed: {e}")
+        try:
+            from .adblock import EasyListEngine
+            if EasyListEngine.fallback_ad_host(url, title):
+                return True
+        except Exception:
+            pass
+        return "advertisement" in (title or "").lower()
+
+    def _tab_mark(self, url: str, title: str, opener_url: str = "") -> str:
+        tag = " [AD?]" if self._looks_like_ad(url, title, opener_url) else ""
+        return f"{url[:120]!r} {title[:60]!r}{tag}"
+
+    def consume_tabs_note(self) -> str:
+        """Returns and clears the new-tabs notice (called after actions)."""
+        note, self._pending_tabs_note = self._pending_tabs_note, None
+        return note
 
     def fill(self, ref: int, text: str) -> None:
         loc = self._ref(ref)
         logger.info(f"Browser fill ref={ref} ({len(text)} chars)")
         loc.fill(text, timeout=self.timeout_ms)
+
+    def select_option(self, ref: int, value: str | None = None,
+                      label: str | None = None, index: int | None = None) -> str:
+        """Selects an option in a <select> dropdown (never use fill/click on selects)."""
+        loc = self._ref(ref)
+        kwargs = {}
+        if value is not None:
+            kwargs["value"] = value
+        elif label is not None:
+            kwargs["label"] = label
+        elif index is not None:
+            try:
+                kwargs["index"] = int(index)
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"browser_select_option: 'index' must be an integer, got '{index}'.") from e
+        else:
+            raise ValueError("browser_select_option needs one of: 'value', 'label', 'index'.")
+        logger.info(f"Browser select_option ref={ref} {kwargs}")
+        loc.select_option(timeout=self.timeout_ms, **kwargs)
+        self._refs = {}  # a selection may submit/navigate: force a fresh snapshot
+        self._last_snapshot = []
+        return f"Selected option {kwargs} in element ref={ref}."
+
+    def hover(self, ref: int) -> None:
+        loc = self._ref(ref)
+        logger.info(f"Browser hover ref={ref}")
+        loc.hover(timeout=self.timeout_ms)
+
+    def navigate_back(self) -> str:
+        page = self._require_page()
+        logger.info("Browser navigate back")
+        page.go_back(wait_until="domcontentloaded")
+        self._refs = {}
+        self._last_snapshot = []
+        self._last_screenshot_path = None
+        return f"Went back. URL: {page.url}. Take a fresh browser_snapshot before acting."
+
+    def wait_for(self, seconds: float | None = None, text: str | None = None,
+                 text_gone: str | None = None) -> str:
+        """Waits for time (max 30s), text to appear, or text to disappear."""
+        page = self._require_page()
+        if seconds is not None:
+            try:
+                wait = max(0.0, min(float(seconds), 30.0))
+            except (TypeError, ValueError) as e:
+                raise ValueError(f"browser_wait_for: 'time' must be a number, got '{seconds}'.") from e
+            logger.info(f"Browser wait {wait}s")
+            time.sleep(wait)
+            return f"Waited {wait}s."
+        if text:
+            page.get_by_text(text).first.wait_for(timeout=self.timeout_ms)
+            return f"Text appeared: '{text}'."
+        if text_gone:
+            page.get_by_text(text_gone).first.wait_for(state="hidden", timeout=self.timeout_ms)
+            return f"Text disappeared: '{text_gone}'."
+        raise ValueError("browser_wait_for needs one of: 'time', 'text', 'text_gone'.")
+
+    def handle_dialog(self, accept: bool = True, prompt_text: str | None = None) -> str:
+        """Arms policy for the next JS dialog; reports recently seen ones."""
+        self.ensure_launched()
+        recent = self._last_dialog_result or self._last_dialog or "none yet"
+        self._last_dialog_result = None
+        self._last_dialog = None
+        self._pending_dialog = (bool(accept), prompt_text)
+        what = "accept" if accept else "dismiss"
+        extra = " with prompt text" if prompt_text is not None else ""
+        logger.info(f"Browser dialog policy armed: {what}{extra}")
+        return f"Dialog policy armed: will {what} the next dialog{extra}. Recent dialog: {recent}."
+
+    def tabs(self, action: str = "list", index: int | None = None,
+             url: str | None = None) -> str:
+        """Lists, opens, selects, or closes browser tabs. The model manages tabs itself."""
+        self.ensure_launched()
+        action = (action or "list").lower()
+        pages = list(self._browser.pages)
+        if action == "list":
+            if not pages:
+                return "No open tabs."
+            try:
+                opener_url = self._page.url if self._page else ""
+            except Exception:
+                opener_url = ""
+            lines = []
+            for i, p in enumerate(pages):
+                try:
+                    purl, title = p.url, (p.title() or "")
+                except Exception:
+                    purl, title = "", ""
+                ad_tag = " [AD?]" if self._looks_like_ad(purl, title, opener_url) else ""
+                mark = " (current)" if p == self._page else ""
+                lines.append(f"[{i}] {title} — {purl}{ad_tag}{mark}")
+            return "Open tabs:\n" + "\n".join(lines)
+        if action == "new":
+            page = self._browser.new_page()
+            if url:
+                page.goto(url, wait_until="domcontentloaded")
+            self._use_page(page)
+            return f"Opened new tab. URL: {self._page.url}. Take a fresh browser_snapshot before acting."
+        if action == "select":
+            if index is None:
+                raise ValueError("browser_tabs select requires 'index'. Call action=list first.")
+            try:
+                page = pages[int(index)]
+            except (IndexError, ValueError, TypeError) as e:
+                raise ValueError(f"Unknown tab index '{index}'. Call action=list first.") from e
+            self._use_page(page)
+            return (f"Switched to tab [{int(index)}]. Title: '{page.title()}'. "
+                    f"URL: {page.url}. Take a fresh browser_snapshot before acting.")
+        if action == "close":
+            if index is None:
+                target = self._page
+            else:
+                try:
+                    target = pages[int(index)]
+                except (IndexError, ValueError, TypeError) as e:
+                    raise ValueError(f"Unknown tab index '{index}'. Call action=list first.") from e
+            target.close()
+            remaining = list(self._browser.pages)
+            if not remaining:
+                self._use_page(self._browser.new_page())
+                return "Closed the tab. No tabs left, opened a blank one."
+            self._use_page(remaining[-1])
+            return f"Closed tab. Now on: {self._page.url}. Take a fresh browser_snapshot before acting."
+        raise ValueError(f"Unknown browser_tabs action '{action}'. Use list/new/select/close.")
 
     def press(self, key: str) -> None:
         logger.info(f"Browser press key={key}")
@@ -171,6 +497,23 @@ class BrowserManager:
 
     def screenshot(self, path: str) -> str:
         self._require_page().screenshot(path=path)
+        return path
+
+    def capture_screenshot(self, prefix: str = "browser") -> str:
+        """Saves a viewport screenshot, remembered once for the next LLM request."""
+        import os
+        from datetime import datetime
+        self.ensure_launched()
+        os.makedirs("screenshots", exist_ok=True)
+        path = os.path.join("screenshots", f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+        self.screenshot(path)
+        self._last_screenshot_path = path
+        logger.info(f"Browser screenshot saved: {path}")
+        return path
+
+    def consume_screenshot_path(self) -> str | None:
+        """Returns the pending screenshot path once (then clears it)."""
+        path, self._last_screenshot_path = self._last_screenshot_path, None
         return path
 
     # -- helpers ------------------------------------------------------------

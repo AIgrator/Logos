@@ -149,7 +149,16 @@ class SettingsManager(QObject):
         "browser": {
             "headless": False,
             "profile_dir": "cache/browser_profile",
-            "default_timeout_ms": 30000
+            "default_timeout_ms": 30000,
+            "block_ads": True
+        },
+        "context": {
+            # Agent history compaction (browser mode). All defaults are
+            # no-ops: full history is sent. Enable to cut transmitted context.
+            "history_keep_last_n": 0,
+            "history_max_result_chars": 0,
+            "history_dedup_snapshots": False,
+            "history_trim_tracebacks": False
         },
         "theme": "dark",
         "search": {}
@@ -321,16 +330,23 @@ class SettingsManager(QObject):
     def get(self, key, default=None):
         return self._settings.get(key, default)
 
-    def set(self, key, value):
-        self.set_many({key: value})
+    def set(self, key, value, save: bool = True):
+        self.set_many({key: value}, save=save)
 
-    def set_many(self, settings_dict: dict):
-        """Set multiple settings at once and emit a single signal."""
+    def set_many(self, settings_dict: dict, save: bool = True):
+        """Set multiple settings at once and emit a single signal.
+
+        With save=False the change stays in memory only (no disk write, no
+        settings_changed signal) — used for session-only switches such as
+        the toolbar model switcher. Callers then refresh dependents manually.
+        """
         self._settings.update(settings_dict)
         for key, value in settings_dict.items():
             # Avoid logging sensitive values like API keys
             log_value = '********' if 'api_key' in key or 'password' in key else value
-            logger.info(f"[SettingsManager] Setting '{key}' to '{log_value}' (part of batch).")
+            logger.info(f"[SettingsManager] Setting '{key}' to '{log_value}' (part of batch, save={save}).")
+        if not save:
+            return
         logger.info("[SettingsManager] Emitting single settings_changed signal for batch update.")
         self.save()
 

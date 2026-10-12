@@ -22,6 +22,7 @@ class BrowserHandler:
         self.settings = controller.settings
         self.brain = controller.brain
         self.state = VisionState.IDLE
+        self.pre_pause_state = None
         self.original_user_request = None
         self.os_info = f"{platform.system()} {platform.release()}"
         self.command_history = []
@@ -65,12 +66,40 @@ class BrowserHandler:
 
     # -- main loop --------------------------------------------------------
 
+    def pause_or_resume(self):
+        if self.state == VisionState.PAUSED:
+            self._set_state(VisionState.EXECUTING)
+            self.ui.add_message("<i>Execution resumed.</i>")
+            self.ui.set_paused(False)
+            self._continue_loop()
+        elif self.state == VisionState.EXECUTING:
+            self.pre_pause_state = self.state
+            self._set_state(VisionState.PAUSED)
+            if self.controller.llm_worker:
+                self.controller.llm_worker.cancel()
+            self.controller.thinking_timer.stop()
+            self.ui.show_thinking_ui(False)
+            self.ui.add_message("<i>Execution paused. Inspect the browser, then press Resume or type guidance to continue.</i>")
+            self.ui.set_paused(True)
+
     def start_task(self, user_text: str):
         """Starts a new task in browser mode."""
         if self.state == VisionState.PAUSED_ON_ERROR:
             self._set_state(VisionState.EXECUTING)
             output_for_llm = f"**User Response:** {user_text}"
             self._continue_loop(last_command_output=output_for_llm)
+            return
+
+        if self.state in (VisionState.EXECUTING, VisionState.PAUSED):
+            # Free-text hint mid-task: keep history, steer the next step.
+            # (A fresh task starts only from IDLE, e.g. after Stop.)
+            if self.controller.llm_worker:
+                self.controller.llm_worker.cancel()
+            self.controller.thinking_timer.stop()
+            self.ui.show_thinking_ui(False)
+            self._set_state(VisionState.EXECUTING)
+            self.ui.set_paused(False)
+            self._continue_loop(last_command_output=f"**User guidance:** {user_text}")
             return
 
         logging.info(f"BrowserHandler starting task: {user_text}")
@@ -103,6 +132,8 @@ class BrowserHandler:
         mgr = BrowserManager(
             headless=bool(browser_settings.get("headless", False)),
             profile_dir=browser_settings.get("profile_dir", "cache/browser_profile"),
+            timeout_ms=int(browser_settings.get("default_timeout_ms", 30000) or 30000),
+            block_ads=bool(browser_settings.get("block_ads", True)),
         )
         self.computer.browser_manager = mgr
         # The browser_* tools also look for a factory on the Computer.
@@ -110,7 +141,7 @@ class BrowserHandler:
         return mgr
 
     def _continue_loop(self, last_command_output=None):
-        if self.state == VisionState.IDLE:
+        if self.state in (VisionState.IDLE, VisionState.PAUSED):
             return
 
         self._start_thinking_timer("Thinking...")
@@ -132,14 +163,33 @@ class BrowserHandler:
 
         self.controller._send_llm_request(
             user_prompt,
-            [],
+            self._consume_pending_screenshot(),
             system_prompt,
             [],
             "browser_tool_code",
         )
 
+    def _consume_pending_screenshot(self) -> list:
+        """Attaches the latest browser_screenshot (once) to the next request."""
+        try:
+            mgr = getattr(self.computer, "browser_manager", None)
+            if mgr is None or not hasattr(mgr, "consume_screenshot_path"):
+                return []
+            path = mgr.consume_screenshot_path()
+            if not path:
+                return []
+            with open(path, "rb") as f:
+                logging.info(f"Attaching browser screenshot to next request: {path}")
+                return [f.read()]
+        except Exception as e:
+            logging.warning(f"Could not attach browser screenshot: {e}")
+            return []
+
     def handle_llm_response(self, reasoning: str, payload: any, schema_name: str):
         """Handles the response from the LLM, which should be a tool call."""
+        if self.state == VisionState.PAUSED:
+            logging.info("Browser response arrived while paused; ignoring.")
+            return
         self._stop_thinking_timer()
 
         if reasoning:

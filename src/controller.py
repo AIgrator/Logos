@@ -10,6 +10,7 @@ from PySide6.QtWidgets import QFileDialog
 from PIL import Image
 
 from brain import Brain
+from llm.error_formatter import CONTINUE_LINK
 from llm.llm_worker import LLMWorker
 from settings_manager import SettingsManager
 from ui.manager import UIManager
@@ -100,6 +101,7 @@ class AppController(QObject):
         comp_start = time.perf_counter()
         self.computer = Computer(self.settings_manager, mode="chat")
         self._last_llm_request = None  # (user_prompt, attachments, system_prompt, history, schema) for Retry
+        self._last_llm_error = False  # True if the last request ended with an error card
         self.vision_handler = VisionHandler(self)
         self.terminal_handler = TerminalHandler(self, self.theme_manager, working_directory=self.working_directory)
         self.browser_handler = BrowserHandler(self, working_directory=self.working_directory)
@@ -168,6 +170,8 @@ class AppController(QObject):
         self.ui.vision_mode_selected.connect(self._activate_vision_mode)
         self.ui.browser_mode_selected.connect(self._activate_browser_mode)
         self.ui.retry_requested.connect(self._handle_retry_request)
+        self.ui.continue_requested.connect(self._handle_continue_request)
+        self.ui.model_selected.connect(self.switch_model)
         self.ui.cancel_requested.connect(self.handle_cancel_request)
         self.ui.pause_resume_clicked.connect(self._handle_pause_resume)
         self.ui.pause_for_feedback_clicked.connect(self._handle_pause_for_feedback)
@@ -316,6 +320,7 @@ class AppController(QObject):
         title_string = self._get_llm_title_string()
         self.ui.set_main_window_title(title_string)
         self.ui.set_title_bar_text(title_string)
+        self.ui.refresh_model_button(title_string)
         self._start_vision_initialization()
         self.indexer.start()
         self._check_initial_configuration()
@@ -566,6 +571,7 @@ class AppController(QObject):
         self.thinking_timer.stop()
         self.ui.stop_retry_countdown()
         self.ui.show_thinking_ui(False)
+        self._last_llm_error = True
 
         if self.state == ControllerState.VISION:
             # The vision handler will manage UI changes (like switching to full mode)
@@ -589,21 +595,62 @@ class AppController(QObject):
     def _send_llm_request(self, user_prompt, attachments, system_prompt, history, schema_name):
         """Store the request for the Retry button, then emit it to the worker."""
         self._last_llm_request = (user_prompt, attachments, system_prompt, history, schema_name)
+        self._last_llm_error = False
         self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name)
+
+    def _resend_last_request(self, log_line: str, notice_html: str, thinking_msg: str) -> bool:
+        """Re-sends the stored last LLM request (Retry / Continue links)."""
+        if not self._last_llm_request:
+            logging.warning("Resend requested but no previous LLM request is stored.")
+            return False
+        if self.thinking_timer.isActive():
+            logging.info("Resend requested while a request is in flight; ignoring.")
+            return False
+        logging.info(log_line)
+        self.ui.add_message(notice_html, force_scroll=True)
+        self.ui.show_thinking_ui(True, message=thinking_msg)
+        user_prompt, attachments, system_prompt, history, schema_name = self._last_llm_request
+        self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name)
+        return True
 
     def _handle_retry_request(self):
         """Re-send the last LLM request (Retry button on transient-error cards)."""
+        self._resend_last_request(
+            "Retrying last LLM request on user demand.",
+            "<i>Retrying last request...</i>",
+            "Retrying...",
+        )
+
+    def _handle_continue_request(self):
+        """Resume the task on the new model (Continue link after a model switch)."""
+        self._resend_last_request(
+            "Continuing last task on the new model on user demand.",
+            "<i>Continuing on the new model...</i>",
+            "Continuing...",
+        )
+
+    def _can_continue(self) -> bool:
+        """Whether a 'Continue' link after a model switch makes sense.
+
+        True when a task is mid-flight: the last request errored, we are
+        chatting, or an agent handler (browser/terminal/vision) is off IDLE.
+        False for a fresh IDLE (e.g. switch after a finished task) to avoid
+        re-firing a completed request.
+        """
         if not self._last_llm_request:
-            logging.warning("Retry requested but no previous LLM request is stored.")
-            return
-        if self.thinking_timer.isActive():
-            logging.info("Retry requested while a request is in flight; ignoring.")
-            return
-        logging.info("Retrying last LLM request on user demand.")
-        self.ui.add_message("<i>Retrying last request...</i>", force_scroll=True)
-        self.ui.show_thinking_ui(True, message="Retrying...")
-        user_prompt, attachments, system_prompt, history, schema_name = self._last_llm_request
-        self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name)
+            return False
+        if self._last_llm_error:
+            return True
+        if self.state == ControllerState.CHATTING:
+            return True
+        for handler in (self.browser_handler, self.terminal_handler, self.vision_handler):
+            try:
+                state = getattr(handler, "state", None)
+                if state is not None and getattr(state, "name", "") != "IDLE":
+                    return True
+            except Exception:
+                continue
+        return False
 
     def handle_cancel_request(self):
         if self.llm_worker:
@@ -618,6 +665,13 @@ class AppController(QObject):
         if self.state == ControllerState.VISION:
             self.vision_handler._set_state(VisionState.IDLE)
         else:
+            # Also idle agent handlers: otherwise a cancelled browser/terminal
+            # task stays EXECUTING-stalled and the next message would be
+            # misread as mid-task guidance instead of a fresh task.
+            if self.state == ControllerState.BROWSER:
+                self.browser_handler._set_state(VisionState.IDLE)
+            elif self.state == ControllerState.TERMINAL:
+                self.terminal_handler._set_state(VisionState.IDLE)
             self._set_state(ControllerState.IDLE)
 
     def _get_current_model_name(self):
@@ -684,9 +738,65 @@ class AppController(QObject):
         self.vision_handler.settings = new_settings
         logging.info("Settings have been updated and providers reloaded.")
 
+        # Live ad-blocking toggle (no browser restart needed).
+        try:
+            computer = getattr(self.browser_handler, "computer", None)
+            mgr = getattr(computer, "browser_manager", None) if computer else None
+            if mgr is not None and hasattr(mgr, "set_block_ads"):
+                browser_settings = (new_settings.get("browser", {}) or {})
+                mgr.set_block_ads(bool(browser_settings.get("block_ads", True)))
+        except Exception as e:
+            logging.warning(f"Could not propagate ad-blocking setting: {e}")
+
         title_string = self._get_llm_title_string()
         self.ui.set_main_window_title(title_string)
         self.ui.set_title_bar_text(title_string)
+        self.ui.refresh_model_button(title_string)
+
+    def switch_model(self, provider_id: str, model_id: str):
+        """Switches the active provider/model for this session only.
+
+        The change is kept in memory (no settings.json write). The in-flight
+        request is cancelled, histories and handler states are preserved, so
+        the new model picks up the task where the old one left off.
+        Provider tool schemas are per-mode static files loaded fresh by the
+        new provider instance — no regeneration needed on switch.
+        """
+        all_settings = self.settings_manager.all()
+        user_providers = all_settings.get("llm_providers", {})
+        target = user_providers.get(provider_id) or {}
+        if not target.get("api_key"):
+            self.ui.add_message(
+                f"<i>Cannot switch to {provider_id}: no API key configured.</i>",
+                force_scroll=True,
+            )
+            return
+        if (provider_id == all_settings.get("active_provider")
+                and target.get("model") == model_id):
+            return
+        logging.info(f"Switching model (session-only): {all_settings.get('active_provider')} -> {provider_id} / {model_id}")
+        if self.llm_worker:
+            self.llm_worker.cancel()
+        self.thinking_timer.stop()
+        self.ui.stop_retry_countdown()
+        self.ui.show_thinking_ui(False)
+        self.settings_manager.set_many({"active_provider": provider_id}, save=False)
+        target["model"] = model_id
+        self.settings = self.settings_manager.all()
+        self.llm_worker.update_settings_and_provider(self.settings)
+        self.chat_handler.settings = self.settings
+        self.vision_handler.settings = self.settings
+        logging.info("Settings have been updated and providers reloaded (session-only switch).")
+        title_string = self._get_llm_title_string()
+        self.ui.set_main_window_title(title_string)
+        self.ui.set_title_bar_text(title_string)
+        self.ui.refresh_model_button(title_string)
+        if self._can_continue():
+            notice = (f"<i>Switched to <b>{title_string}</b> (this session only). "
+                      f"Context preserved.</i>{CONTINUE_LINK}")
+        else:
+            notice = (f"<i>Switched to <b>{title_string}</b> (this session only).</i>")
+        self.ui.add_message(notice, force_scroll=True)
 
     def _cleanup_and_switch_handler(self, new_handler, new_state):
         # If a response is streaming, cancel it before switching modes.
@@ -799,6 +909,8 @@ class AppController(QObject):
     def _handle_pause_resume(self):
         if self.state == ControllerState.VISION:
             self.vision_handler.pause_or_resume()
+        elif self.state == ControllerState.BROWSER:
+            self.browser_handler.pause_or_resume()
 
     def _handle_pause_for_feedback(self):
         if self.state == ControllerState.VISION:

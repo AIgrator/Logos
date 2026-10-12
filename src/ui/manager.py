@@ -16,10 +16,13 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QListWidget, QListWidg
                                QMessageBox, QMenu, QPushButton, QSizeGrip, QStackedWidget,
                                QTextEdit, QVBoxLayout, QWidget)
 
+from llm.model_config_manager import ModelConfigManager
+
 from . import styles
 from .utils import CustomToolTipManager, IconHoverFilter
 from .widgets.attachment_chip import AttachmentChip
 from .widgets.chat_widget import ChatWidget
+from .widgets.model_switch_popup import ModelSwitchPopup
 from .widgets.custom_title_bar import CustomTitleBar
 from .widgets.flow_layout import FlowLayout
 from .widgets.non_scrollable_scroll_area import NonScrollableScrollArea
@@ -246,6 +249,8 @@ class UIManager(QWidget):
     terminal_mode_selected = Signal()
     vision_mode_selected = Signal()
     browser_mode_selected = Signal()
+    model_selected = Signal(str, str)  # provider_id, model_id (session-only switch)
+    continue_requested = Signal()
     retry_requested = Signal()
     attachment_removed = Signal(int)
     cancel_requested = Signal()
@@ -301,6 +306,7 @@ class UIManager(QWidget):
 
         self.chat_widget = ChatWidget(self.controller.theme_manager)
         self.chat_widget.retry_requested.connect(self.retry_requested.emit)
+        self.chat_widget.continue_requested.connect(self.continue_requested.emit)
         self.layout.addWidget(self.chat_widget, 1)
 
         self.attachment_scroll_area = NonScrollableScrollArea()
@@ -398,6 +404,13 @@ class UIManager(QWidget):
         self.mode_menu.addAction(self.browser_mode_action)
         self.mode_button.setMenu(self.mode_menu)
 
+        self.model_button = QPushButton("⚡ ...")
+        self.model_button.setMinimumSize(140, 36)
+        self.model_button.setMaximumWidth(260)
+        self.tooltip_manager.install(self.model_button, "Switch model (this session only)")
+        self.model_button.clicked.connect(self._show_model_switch_popup)
+        self.model_switch_popup = None
+
         self.pause_icon = None
         self.play_icon = None
 
@@ -437,6 +450,7 @@ class UIManager(QWidget):
         self.bottom_toolbar_layout.addWidget(self.toggle_button)
         self.bottom_toolbar_layout.addWidget(self.attachment_button)
         self.bottom_toolbar_layout.addWidget(self.mode_button)
+        self.bottom_toolbar_layout.addWidget(self.model_button)
         self.bottom_toolbar_layout.addStretch()
         self.bottom_toolbar_layout.addWidget(self.action_button_stack)
 
@@ -835,6 +849,68 @@ class UIManager(QWidget):
     def _on_browser_mode_selected(self):
         self.mode_button.setText("Browser")
         self.browser_mode_selected.emit()
+
+    def refresh_model_button(self, title: str):
+        """Updates the toolbar model button text (called on switch/settings change)."""
+        self.model_button.setText(f"⚡ {title}")
+
+    def _show_model_switch_popup(self):
+        if self.model_switch_popup is None:
+            self.model_switch_popup = ModelSwitchPopup(self.main_window)
+            self.model_switch_popup.model_selected.connect(self.model_selected.emit)
+        self.model_switch_popup.set_sections(self._build_model_sections())
+        self.model_switch_popup.open_near(self.model_button)
+
+    def _build_model_sections(self) -> list:
+        """Builds popup sections: provider headers + models, keyed providers only."""
+        sections = []
+        static_config = ModelConfigManager.PROVIDER_CONFIG or {}
+        user_providers = self.settings_manager.get("llm_providers", {}) or {}
+        current_pid = self.settings_manager.get("active_provider")
+        current_model = (user_providers.get(current_pid) or {}).get("model")
+        for pid, info in static_config.items():
+            user_cfg = user_providers.get(pid) or {}
+            if not user_cfg.get("api_key"):
+                continue
+            display = info.get("display_name") or pid.replace("_", " ").replace("-", " ").title()
+            if pid == "openrouter":
+                groups = info.get("models_by_provider") or {}
+                group_entries = []
+                for group, models in groups.items():
+                    items = []
+                    for model_name in sorted(models or []):
+                        stored_id = f"{group.lower()}/{model_name.lower().replace(' ', '-')}"
+                        if pid == current_pid and stored_id == current_model:
+                            is_current = True
+                        else:
+                            is_current = False
+                        # Free endpoints must be unmistakable: the same base
+                        # name without ":free" is the PAID variant (real charges!).
+                        label = (f"{model_name} [free]" if model_name.endswith(":free")
+                                 else model_name)
+                        items.append({"kind": "model", "label": label,
+                                      "provider_id": pid, "model_id": stored_id,
+                                      "is_current": is_current})
+                    if items:
+                        group_entries.append((group, items))
+                if not group_entries:
+                    continue
+                sections.append({"kind": "header", "label": display})
+                for group, items in group_entries:
+                    # Paid route must be unmistakable: a bare "Google" next to
+                    # the direct Google provider already caused real charges.
+                    sections.append({"kind": "subheader", "label": f"OpenRouter / {group}"})
+                    sections.extend(items)
+            else:
+                models = sorted(info.get("models") or [])
+                if not models:
+                    continue
+                sections.append({"kind": "header", "label": display})
+                for model_name in models:
+                    sections.append({"kind": "model", "label": model_name,
+                                      "provider_id": pid, "model_id": model_name,
+                                      "is_current": (pid == current_pid and model_name == current_model)})
+        return sections
 
     def set_active_mode(self, mode: str):
         is_terminal = (mode == 'terminal')

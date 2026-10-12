@@ -77,6 +77,43 @@ def extract_retry_after(response=None, message: str = "") -> float | None:
 RETRYABLE_STATUS_CODES = frozenset({408, 425, 500, 502, 503, 504, 529})
 
 
+#: Wording that proves quota/limits are EXHAUSTED (money side).
+#: Deliberately excludes the rate-limit family: gateways (OpenRouter) answer
+#: 429 for a merely busy shared pool too — that is transient, see below.
+QUOTA_EXHAUSTION_MARKERS = (
+    "quota", "billing", "payment", "out of credits", "insufficient_quota",
+    "quota_failure", "exceeded your current quota", "check your plan and billing",
+    "resource_exhausted", "resource exhausted",
+)
+
+
+def is_quota_exhausted(exc_or_message) -> bool:
+    """True on hard exhaustion signals (quota/billing wording)."""
+    if isinstance(exc_or_message, str):
+        text = exc_or_message
+    else:
+        text = f"{type(exc_or_message).__name__} {exc_or_message}"
+    return any(marker in text.lower() for marker in QUOTA_EXHAUSTION_MARKERS)
+
+
+def is_transient_throttle(exc_or_message) -> bool:
+    """True on explicit 'retry shortly' upstream throttling WITHOUT exhaustion.
+
+    Some gateways answer 429 for a busy shared pool as well
+    ("temporarily rate-limited upstream, retry shortly"). The server asks to
+    retry, so this is transient (countdown + bounded retries), not dead quota.
+    Any exhaustion marker flips it back to quota.
+    """
+    if isinstance(exc_or_message, str):
+        text = exc_or_message
+    else:
+        text = f"{type(exc_or_message).__name__} {exc_or_message}"
+    lowered = text.lower()
+    if "temporarily rate-limited" not in lowered and "retry shortly" not in lowered:
+        return False
+    return not is_quota_exhausted(lowered)
+
+
 def is_quota_error(exc_or_message) -> bool:
     """True when an error looks like exhausted quota/limits, not a transient fault.
 
@@ -92,10 +129,8 @@ def is_quota_error(exc_or_message) -> bool:
         text = f"{type(exc_or_message).__name__} {exc_or_message}"
     lowered = text.lower()
     markers = (
-        "quota", "billing", "payment", "out of credits", "insufficient_quota",
-        "exceeded your current quota", "check your plan and billing",
-        "resource_exhausted", "resource exhausted",
-        "rate limit", "rate_limit", "ratelimit", "too many requests",
+        QUOTA_EXHAUSTION_MARKERS
+        + ("rate limit", "rate_limit", "ratelimit", "too many requests")
     )
     if any(marker in lowered for marker in markers):
         return True

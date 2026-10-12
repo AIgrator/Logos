@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from typing import Any, Literal
 
 class ToolCall(BaseModel):
-    name: Literal['browser_goto', 'browser_snapshot', 'browser_click', 'browser_fill', 'browser_press', 'browser_read', 'browser_close', 'finish', 'communicate_to_user'] = Field(..., example="browser_goto")
+    name: Literal['browser_goto', 'browser_snapshot', 'browser_click', 'browser_fill', 'browser_select_option', 'browser_hover', 'browser_press', 'browser_read', 'browser_screenshot', 'browser_find', 'browser_wait_for', 'browser_navigate_back', 'browser_tabs', 'browser_handle_dialog', 'browser_close', 'finish', 'communicate_to_user'] = Field(..., example="browser_goto")
     arguments: dict[str, Any] | None = Field(default=None, example={"url": "https://example.com"})
 
 class BrowserToolCodePayload(BaseModel):

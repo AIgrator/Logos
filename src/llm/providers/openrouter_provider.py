@@ -8,7 +8,7 @@ import io
 import requests
 from PIL import Image
 from ..base_provider import BaseLLMProvider
-from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error, is_transient_throttle
 
 class OpenRouterProvider(BaseLLMProvider):
     """
@@ -105,6 +105,8 @@ class OpenRouterProvider(BaseLLMProvider):
             status_code = e.response.status_code
             error_message = f"OpenRouter HTTP error ({status_code}) during web search: {e.response.text}"
             if status_code == 429:
+                if is_transient_throttle(error_message):
+                    raise RetryableError(f"OpenRouter transient upstream throttling: {error_message}", retry_after=extract_retry_after(response=e.response, message=error_message)) from e
                 raise FatalError(f"OpenRouter quota exhausted: {error_message}") from e
             if 400 <= status_code < 500:
                 raise FatalError(error_message) from e
@@ -124,7 +126,8 @@ class OpenRouterProvider(BaseLLMProvider):
 
         schema_files = [
             'cache/terminal/response_formats.json',
-            'cache/vision/response_formats.json'
+            'cache/vision/response_formats.json',
+            'cache/browser/response_formats.json'
         ]
         all_schemas = {}
 
@@ -144,7 +147,7 @@ class OpenRouterProvider(BaseLLMProvider):
                 continue
 
         if not all_schemas:
-            logging.error("No tool schemas could be loaded. Please ensure 'cache/terminal/response_formats.json' and/or 'cache/vision/response_formats.json' exist and are valid.")
+            logging.error("No tool schemas could be loaded. Please ensure 'cache/terminal/response_formats.json', 'cache/vision/response_formats.json' and/or 'cache/browser/response_formats.json' exist and are valid.")
             return []
 
         formatted_tools = []
@@ -317,6 +320,8 @@ class OpenRouterProvider(BaseLLMProvider):
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code
             if status_code == 429:
+                if is_transient_throttle(e.response.text):
+                    raise RetryableError(f"OpenRouter transient upstream throttling ({status_code}): {e.response.text}", retry_after=extract_retry_after(response=e.response, message=e.response.text)) from e
                 raise FatalError(f"OpenRouter quota exhausted ({status_code}): {e.response.text}") from e
             if 400 <= status_code < 500:
                 raise FatalError(f"OpenRouter client error ({status_code}): {e.response.text}") from e
@@ -391,6 +396,8 @@ class OpenRouterProvider(BaseLLMProvider):
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code
             if status_code == 429:
+                if is_transient_throttle(str(e)):
+                    raise RetryableError(f"OpenRouter transient upstream throttling ({status_code}): {e}", retry_after=extract_retry_after(response=e.response, message=str(e))) from e
                 raise FatalError(f"OpenRouter quota exhausted ({status_code}): {e}") from e
             if 400 <= status_code < 500:
                 raise FatalError(f"OpenRouter client error ({status_code}): {e}") from e

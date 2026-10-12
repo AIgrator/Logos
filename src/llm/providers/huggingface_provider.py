@@ -107,7 +107,8 @@ class HuggingFaceProvider(BaseLLMProvider):
 
         schema_files = [
             'cache/terminal/response_formats.json',
-            'cache/vision/response_formats.json'
+            'cache/vision/response_formats.json',
+            'cache/browser/response_formats.json'
         ]
         all_schemas = {}
 

@@ -5,7 +5,7 @@ import copy
 from datetime import datetime
 
 from .llm_parsing import repair_json_string, validate_object, universal_fallback_parser
-from .exceptions import FatalError, RetryableError, MAX_AUTO_WAIT_SECONDS, extract_retry_after, format_wait, is_quota_error
+from .exceptions import FatalError, RetryableError, MAX_AUTO_WAIT_SECONDS, extract_retry_after, format_wait, is_quota_error, is_transient_throttle
 from .error_formatter import format_llm_error, format_quota_wall
 from time import perf_counter
 from llm import import_real_provider_classes
@@ -538,10 +538,12 @@ class LLMWorker(QObject):
                         suggested = float(suggested) if suggested else 0
                     except (TypeError, ValueError):
                         suggested = 0
-                    if is_quota_error(str(e)):
+                    if not is_transient_throttle(str(e)) and is_quota_error(str(e)):
                         # Quota/limits (original rule: 429 = money, not transient):
                         # never auto-retry; honest card instead. A huge
                         # server-stated wait gets the quota-wall card.
+                        # Explicit "retry shortly" upstream throttling is
+                        # exempted: it falls through to the normal retry path.
                         if suggested > MAX_AUTO_WAIT_SECONDS:
                             wall_human = format_wait(suggested)
                             logging.error(

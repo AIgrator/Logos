@@ -26,6 +26,7 @@ class IndexerEventHandler(FileSystemEventHandler):
         A debounce mechanism is used to handle bursts of events.
         """
         if not self.indexer._is_ignored(event.src_path):
+            logging.debug(f"Indexer event: {event.event_type} {event.src_path} -> reindex scheduled")
             self.indexer.schedule_reindex()
 
 class Indexer(QObject):

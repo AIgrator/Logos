@@ -1,8 +1,9 @@
 import re
 import html
-from .exceptions import RetryableError, format_wait
+from .exceptions import RetryableError, format_wait, is_quota_exhausted
 
 RETRY_LINK = "<br><a href=\"retry:last\">↻ Retry request</a>"
+CONTINUE_LINK = "<br><a href=\"continue:last\">▶ Продолжить</a>"
 
 
 def format_quota_wall(provider_name: str, error: Exception, wait_seconds: float) -> str:
@@ -44,6 +45,17 @@ def format_llm_error(provider_name: str, error: Exception) -> str:
     if any(re.search(p, error_str) for p in api_key_patterns):
         return (f"<b>Authentication Error with {provider_display_name}:</b><br>"
                 f"The API key is incorrect or invalid. Please verify your key in the settings.")
+
+    # Transient upstream throttling: gateways (OpenRouter) answer 429 for a
+    # busy shared pool too ("temporarily rate-limited, retry shortly").
+    # Without exhaustion markers that is transient, not dead quota.
+    # Checked BEFORE quota (whose patterns would also match the 429 code).
+    if (("temporarily rate-limited" in error_str or "retry shortly" in error_str)
+            and not is_quota_exhausted(error_str)):
+        return (f"<b>{provider_display_name} is temporarily rate-limited upstream:</b><br>"
+                f"The shared pool is busy right now — the server asks to retry shortly "
+                f"(the app already retried automatically)."
+                f"{RETRY_LINK}")
 
     # Quota or Billing Issues (money/account side: 429 = limits, retrying will NOT help).
     # Checked BEFORE overload: original design rule, restored. No Retry link
