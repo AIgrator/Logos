@@ -5,6 +5,7 @@ thread so the chat window never blocks. The caller dispatches with a ticket;
 results carry it back so stale (cancelled/stopped) executions are ignored.
 """
 import logging
+import threading
 
 from PySide6.QtCore import QObject, Signal, Slot
 
@@ -22,19 +23,38 @@ class ToolExecWorker(QObject):
 
     @Slot(int, str, dict)
     def run_tool(self, ticket: int, action_name: str, action_args: dict):
+        if self._cancelled:
+            logging.info(f"ToolExecWorker: ticket {ticket} ({action_name}) dropped, cancelled.")
+            return
+        logging.info(f"ToolExecWorker: ticket {ticket} running {action_name} "
+                     f"on thread '{threading.current_thread().name}'.")
         try:
-            if self._cancelled:
-                return
             if not hasattr(self.computer, action_name):
                 raise AttributeError(f"Computer has no tool named '{action_name}'")
             action_func = getattr(self.computer, action_name)
             result = action_func(**action_args)
-            if not self._cancelled:
-                self.finished.emit(ticket, result)
         except Exception as e:  # noqa: BLE001 - report back to the loop
             if not self._cancelled:
                 logging.error(f"Tool execution error in worker: {e}", exc_info=True)
                 self.error.emit(ticket, str(e))
+            return
+        if not self._cancelled:
+            logging.info(f"ToolExecWorker: ticket {ticket} ({action_name}) done, "
+                         f"result={_summarize(result)}.")
+            self.finished.emit(ticket, result)
+        else:
+            logging.info(f"ToolExecWorker: ticket {ticket} ({action_name}) done but cancelled.")
 
     def cancel(self):
         self._cancelled = True
+
+
+def _summarize(result, limit: int = 200) -> str:
+    try:
+        text = str(result)
+    except Exception:
+        return f"<unprintable {type(result).__name__}>"
+    text = text.replace("\n", " ")
+    if len(text) > limit:
+        return f"{text[:limit]}... (+{len(text) - limit} chars)"
+    return text

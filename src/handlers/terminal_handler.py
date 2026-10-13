@@ -221,6 +221,7 @@ class TerminalHandler(BaseAgentHandler):
         self._pending_action_name = action_name
         self._pending_action_args = action_args
         self._exec_ticket += 1
+        logging.info(f"TerminalHandler: dispatching ticket {self._exec_ticket} ({action_name}) to exec thread.")
         self._exec_worker.dispatch.emit(self._exec_ticket, action_name, action_args)
         return None
 
@@ -371,6 +372,7 @@ class TerminalHandler(BaseAgentHandler):
         if ticket != self._exec_ticket:
             logging.info(f"Stale tool result ignored (ticket {ticket} != {self._exec_ticket}).")
             return
+        logging.info(f"TerminalHandler: ticket {ticket} ({self._pending_action_name}) result received, continuing loop.")
         output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
             self._pending_action_name, result, self._pending_action_args
         )
@@ -383,6 +385,7 @@ class TerminalHandler(BaseAgentHandler):
         if ticket != self._exec_ticket:
             logging.info(f"Stale tool error ignored (ticket {ticket} != {self._exec_ticket}).")
             return
+        logging.info(f"TerminalHandler: ticket {ticket} ({self._pending_action_name}) error received, continuing loop.")
         error_msg = f"**Error:** {error_message}"
         self.ui.add_message(f"<i>{error_msg}</i>")
         self._continue_loop(error_msg)
