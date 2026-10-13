@@ -37,6 +37,11 @@ def _is_error_output(text) -> bool:
     if text.startswith("**Command Result:** (Exit Code:"):
         first_line = text.split("\n", 1)[0]
         return "(Exit Code: 0)" not in first_line
+    # A finished background job that failed is a failure observation too —
+    # otherwise successful polls keep resetting the streak and escalation
+    # never fires while the loop circles a dead job.
+    if "'status': 'done'" in text and "'exit_code': 0" not in text:
+        return True
     return False
 
 
