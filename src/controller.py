@@ -327,6 +327,17 @@ class AppController(QObject):
         except Exception as e:
             logging.warning(f"Terminal web thread stop failed: {e}")
         try:
+            exec_thread = getattr(getattr(self, "terminal_handler", None), "_exec_thread", None)
+            if exec_thread is not None:
+                try:
+                    exec_thread.quit()
+                except Exception:
+                    pass
+                if exec_thread.isRunning() and not exec_thread.wait(2000):
+                    logging.warning("Terminal exec thread did not finish in 2000ms; continuing shutdown.")
+        except Exception as e:
+            logging.warning(f"Terminal exec thread stop failed: {e}")
+        try:
             computer = getattr(getattr(self, "browser_handler", None), "computer", None)
             mgr = getattr(computer, "browser_manager", None) if computer else None
             if mgr is not None:

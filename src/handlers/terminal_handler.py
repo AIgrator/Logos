@@ -12,6 +12,7 @@ from ui.terminal_html_formatter import TerminalHtmlFormatter
 from src.computer.computer import Computer
 
 from .base_agent import BaseAgentHandler
+from .tool_exec_worker import ToolExecWorker
 
 class WebTaskThread(QThread):
     """ Thread to handle blocking web requests."""
@@ -90,6 +91,16 @@ class TerminalHandler(BaseAgentHandler):
         self.os_info = f"{platform.system()} {platform.release()}"
         self.web_thread = None
         self.active_edit_path = None
+
+        self._exec_thread = QThread()
+        self._exec_worker = ToolExecWorker(self.computer)
+        self._exec_worker.moveToThread(self._exec_thread)
+        self._exec_worker.finished.connect(self._on_tool_finished)
+        self._exec_worker.error.connect(self._on_tool_error)
+        self._exec_thread.start()
+        self._exec_ticket = 0
+        self._pending_action_name = None
+        self._pending_action_args = None
 
         # Connect to theme changes to update the formatter
         self.theme_manager.theme_changed.connect(self._on_theme_changed)
@@ -206,24 +217,12 @@ class TerminalHandler(BaseAgentHandler):
                 self.ui.add_message(f"<b>Executing:</b> {command_str_for_ui}")
         # ---------------------------------------------
 
-        try:
-            if not hasattr(self.computer, action_name):
-                raise AttributeError(f"Computer has no tool named '{action_name}'")
-
-            action_func = getattr(self.computer, action_name)
-            result = action_func(**action_args)
-            output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(action_name, result, action_args)
-
-            if output_for_ui:
-                self.ui.add_message(output_for_ui)
-
-            return output_for_llm
-
-        except Exception as e:
-            logging.error(f"Error executing terminal action: {e}", exc_info=True)
-            error_message = f"**Error:** {e}"
-            self.ui.add_message(f"<i>{error_message}</i>")
-            return error_message
+        self._ensure_exec_thread()
+        self._pending_action_name = action_name
+        self._pending_action_args = action_args
+        self._exec_ticket += 1
+        self._exec_worker.dispatch.emit(self._exec_ticket, action_name, action_args)
+        return None
 
     def _handle_web_request(self, action_name: str, action_args: dict):
         """ Handles web_fetchs and web_search asynchronously using a WebTaskThread."""
@@ -363,7 +362,38 @@ class TerminalHandler(BaseAgentHandler):
 
         return output_for_llm, output_for_ui
 
+    def _ensure_exec_thread(self):
+        if not self._exec_thread.isRunning():
+            self._exec_thread.start()
+
+    @Slot(int, object)
+    def _on_tool_finished(self, ticket: int, result):
+        if ticket != self._exec_ticket:
+            logging.info(f"Stale tool result ignored (ticket {ticket} != {self._exec_ticket}).")
+            return
+        output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
+            self._pending_action_name, result, self._pending_action_args
+        )
+        if output_for_ui:
+            self.ui.add_message(output_for_ui)
+        self._continue_loop(output_for_llm)
+
+    @Slot(int, str)
+    def _on_tool_error(self, ticket: int, error_message: str):
+        if ticket != self._exec_ticket:
+            logging.info(f"Stale tool error ignored (ticket {ticket} != {self._exec_ticket}).")
+            return
+        error_msg = f"**Error:** {error_message}"
+        self.ui.add_message(f"<i>{error_msg}</i>")
+        self._continue_loop(error_msg)
+
     def _cleanup_task(self):
+        self._exec_ticket += 1
+        if self._exec_thread and self._exec_thread.isRunning():
+            self._exec_worker.cancel()
+            self._exec_thread.quit()
+            if not self._exec_thread.wait(2000):
+                logging.warning("Terminal exec thread did not stop in 2000ms.")
         if self.active_edit_path:
             self.ui.add_message(self.html_formatter.format_container_end())
             self.active_edit_path = None
