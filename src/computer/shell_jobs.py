@@ -413,6 +413,25 @@ class ShellJobManager:
         return {"stdout": res.get("stdout", ""), "stderr": res.get("stderr", ""),
                 "exit_code": res.get("exit_code", -1)}
 
+    def describe_live(self) -> str:
+        """History line about currently running jobs for every planning turn.
+
+        The model forgets in-flight work between turns and relaunches it
+        (ten archive attempts over one live Compress). Seeing this every
+        turn — including guidance-steered ones — keeps it from duplicating.
+        """
+        with self._lock:
+            jobs = list(self._jobs.values())
+        live = [j for j in jobs if not j.done.is_set()]
+        if not live:
+            return ""
+        parts = []
+        for j in live:
+            cmd = j.command if len(j.command) <= 80 else j.command[:77] + "..."
+            parts.append(f"#{j.job_id} (`{cmd}`, running {int(time.monotonic() - j.started)}s)")
+        return ("**Live background jobs (already running — do NOT relaunch this work, "
+                "poll it instead):** " + "; ".join(parts) + ".")
+
     def describe_running(self) -> str:
         """One history line about jobs that outlived their task (or '')."""
         with self._lock:
