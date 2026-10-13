@@ -8,26 +8,23 @@ import platform
 import html
 import json
 import re
-from PySide6.QtCore import Signal, Slot, QThread
+from PySide6.QtCore import Slot, QThread
 from ui.terminal_html_formatter import TerminalHtmlFormatter
 from src.computer.computer import Computer
 
 from .base_agent import BaseAgentHandler
-from .tool_exec_worker import ToolExecWorker
+from .tool_exec_worker import ToolExecRelay, ToolExecWorker
 
 class WebTaskThread(QThread):
     """ Thread to handle blocking web requests."""
 
-    finished = Signal(str, str, dict)  # action_name, result, original_args
-    error = Signal(str, str, dict)      # action_name, error_message, original_args
-    plan_a_failed = Signal(str)         # provider_display_name
-
-    def __init__(self, computer, provider, action_name, action_args, parent=None):
+    def __init__(self, computer, provider, action_name, action_args, relay: ToolExecRelay, parent=None):
         super().__init__(parent)
         self.computer = computer
         self.provider = provider
         self.action_name = action_name
         self.action_args = action_args
+        self._relay = relay
         self._is_cancelled = False
 
     def run(self):
@@ -56,7 +53,7 @@ class WebTaskThread(QThread):
                     final_response = self.provider.web_search(query=query)
                 except Exception as e:
                     logging.warning(f"Plan A (native search) from '{self.provider.get_display_name()}' failed: {e}. Proceeding to Plan B.")
-                    self.plan_a_failed.emit(self.provider.get_display_name())
+                    self._relay.web_plan_a_failed.emit(self.provider.get_display_name())
                     final_response = None
 
                 if self._is_cancelled:
@@ -68,12 +65,12 @@ class WebTaskThread(QThread):
                     final_response = self.computer.web_search(query=query)
 
             if not self._is_cancelled:
-                self.finished.emit(self.action_name, final_response, self.action_args)
+                self._relay.web_finished.emit(self.action_name, final_response, self.action_args)
 
         except Exception as e:
             if not self._is_cancelled:
                 logging.error(f"WebTaskThread error for {self.action_name}: {e}", exc_info=True)
-                self.error.emit(self.action_name, str(e), self.action_args)
+                self._relay.web_error.emit(self.action_name, str(e), self.action_args)
 
     def cancel(self):
         """Flags the thread to be cancelled."""
@@ -95,11 +92,12 @@ class TerminalHandler(BaseAgentHandler):
         self.active_edit_path = None
 
         self._exec_thread = QThread()
-        self._exec_worker = ToolExecWorker(self.computer)
+        # Relay first: it must live on the GUI thread so worker results
+        # are queued back here (direct connects would run slots on the
+        # worker thread and crash Qt — proven by faulthandler).
+        self._exec_relay = ToolExecRelay(self)
+        self._exec_worker = ToolExecWorker(self.computer, self._exec_relay)
         self._exec_worker.moveToThread(self._exec_thread)
-        self._exec_worker.finished.connect(self._on_tool_finished)
-        self._exec_worker.error.connect(self._on_tool_error)
-        self._exec_worker.progress.connect(self._on_tool_progress)
         self._exec_thread.start()
         self._exec_ticket = 0
         self._pending_action_name = None
@@ -243,12 +241,9 @@ class TerminalHandler(BaseAgentHandler):
             self.web_thread.quit()
             self.web_thread.wait()
 
-        self.web_thread = WebTaskThread(self.computer, provider, action_name, action_args)
-        self.web_thread.finished.connect(self._on_web_request_complete)
-        self.web_thread.error.connect(self._on_web_request_error)
-        self.web_thread.plan_a_failed.connect(self._on_plan_a_failed)
+        self.web_thread = WebTaskThread(self.computer, provider, action_name, action_args,
+                                         self._exec_relay)
         self.web_thread.finished.connect(self.web_thread.deleteLater)
-        self.web_thread.error.connect(self.web_thread.deleteLater)
         self.web_thread.start()
 
     @Slot(str)
