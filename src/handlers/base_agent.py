@@ -162,8 +162,6 @@ def _recent_commands(history, n: int = 3) -> str:
                 break
             if h.startswith(("**Tool Result:**", "**Command Result:**", "**Error:**")):
                 outcome = _outcome_of(h)
-                if _is_formulation_error(h):
-                    outcome += " (typo, not counted)"
                 break
         items.append(f"• {cmd} → {outcome}")
     return "\n".join(items) if items else "(none recorded)"
@@ -194,31 +192,6 @@ def _summarize_failure(text, limit: int = 300) -> str:
     picked = (prioritized + [ln for ln in useful if ln not in prioritized])[:2]
     out = " / ".join(picked)
     return out[:limit] + ("…" if len(out) > limit else "")
-
-
-def _is_formulation_error(text) -> bool:
-    """The model's own sloppiness (typos, quoting, bad args) — not the task.
-
-    A SyntaxError in a one-liner or an unknown flag says nothing about
-    whether the OPERATION can succeed; the next turn usually fixes it.
-    Counting these toward escalation pages the user over trifles, so they
-    neither build nor reset the streak (like neutral outputs).
-
-    NOTE (honest tradeoff): no perfect criterion exists — "does this error
-    relate to the requested action" is semantic, code sees only text. These
-    markers err toward NOT paging: a misclassified operation failure merely
-    delays escalation (identical-repeat and timeout guards still bound the
-    loop), while paging over every typo spams the user for nothing.
-    """
-    if not isinstance(text, str):
-        return False
-    lowered = text.lower()
-    markers = (
-        "syntaxerror", "parsererror:", "is not recognized",
-        "invalid job_id", "missing required", "has no tool named",
-        "typeerror", "attributeerror", "nameerror",
-    )
-    return any(m in lowered for m in markers)
 
 
 def _is_neutral_output(text) -> bool:
@@ -423,20 +396,17 @@ class BaseAgentHandler:
                 self.cancel_job_wait()
             except Exception:
                 pass
+        # Doctrine: significance is the MODEL's call, never the code's.
+        # The code counts only mechanical facts — timeout deaths (our own
+        # exact text), neutral launches/polls (no outcome yet), and everything
+        # else failure-shaped as plain unsuccessful turns. Whether a
+        # SyntaxError is a trifle or the wall is judged by her in the
+        # assessment turn, not by marker lists here. The user is only ever
+        # bothered via her communicate_to_user or the second-tripwire pause.
         if last_command_output:
             self.command_history.append(last_command_output)
             if _is_neutral_output(last_command_output):
                 pass
-            elif _is_formulation_error(last_command_output):
-                logging.debug(f"{type(self).__name__} ignoring formulation error "
-                              f"for escalation streak.")
-                # Tell the model too (not just the user-facing tried-list):
-                # that failure judged the command, not the task.
-                self.command_history.append(
-                    "**Note:** that failure was a command typo (quoting/args), "
-                    "not a task failure — fix the syntax and retry; the task "
-                    "itself is unjudged."
-                )
             elif _is_timeout_death(last_command_output):
                 self._consecutive_errors += 1
                 self._consecutive_timeouts += 1
