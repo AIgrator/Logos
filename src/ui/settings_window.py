@@ -370,6 +370,7 @@ class SettingsWindow(QDialog):
         # Terminal (long tasks need a generous shell timeout)
         terminal_settings = self.settings_manager.get("terminal", {})
         self.shell_timeout_spinbox.setValue(int(terminal_settings.get("shell_timeout_seconds", 60) or 60))
+        self.shell_detach_spinbox.setValue(int(terminal_settings.get("shell_detach_seconds", 25) or 25))
 
         # Vision
         vision_settings = self.settings_manager.get("vision", {})
@@ -480,6 +481,7 @@ class SettingsWindow(QDialog):
 
         terminal_settings = {
             "shell_timeout_seconds": self.shell_timeout_spinbox.value(),
+            "shell_detach_seconds": self.shell_detach_spinbox.value(),
         }
         # Preserve keys with no UI widget so saving never silently drops them.
         try:
@@ -996,6 +998,20 @@ class SettingsWindow(QDialog):
         terminal_layout.addWidget(QLabel("Shell timeout:"), 0, 0)
         terminal_layout.addWidget(self._create_help_label(shell_timeout_tooltip), 0, 1, Qt.AlignLeft)
         terminal_layout.addWidget(self.shell_timeout_spinbox, 0, 3)
+
+        self.shell_detach_spinbox = QSpinBox()
+        self.shell_detach_spinbox.setRange(5, 600)
+        self.shell_detach_spinbox.setSingleStep(5)
+        self.shell_detach_spinbox.setSuffix(" s")
+        self.shell_detach_spinbox.setFixedWidth(100)
+        shell_detach_tooltip = (
+            "After this many seconds a foreground command transparently becomes "
+            "a background job (same timeout still applies). Lower = more responsive, "
+            "higher = fewer poll turns for medium commands."
+        )
+        terminal_layout.addWidget(QLabel("Detach to background:"), 1, 0)
+        terminal_layout.addWidget(self._create_help_label(shell_detach_tooltip), 1, 1, Qt.AlignLeft)
+        terminal_layout.addWidget(self.shell_detach_spinbox, 1, 3)
 
         return group
 

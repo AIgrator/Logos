@@ -116,6 +116,9 @@ class BaseAgentHandler:
         # Do not wipe history if already populated (e.g. attachments).
         if not self.command_history:
             self.command_history = []
+        jobs_note = self._running_jobs_note()
+        if jobs_note:
+            self.command_history.append(jobs_note)
         self._set_state(VisionState.EXECUTING)
         self._continue_loop()
 
@@ -232,6 +235,10 @@ class BaseAgentHandler:
     def _request_attachments(self) -> list:
         """Extra payloads for the next request (images, files). Default: none."""
         return []
+
+    def _running_jobs_note(self) -> str:
+        """History line about background jobs outliving their task. Default: none."""
+        return ""
 
     def handle_llm_response(self, reasoning: str, payload: any, schema_name: str):
         """Handles the response from the LLM, which should be a tool call."""

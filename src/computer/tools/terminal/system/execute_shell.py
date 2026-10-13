@@ -38,19 +38,41 @@ def execute_shell(self, command: str, run_in_background: bool = False) -> dict:
     if not command:
         raise ValueError("Action 'execute_shell' failed: Missing required 'command' argument.")
 
-    timeout = resolve_shell_timeout(getattr(self, "settings_manager", None))
+    settings_manager = getattr(self, "settings_manager", None)
+    timeout = resolve_shell_timeout(settings_manager)
+    manager = getattr(self, "shell_jobs", None)
     if run_in_background:
-        manager = getattr(self, "shell_jobs", None)
         if manager is None:
             raise RuntimeError("Background shell jobs are not available.")
         return manager.launch(command, self.working_directory, timeout)
+
+    if manager is not None:
+        # Safety net for misjudged durations: a foreground call that runs
+        # longer than detach_after transparently becomes a background job
+        # instead of blocking (or dying at the timeout).
+        detach_setting = 25
+        try:
+            if settings_manager is not None:
+                detach_setting = int((settings_manager.get("terminal", {}) or {}).get(
+                    "shell_detach_seconds", 25) or 25)
+        except Exception:
+            detach_setting = 25
+        detach_after = max(1, min(detach_setting, timeout))
+        return manager.launch_and_wait(
+            command,
+            self.working_directory,
+            timeout,
+            detach_after,
+            cancel_event=getattr(self, "cancel_event", None),
+            # Captured once: a newer run may replace the shared callback, but this
+            # run keeps reporting under its own ticket (stale ones are dropped).
+            progress_cb=getattr(self, "progress_callback", None),
+        )
 
     return run_shell_command(
         command,
         self.working_directory,
         timeout,
         cancel_event=getattr(self, "cancel_event", None),
-        # Captured once: a newer run may replace the shared callback, but this
-        # run keeps reporting under its own ticket (stale ones are dropped).
         progress_cb=getattr(self, "progress_callback", None),
     )

@@ -278,17 +278,24 @@ class ShellJobManager:
         self._jobs: dict = {}
         self._counter = 0
 
-    def launch(self, command: str, working_directory, timeout: float) -> dict:
+    def _register(self, command: str, timeout: float, cancel_event=None) -> ShellJob:
         with self._lock:
             self._counter += 1
             job_id = self._counter
             job = ShellJob(job_id, command, timeout)
+            if cancel_event is not None:
+                job.cancel_event = cancel_event
             self._jobs[job_id] = job
+        return job
+
+    def _start_job_thread(self, job: ShellJob, working_directory):
+        command = job.command
+        timeout = job.timeout
 
         def _target():
             try:
                 argv, encoding, extra = build_shell_command(command)
-                logging.info(f"Background shell job #{job_id} started: {command}")
+                logging.info(f"Background shell job #{job.job_id} started: {command}")
                 try:
                     proc = subprocess.Popen(
                         argv,
@@ -327,17 +334,77 @@ class ShellJobManager:
                 else:
                     job.result = {"stdout": stdout, "stderr": stderr,
                                   "exit_code": exit_code}
-                logging.info(f"Background shell job #{job_id} finished with exit code {exit_code}.")
+                logging.info(f"Background shell job #{job.job_id} finished with exit code {exit_code}.")
             except Exception as e:
-                logging.error(f"Background shell job #{job_id} failed: {e}", exc_info=True)
+                logging.error(f"Background shell job #{job.job_id} failed: {e}", exc_info=True)
                 job.result = {"stdout": "", "stderr": f"Job failed: {e}", "exit_code": -1}
             finally:
                 job.done.set()
 
         threading.Thread(target=_target, daemon=True,
-                         name=f"shell-job-{job_id}").start()
-        return {"job_id": job_id, "status": "running",
+                         name=f"shell-job-{job.job_id}").start()
+
+    def launch(self, command: str, working_directory, timeout: float) -> dict:
+        job = self._register(command, timeout)
+        self._start_job_thread(job, working_directory)
+        return {"job_id": job.job_id, "status": "running",
                 "hint": "Use poll_shell_job to check progress, stop_shell_job to abort."}
+
+    def launch_and_wait(self, command: str, working_directory, timeout: float,
+                        detach_after: float, cancel_event=None,
+                        progress_cb=None) -> dict:
+        """Runs a command, auto-detaching into a background job when slow.
+
+        Returns the full result if the command finishes within detach_after
+        seconds, otherwise a live job handle (same shape as launch) while
+        the process keeps running under the original timeout. Either way
+        the caller never blocks longer than detach_after. Live progress
+        flows through progress_cb during the wait phase.
+        """
+        job = self._register(command, timeout, cancel_event)
+        self._start_job_thread(job, working_directory)
+        start = time.monotonic()
+        while not job.done.is_set():
+            elapsed = time.monotonic() - start
+            if elapsed >= detach_after:
+                logging.info(f"Foreground command detached into background job "
+                             f"#{job.job_id} after {elapsed:.1f}s.")
+                return {"job_id": job.job_id, "status": "running", "detached": True,
+                        "hint": "Still running in background. Use poll_shell_job to check, "
+                                "stop_shell_job to abort."}
+            if progress_cb is not None:
+                with job.lock:
+                    snapshot = list(job.stdout_parts)
+                try:
+                    progress_cb(elapsed, _last_useful_line(snapshot))
+                except Exception:
+                    pass
+            time.sleep(0.2)
+        return self._take_finished(job.job_id)
+
+    def _take_finished(self, job_id: int) -> dict:
+        """Removes a finished job and returns its FULL result dict."""
+        with self._lock:
+            job = self._jobs.pop(job_id, None)
+        if job is None:
+            return {"job_id": job_id, "status": "not_found"}
+        res = job.result or {"stdout": "", "stderr": "", "exit_code": -1}
+        return {"stdout": res.get("stdout", ""), "stderr": res.get("stderr", ""),
+                "exit_code": res.get("exit_code", -1)}
+
+    def describe_running(self) -> str:
+        """One history line about jobs that outlived their task (or '')."""
+        with self._lock:
+            jobs = list(self._jobs.values())
+        live = [j for j in jobs if not j.done.is_set()]
+        if not live:
+            return ""
+        parts = []
+        for j in live:
+            cmd = j.command if len(j.command) <= 60 else j.command[:57] + "..."
+            parts.append(f"#{j.job_id} ({cmd}, {int(time.monotonic() - j.started)}s)")
+        return ("**Background jobs still running from before:** " + "; ".join(parts) +
+                ". Poll them with poll_shell_job if relevant to the new task.")
 
     def _pop_new_output(self, job: ShellJob):
         with job.lock:

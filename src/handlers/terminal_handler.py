@@ -382,6 +382,15 @@ class TerminalHandler(BaseAgentHandler):
         if not self._exec_thread.isRunning():
             self._exec_thread.start()
 
+    def _running_jobs_note(self) -> str:
+        try:
+            manager = getattr(self.computer, "shell_jobs", None)
+            if manager is not None:
+                return manager.describe_running()
+        except Exception:
+            pass
+        return ""
+
     @Slot(int, float, str)
     def _on_tool_progress(self, ticket: int, elapsed: float, last_line: str):
         if ticket != self._exec_ticket:

@@ -153,7 +153,8 @@ class SettingsManager(QObject):
             "block_ads": True
         },
         "terminal": {
-            "shell_timeout_seconds": 60
+            "shell_timeout_seconds": 60,
+            "shell_detach_seconds": 25
         },
         "context": {
             # Agent history compaction (browser mode). All defaults are
