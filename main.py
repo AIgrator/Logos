@@ -58,6 +58,16 @@ def main():
     logs_dir = settings_manager.get('APP_LOGS_DIR')
     logging_config.setup_logging(log_to_file=True, logs_dir=logs_dir)
 
+    # Crash diagnostics: on a hard crash (segfault) faulthandler writes the
+    # Python stack of every thread to crash.log (normal logs die with the buffer).
+    try:
+        import faulthandler
+        crash_log = open(os.path.join(logs_dir, "crash.log"), "w", encoding="utf-8")
+        faulthandler.enable(file=crash_log)
+        logging.info(f"faulthandler enabled, crashes will be logged to {crash_log.name}")
+    except Exception as e:
+        logging.warning(f"Could not enable faulthandler: {e}")
+
     # Determine the effective working directory for the terminal mode.
     # If a path is passed as a non-empty argument, use it; otherwise, use the original CWD.
     # This handles the case where `logos.bat` passes `""` as an argument.
