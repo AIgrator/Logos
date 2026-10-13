@@ -19,6 +19,7 @@ Contract for heirs:
 """
 import html
 import logging
+import re
 
 from states import VisionState
 
@@ -45,7 +46,7 @@ def _is_error_output(text) -> bool:
     # never fires while the loop circles a dead job.
     if "'status': 'done'" in text and "'exit_code': 0" not in text:
         return True
-    if "Background job #" in text and " done (exit " in text:
+    if re.search(r"Background (shell )?job #\d+ done \(exit ", text or ""):
         return "done (exit 0)" not in text
     return False
 
@@ -80,10 +81,19 @@ def _compact_command(body: str, limit: int = 140) -> str:
                     text = f"{name}: {args['paths']}"
                 else:
                     text = body
-                return text if len(text) <= limit else text[:limit] + "…"
+                return _middle_cut(text, limit)
         except Exception:
             pass
-    return body if len(body) <= limit else body[:limit] + "…"
+    return _middle_cut(body, limit)
+
+
+def _middle_cut(text: str, limit: int = 140) -> str:
+    """Truncates the middle, keeping start AND end visible."""
+    if len(text) <= limit:
+        return text
+    tail = 40
+    head = max(40, limit - tail - 3)
+    return text[:head] + " … " + text[-tail:]
 
 
 def _strip_shell_wrapper(command: str) -> str:
@@ -107,12 +117,53 @@ def _strip_shell_wrapper(command: str) -> str:
     return text
 
 
+def _outcome_of(result_line: str) -> str:
+    """One-line outcome of a result history line (for the tried-list)."""
+    if not result_line:
+        return "pending"
+    if "timed out after" in result_line and "TERMINATED" in result_line:
+        m = re.search(r"timed out after (\d+) seconds", result_line)
+        return f"timed out after {m.group(1)}s, killed" if m else "timed out, killed"
+    m = re.search(r"\(Exit Code: (-?\d+)\)", result_line)
+    if m:
+        return "ok" if m.group(1) == "0" else f"exit {m.group(1)}"
+    if re.search(r"Background (shell )?job #\d+", result_line or ""):
+        if " done (exit " in result_line:
+            m2 = re.search(r"done \(exit (-?\d+)\)", result_line)
+            code = m2.group(1) if m2 else "?"
+            return "ok" if code == "0" else f"done, exit {code}"
+        return "launched in background"
+    if result_line.startswith("**Error:**"):
+        rest = result_line[len("**Error:**"):].strip().split("\n")[0][:80]
+        return f"error: {rest}" if rest else "error"
+    if "Waited " in result_line:
+        return "waited"
+    return "ok"
+
+
 def _recent_commands(history, n: int = 3) -> str:
-    """Compact 'tried' recap for escalation messages (real commands)."""
-    cmds = [h for h in (history or []) if h.startswith("**Agent Command:**")]
-    return " → ".join(_compact_command(
-        c[len("**Agent Command:**"):].strip().strip("`")) for c in cmds[-n:]) \
-        if cmds else "(none recorded)"
+    """Tried-list with outcomes, one attempt per line.
+
+    Answers both questions at a glance: WHAT was tried (real commands,
+    middle-truncated so start and end stay visible) and HOW it ended
+    (timeout kills say so explicitly).
+    """
+    lines = history or []
+    idx = [i for i, h in enumerate(lines) if h.startswith("**Agent Command:**")][-n:]
+    items = []
+    for i in idx:
+        cmd = _compact_command(lines[i][len("**Agent Command:**"):].strip().strip("`"))
+        outcome = "pending"
+        for h in lines[i + 1:]:
+            if h.startswith(("**Agent Command:**", "**User guidance:**", "**User note",
+                             "**User Response:**", "Loop signal:")):
+                outcome = "dropped"
+                break
+            if h.startswith(("**Tool Result:**", "**Command Result:**", "**Error:**")):
+                outcome = _outcome_of(h)
+                break
+        items.append(f"• {cmd} → {outcome}")
+    return "\n".join(items) if items else "(none recorded)"
 
 
 def _summarize_failure(text, limit: int = 300) -> str:
@@ -152,7 +203,7 @@ def _is_neutral_output(text) -> bool:
         return False
     if "'status': 'running'" in text:
         return True
-    if "Background job #" in text:
+    if re.search(r"Background (shell )?job #\d+", text):
         # Human-shaped reports: running / started / not-found are neutral;
         # done is judged by the error rule (nonzero exit counts).
         return " done (exit " not in text
