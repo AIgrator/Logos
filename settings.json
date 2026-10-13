@@ -1,5 +1,5 @@
 {
-  "active_provider": "google",
+  "active_provider": "openrouter",
   "llm_providers": {
     "anthropic": {
       "model": "claude-fable-5",
@@ -20,7 +20,7 @@
       "require_json_output": true
     },
     "openrouter": {
-      "model": "Anthropic/claude-haiku-4-5",
+      "model": "Qwen/qwen3.7-flash",
       "require_json_output": true
     },
     "x-ai": {

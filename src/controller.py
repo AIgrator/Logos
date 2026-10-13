@@ -489,6 +489,21 @@ class AppController(QObject):
         self.ui.clear_thumbnails()
         self._update_attachment_menu()
 
+        paused_agent = self._paused_agent()
+        if paused_agent is not None:
+            # Task frozen mid-way: chat freely, actions stay frozen until
+            # Resume. Recent task history is prepended so answers can
+            # reference the work. PAUSED_ON_ERROR is NOT detoured: an
+            # explicit model question still auto-continues the task.
+            recent = paused_agent.command_history[-8:] if paused_agent.command_history else []
+            context = "\n".join(str(x) for x in recent)
+            question = (f"[Paused {paused_agent.MODE_NAME} task — actions frozen, "
+                        f"answering as chat]\n"
+                        + (f"Recent task history:\n{context}\n\n" if context else "")
+                        + f"User question while paused: {user_text}")
+            self.chat_handler.start_chat(question, attachments_for_handler)
+            return
+
         if self.state == ControllerState.VISION:
             if self.vision_handler.state == VisionState.PAUSED_ON_ERROR:
                 self.vision_handler.resume_with_guidance(user_text, attachments_for_handler)
@@ -512,6 +527,8 @@ class AppController(QObject):
             # The full response is already logged to the llm_communication.log file.
             # This warning is just to indicate that an unexpected response type was received.
             logging.warning("Received a simple chat response while in Vision mode. Ignoring.")
+            self.thinking_timer.stop()
+            self.ui.show_thinking_ui(False)
 
     def _handle_plan_response(self, reasoning: str, tool_calls_obj, schema_name: str):
         # The full response is already logged to the llm_communication.log file.
@@ -523,6 +540,8 @@ class AppController(QObject):
             self.browser_handler.handle_llm_response(reasoning, tool_calls_obj, schema_name)
         else:
             logging.warning("Received a plan response while in chat mode. Ignoring.")
+            self.thinking_timer.stop()
+            self.ui.show_thinking_ui(False)
 
     def _handle_plain_text_response(self, text: str):
         """Handles the case where a plain text response was received instead of a plan."""
@@ -611,8 +630,30 @@ class AppController(QObject):
         self.ui.add_message(notice_html, force_scroll=True)
         self.ui.show_thinking_ui(True, message=thinking_msg)
         user_prompt, attachments, system_prompt, history, schema_name = self._last_llm_request
+        if schema_name in ("terminal_tool_code", "browser_tool_code"):
+            self._reenter_agent_mode(self.terminal_handler if schema_name == "terminal_tool_code"
+                                     else self.browser_handler)
         self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name)
         return True
+
+    def _reenter_agent_mode(self, handler):
+        """Routes the controller back to a resumed agent (no cleanup, no cancel).
+
+        Paused-chat detours and error recoveries leave controller.state behind
+        (IDLE/CHATTING) while the handler runs. Without this, the plan
+        response arrives 'in the wrong mode' and is discarded, hanging the
+        task on eternal Thinking. Safe no-op when already routed.
+        """
+        target = {"terminal": ControllerState.TERMINAL,
+                  "browser": ControllerState.BROWSER}.get(getattr(handler, "MODE_NAME", ""))
+        if target is None:
+            return
+        if self.state == target and self.current_handler is handler:
+            return
+        logging.info(f"Re-entering {target.name} mode for resumed task.")
+        self._set_state(target)
+        self.current_handler = handler
+        self.ui.set_active_mode('terminal' if target == ControllerState.TERMINAL else 'browser')
 
     def _handle_retry_request(self):
         """Re-send the last LLM request (Retry button on transient-error cards)."""
@@ -820,6 +861,17 @@ class AppController(QObject):
 
         self._set_state(new_state)
         self.current_handler = new_handler
+        self._forget_last_request()
+
+    def _forget_last_request(self):
+        """Drops the stored request on mode switch.
+
+        Re-sending across modes is meaningless (and actively harmful: a
+        stored chat request re-sent in terminal mode streams chunks into a
+        handler that never asked for them). Model switch keeps it.
+        """
+        self._last_llm_request = None
+        self._last_llm_error = False
 
     def _activate_chat_mode(self):
         self._cleanup_and_switch_handler(self.chat_handler, ControllerState.CHATTING)
@@ -907,13 +959,47 @@ class AppController(QObject):
     def _handle_stop(self):
         if self.state == ControllerState.VISION:
             self.vision_handler.stop()
+        else:
+            paused_agent = self._paused_agent()
+            if paused_agent is not None:
+                paused_agent.stop()
         self._activate_chat_mode() # Fallback to chat mode after stopping
 
+    def _paused_agent(self):
+        """Browser/terminal handler frozen in PAUSED, or None.
+
+        PAUSED_ON_ERROR is deliberately excluded: replies to an explicit
+        model question auto-continue the task instead of detouring to chat.
+        Prefers the handler matching the current mode, falls back to any.
+        """
+        handlers = []
+        if self.state == ControllerState.BROWSER:
+            handlers.append(self.browser_handler)
+        elif self.state == ControllerState.TERMINAL:
+            handlers.append(self.terminal_handler)
+        for handler in (self.browser_handler, self.terminal_handler):
+            if handler not in handlers:
+                handlers.append(handler)
+        for handler in handlers:
+            try:
+                if getattr(handler, "state", None) == VisionState.PAUSED:
+                    return handler
+            except Exception:
+                continue
+        return None
+
     def _handle_pause_resume(self):
+        logging.info(f"Pause/resume button pressed in controller state {self.state.name}.")
+        paused_agent = self._paused_agent()
+        if paused_agent is not None:
+            paused_agent.pause_or_resume()
+            return
         if self.state == ControllerState.VISION:
             self.vision_handler.pause_or_resume()
         elif self.state == ControllerState.BROWSER:
             self.browser_handler.pause_or_resume()
+        elif self.state == ControllerState.TERMINAL:
+            self.terminal_handler.pause_or_resume()
 
     def _handle_pause_for_feedback(self):
         if self.state == ControllerState.VISION:

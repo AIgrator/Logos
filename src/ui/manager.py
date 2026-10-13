@@ -13,10 +13,11 @@ from PySide6.QtCore import (QBuffer, QIODevice, QEasingCurve, QMimeData, QProper
 from PySide6.QtGui import (QActionGroup, QColor, QIcon, QImage, QPainter, QPen, QPixmap,
                            QTextCursor, QTextOption)
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QListWidget, QListWidgetItem, QMainWindow,
-                               QMessageBox, QMenu, QPushButton, QSizeGrip, QStackedWidget,
+                               QMessageBox, QMenu, QPushButton, QSizeGrip,
                                QTextEdit, QVBoxLayout, QWidget)
 
 from llm.model_config_manager import ModelConfigManager
+from states import ControllerState
 
 from . import styles
 from .utils import CustomToolTipManager, IconHoverFilter
@@ -441,10 +442,7 @@ class UIManager(QWidget):
             IconHoverFilter(self.controller.theme_manager, 'fa5s.stop', parent=self.cancel_button)
         )
 
-        self.action_button_stack = QStackedWidget()
-        self.action_button_stack.addWidget(self.send_button)
-        self.action_button_stack.addWidget(self.cancel_button)
-        self.action_button_stack.setFixedSize(QSize(36, 36))
+
 
         self.bottom_toolbar_layout.addWidget(self.settings_button)
         self.bottom_toolbar_layout.addWidget(self.toggle_button)
@@ -455,14 +453,20 @@ class UIManager(QWidget):
         self.pause_task_button.setIconSize(QSize(20, 20))
         self.pause_task_button.setFixedSize(QSize(36, 36))
         self.tooltip_manager.install(self.pause_task_button, "Pause/resume task (Ctrl+Alt+P)")
-        self.pause_task_button.installEventFilter(
-            IconHoverFilter(self.controller.theme_manager, 'fa5s.pause', parent=self.pause_task_button)
+        self.pause_task_hover_filter = IconHoverFilter(
+            self.controller.theme_manager, 'fa5s.pause', parent=self.pause_task_button
         )
+        self.pause_task_button.installEventFilter(self.pause_task_hover_filter)
         self.pause_task_button.clicked.connect(self._on_pause_task_clicked)
         self.pause_task_button.setVisible(False)
         self.bottom_toolbar_layout.addWidget(self.pause_task_button)
         self.bottom_toolbar_layout.addStretch()
-        self.bottom_toolbar_layout.addWidget(self.action_button_stack)
+        # One morphing action button: Stop while thinking with empty input,
+        # Send otherwise (sending cancels the in-flight response).
+        self._thinking_active = False
+        self.bottom_toolbar_layout.addWidget(self.send_button)
+        self.bottom_toolbar_layout.addWidget(self.cancel_button)
+        self.cancel_button.setVisible(False)
 
         self.layout.addWidget(self.input_container)
         self.layout.addWidget(self.bottom_toolbar_container)
@@ -928,9 +932,10 @@ class UIManager(QWidget):
     def set_active_mode(self, mode: str):
         is_terminal = (mode == 'terminal')
         self.add_folder_action.setVisible(is_terminal)
-        # Pause button only where a pausable loop runs (terminal/browser).
-        # Plain chat has nothing to pause; vision has its own pause controls.
-        self.pause_task_button.setVisible(mode in ('terminal', 'browser'))
+        # Pause button only while an agent task actually runs: nothing
+        # to pause in plain chat, and it hides again when the task ends.
+        # (Vision has its own pause controls.)
+        self._active_mode_key = mode
 
         if mode == 'chat':
             self.chat_mode_action.setChecked(True)
@@ -955,6 +960,26 @@ class UIManager(QWidget):
             self.screenshot_action.setEnabled(False)
             self.screenshot_action.setToolTip("Screenshots are not available in Browser Mode")
 
+        self.update_pause_button()
+
+    def update_pause_button(self):
+        """Shows Pause/Resume only for a live terminal/browser task."""
+        mode = getattr(self, "_active_mode_key", "chat")
+        handler = None
+        try:
+            if mode == "terminal":
+                handler = self.controller.terminal_handler
+            elif mode == "browser":
+                handler = self.controller.browser_handler
+        except Exception:
+            handler = None
+        active = False
+        try:
+            active = handler is not None and getattr(handler.state, "name", "IDLE") in ("EXECUTING", "PAUSED")
+        except Exception:
+            active = False
+        self.pause_task_button.setVisible(active)
+
     def set_vision_mode_loading(self, is_loading: bool):
         if is_loading:
             self.vision_mode_action.setIcon(self.icon_spinner_vision)
@@ -972,6 +997,21 @@ class UIManager(QWidget):
         self.send_button.setEnabled(is_enabled)
         self.plan_send_button.setEnabled(has_text)
         self.tooltip_manager.install(self.send_button, "Send" if is_enabled else "Message text cannot be empty")
+        self._refresh_action_buttons()
+
+    def _refresh_action_buttons(self):
+        """Morphs the action button: Stop while thinking with empty input,
+        Send in all other cases (sending cancels the in-flight response)."""
+        thinking = getattr(self, "_thinking_active", False)
+        has_content = bool(self.user_input.toPlainText().strip()) or bool(self.attachment_thumbnails)
+        if thinking and not has_content:
+            self.send_button.setVisible(False)
+            self.cancel_button.setVisible(True)
+        else:
+            self.cancel_button.setVisible(False)
+            self.send_button.setVisible(True)
+            if thinking:
+                self.tooltip_manager.install(self.send_button, "Send (current response will be cancelled)")
 
     def _on_send_clicked(self):
         if self.file_search_popup.isVisible():
@@ -989,6 +1029,7 @@ class UIManager(QWidget):
 
     def set_paused(self, is_paused: bool):
         self.custom_title_bar.set_paused(is_paused)
+        self.pause_task_hover_filter.set_icon_names('fa5s.play' if is_paused else 'fa5s.pause')
 
     def set_main_window_title(self, text: str):
         self.main_window.setWindowTitle(text)
@@ -1119,12 +1160,20 @@ class UIManager(QWidget):
     def finalize_stream(self, final_html_content: str):
         self.chat_widget.finalize_stream(final_html_content)
 
+    def _input_locked_during_thinking(self) -> bool:
+        """Whether typing is blocked while the model thinks.
+
+        Only Vision acts on the user's screen and needs undivided focus.
+        Chat/terminal/browser requests never touch it, so the input stays
+        enabled there — a newly sent message cancels the in-flight one.
+        """
+        return getattr(self.controller, "state", None) == ControllerState.VISION
+
     def show_thinking_ui(self, show: bool, message: str = "Thinking...", actor: str = None):
-        self.user_input.setDisabled(show)
-        self.action_button_stack.setCurrentIndex(1 if show else 0)
+        self.user_input.setDisabled(show and self._input_locked_during_thinking())
+        self._thinking_active = show
         self.chat_widget.show_thinking_ui(show, message, actor=actor)
-        if not show:
-            self._update_send_button_state()
+        self._update_send_button_state()
 
     def update_timer(self, seconds: int):
         self.chat_widget.update_timer(seconds)

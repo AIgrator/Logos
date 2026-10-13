@@ -163,6 +163,20 @@ def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, st
 
     if isinstance(data_object, dict) and schema_name in ('terminal_tool_code', 'browser_tool_code'):
         # Universal repair logic for various malformed tool calls in agent modes
+        # Naked tool call with the tool name in 'type' instead of the envelope,
+        # e.g. {"type": "finish", "arguments": {...}} — rebuild the envelope.
+        mode_tools = BROWSER_TOOL_NAMES if schema_name == 'browser_tool_code' else TERMINAL_TOOL_NAMES
+        type_value = data_object.get('type')
+        if isinstance(type_value, str) and type_value in mode_tools and type_value != schema_name:
+            args = data_object.get('arguments')
+            if isinstance(args, dict):
+                logging.warning(f"Detected naked tool call with type='{type_value}'. Reconstructing envelope.")
+                data_object = {'type': schema_name,
+                               'payload': {'action': {'name': type_value, 'arguments': args}}}
+            elif isinstance(data_object.get('payload'), dict):
+                logging.warning(f"Detected wrong envelope type '{type_value}'. Fixing to '{schema_name}'.")
+                data_object = dict(data_object)
+                data_object['type'] = schema_name
         if 'name' in data_object and 'arguments' in data_object and 'action' not in data_object:
             logging.warning("Detected a naked tool call for terminal_tool_code. Wrapping it.")
             data_object = {'action': data_object}

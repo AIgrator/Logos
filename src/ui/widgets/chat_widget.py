@@ -301,10 +301,29 @@ class ChatWidget(QAbstractScrollArea):
 
     # --- Original Scrolling and Message Handling Logic ---
 
+    def _is_at_bottom(self, tolerance: int = 20) -> bool:
+        """Whether the viewport currently shows the end of the chat."""
+        bar = self.verticalScrollBar()
+        return bar.maximum() > tolerance and bar.value() >= bar.maximum() - tolerance
+
+    def _follow_if_at_bottom(self, was_at_bottom: bool):
+        """Follows new content when the user was already at the bottom.
+
+        Synchronous on purpose: the scroll range was just recomputed in the
+        same call, so setValue(maximum()) is exact here — unlike the async
+        scroll_to_bottom(), whose late-evaluated maximum() can race with
+        later content changes. Never yanks a reading user. The pre-existing
+        async scroll paths (explicit jumps, pinning) are untouched.
+        """
+        if was_at_bottom:
+            bar = self.verticalScrollBar()
+            bar.setValue(bar.maximum())
+
     def add_message(self, data, force_scroll=False):
         if self.is_streaming:
             self.is_streaming = False
 
+        was_at_bottom = self._is_at_bottom()
         height_before_new_message = self._calculate_content_height()
         doc = QTextDocument(self)
         doc.setDocumentMargin(0) # Let the widget handle margins
@@ -346,6 +365,8 @@ class ChatWidget(QAbstractScrollArea):
             self.scroll_to_bottom()
         elif is_user_message:
             QTimer.singleShot(0, lambda: self._execute_scroll(height_before_new_message))
+        elif was_at_bottom:
+            self._follow_if_at_bottom(was_at_bottom)
 
         self.viewport().update()
 
@@ -411,6 +432,7 @@ class ChatWidget(QAbstractScrollArea):
         Uses the provided actor name or the pre-set assistant name and displays the current status.
         """
         actor_name = actor if actor is not None else self.current_assistant_name
+        was_at_bottom = self._is_at_bottom()
         if show:
             if self.is_streaming and self.messages and "..." in self.messages[-1].get('raw_content', ''):
                 last_message = self.messages[-1]
@@ -426,11 +448,13 @@ class ChatWidget(QAbstractScrollArea):
                 self.messages.append({'type': 'simple', 'doc': doc, 'raw_content': initial_content})
                 self.is_streaming = True
             self._update_scroll_bar()
+            self._follow_if_at_bottom(was_at_bottom)
         else:
             self.is_streaming = False
 
     def show_retry_countdown(self, attempt_num: int, max_attempts: int, wait_seconds: float):
         """Shows a visible countdown to the next automatic retry in the chat."""
+        was_at_bottom = self._is_at_bottom()
         self.stop_retry_countdown()
         self._retry_countdown_attempt = attempt_num
         self._retry_countdown_max = max_attempts
@@ -443,6 +467,7 @@ class ChatWidget(QAbstractScrollArea):
         self._retry_countdown_msg_idx = len(self.messages) - 1
         self._update_scroll_bar()
         self.viewport().update()
+        self._follow_if_at_bottom(was_at_bottom)
 
     def update_retry_countdown(self, remaining: float):
         """Updates the countdown message with the remaining seconds."""
@@ -453,6 +478,7 @@ class ChatWidget(QAbstractScrollArea):
             self._retry_countdown_attempt = 0
             self._retry_countdown_max = 0
             return
+        was_at_bottom = self._is_at_bottom()
         seconds_left = max(0, int(remaining))
         msg = self.messages[self._retry_countdown_msg_idx]
         if seconds_left > 0:
@@ -469,18 +495,22 @@ class ChatWidget(QAbstractScrollArea):
             msg['doc'].setHtml(msg['raw_content'])
         self._update_scroll_bar()
         self.viewport().update()
+        self._follow_if_at_bottom(was_at_bottom)
 
     def stop_retry_countdown(self):
         """Removes the countdown message (retry succeeded or failed)."""
         if self._retry_countdown_msg_idx < 0:
             return
+        was_at_bottom = self._is_at_bottom()
         if self._retry_countdown_msg_idx < len(self.messages):
             self.messages.pop(self._retry_countdown_msg_idx)
         self._retry_countdown_msg_idx = -1
         self._update_scroll_bar()
         self.viewport().update()
+        self._follow_if_at_bottom(was_at_bottom)
 
     def update_timer(self, seconds: int):
+        was_at_bottom = self._is_at_bottom()
         if self.is_streaming and self.messages and "..." in self.messages[-1].get('raw_content', ''):
             last_message = self.messages[-1]
             content_html = last_message['raw_content']
@@ -496,8 +526,10 @@ class ChatWidget(QAbstractScrollArea):
             last_message['raw_content'] = new_content
             last_message['doc'].setHtml(new_content)
             self._update_scroll_bar()
+            self._follow_if_at_bottom(was_at_bottom)
 
     def append_to_stream(self, text_chunk: str):
+        was_at_bottom = self._is_at_bottom()
         if not self.is_streaming or not self.messages:
             doc = QTextDocument(self)
             initial_content = f"<b>{self.current_assistant_name}:</b> "
@@ -523,11 +555,13 @@ class ChatWidget(QAbstractScrollArea):
         last_message['raw_content'] += text_chunk
 
         self._update_scroll_bar()
+        self._follow_if_at_bottom(was_at_bottom)
 
     def finalize_stream(self, final_html_content: str):
         """
         Finalizes a streaming message by replacing its content with the final version.
         """
+        was_at_bottom = self._is_at_bottom()
         if self.is_streaming and self.messages:
             last_message = self.messages[-1]
             last_message['raw_content'] = final_html_content
@@ -535,6 +569,7 @@ class ChatWidget(QAbstractScrollArea):
             self._update_scroll_bar()
             self.viewport().update()
         self.is_streaming = False
+        self._follow_if_at_bottom(was_at_bottom)
 
     def _calculate_content_height(self):
         content_height = 0

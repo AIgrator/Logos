@@ -8,9 +8,10 @@ import platform
 import html
 import json
 from PySide6.QtCore import Signal, Slot, QThread
-from states import VisionState
 from ui.terminal_html_formatter import TerminalHtmlFormatter
 from src.computer.computer import Computer
+
+from .base_agent import BaseAgentHandler
 
 class WebTaskThread(QThread):
     """ Thread to handle blocking web requests."""
@@ -77,19 +78,16 @@ class WebTaskThread(QThread):
         self._is_cancelled = True
 
 
-class TerminalHandler:
+class TerminalHandler(BaseAgentHandler):
+    MODE_NAME = "terminal"
+    SCHEMA_NAME = "terminal_tool_code"
+
     def __init__(self, controller, theme_manager, working_directory=None):
-        self.controller = controller
+        super().__init__(controller)
         self.computer = Computer(mode='terminal', working_directory=working_directory)
-        self.ui = controller.ui
-        self.settings = controller.settings
-        self.brain = controller.brain
         self.theme_manager = theme_manager
         self.html_formatter = TerminalHtmlFormatter(self.theme_manager)
-        self.state = VisionState.IDLE
-        self.original_user_request = None
         self.os_info = f"{platform.system()} {platform.release()}"
-        self.command_history = []
         self.web_thread = None
         self.active_edit_path = None
 
@@ -100,94 +98,12 @@ class TerminalHandler:
         """Re-initializes the HTML formatter with the new theme."""
         self.html_formatter = TerminalHtmlFormatter(self.theme_manager)
 
-    def _set_state(self, new_state: VisionState):
-        if self.state != new_state:
-            logging.info(f"TerminalHandler state changed from {self.state.name} to {new_state.name}")
-            self.state = new_state
-
-    def _start_thinking_timer(self, message: str):
-        """Resets and starts the thinking timer."""
-        self.ui.show_thinking_ui(True, message=message, actor=self.controller._get_current_model_name())
-        self.controller.thinking_time = 0
-        self.controller.thinking_timer.start(1000)
-
-    def _stop_thinking_timer(self):
-        """Stops the thinking timer."""
-        self.ui.show_thinking_ui(False)
-        self.controller.thinking_timer.stop()
-
-    def start_task(self, user_text: str):
-        """Starts a new task in terminal mode."""
-
-        if self.state == VisionState.PAUSED_ON_ERROR:
-            self._set_state(VisionState.EXECUTING)
-            # The user's input is the result of the 'communicate_to_user' tool
-            output_for_llm = f"**User Response:** {user_text}"
-            self._continue_loop(last_command_output=output_for_llm)
-            return
-
-        logging.info(f"TerminalHandler starting task: {user_text}")
-        self.original_user_request = user_text
-        # Do not clear history if it's already populated (e.g., with a file attachment)
-        if not self.command_history:
-            self.command_history = []
-        self._set_state(VisionState.EXECUTING)
-        self._continue_loop()
-
-    def _continue_loop(self, last_command_output=None):
-        """
-        The main loop of the stateful agent.
-        It gathers context, sends it to the LLM, and executes the response.
-        """
-
-        if self.state == VisionState.IDLE:
-            return
-
-        self._start_thinking_timer("Thinking...")
-
-        # Append the output of the last command to the history for the next turn
-        if last_command_output:
-            self.command_history.append(last_command_output)
-
-        system_prompt, user_prompt = self.brain.get_terminal_prompts(
+    def build_prompts(self):
+        return self.brain.get_terminal_prompts(
             user_request=self.original_user_request,
             os_info=self.os_info,
             history=self.command_history
         )
-
-        if not system_prompt or not user_prompt:
-            self.ui.add_message("<i>Error: Could not load terminal prompts.</i>")
-            self.stop()
-            return
-
-        self.controller._send_llm_request(
-            user_prompt,
-            [],  # No attachments in terminal mode
-            system_prompt,
-            [], # History is managed directly in the prompt
-            "terminal_tool_code"  # Expecting a tool call
-        )
-
-    def handle_llm_response(self, reasoning: str, payload: any, schema_name: str):
-        """Handles the response from the LLM, which should be a tool call. """
-
-        self._stop_thinking_timer()
-
-        if reasoning:
-            self.ui.add_message(f"<b>{self.controller._get_current_model_name()}:</b> {reasoning}")
-
-        if schema_name != 'terminal_tool_code' or not payload or 'action' not in payload:
-            self.ui.add_message("<i>Received an unexpected response from the model. Cannot proceed.</i>")
-            self.stop()
-            return
-
-        action = payload.get('action')
-        if not action or 'name' not in action:
-            self.ui.add_message("<i>The model's plan was invalid. Cannot proceed.</i>")
-            self.stop()
-            return
-
-        self._execute_action(action)
 
     def _dedent_lines(self, lines: list[str]) -> list[str]:
         """
@@ -225,47 +141,23 @@ class TerminalHandler:
         prefix_len = len(common_prefix)
         return [line[prefix_len:] if line.startswith(common_prefix) else line for line in lines]
 
-    def _execute_action(self, action: dict):
+    def execute_action(self, action: dict) -> str | None:
         """
         Executes the action (tool call) requested by the LLM.
         Intercepts web requests to handle them with the hybrid model.
+        Returns history text, or None when completion is asynchronous
+        (web requests continue the loop from their thread slots).
         """
         action_name = action.get('name')
         action_args = action.get('arguments', {})
-
-        # --- Robustness Check ---
         if not isinstance(action_args, dict):
             action_args = {}
 
         # --- Hybrid Web Request Interception ---
         if action_name in ['web_fetchs', 'web_search']:
             self._handle_web_request(action_name, action_args)
-            return
+            return None
         # -----------------------------------------
-
-        if action_name == 'finish':
-            message = action_args.get('message', 'Task completed successfully.')
-            self.ui.add_formatted_message(message, prefix_html="<b>Task Finished:</b> ")
-            self.stop()
-            return
-
-        if action_name == 'display_message':
-            message = action_args.get('message', '...')
-            prefix = f"<b>{self.controller._get_current_model_name()}:</b> "
-            self.ui.add_formatted_message(message, prefix_html=prefix)
-            self._continue_loop(f"**Tool Result:** Message displayed to user: {message}")
-            return
-
-        elif action_name == 'communicate_to_user':
-            message = action_args.get('message', 'The assistant needs your input.')
-            prefix = f"<b>{self.controller._get_current_model_name()}:</b> "
-            self.ui.add_formatted_message(message, prefix_html=prefix)
-            self._set_state(VisionState.PAUSED_ON_ERROR)
-            self._stop_thinking_timer()
-            return
-
-        command_str_for_llm = f"`{action_name}({json.dumps(action_args)})`"
-        self.command_history.append(f"**Agent Command:** {command_str_for_llm}")
 
         path = action_args.get('path')
         is_file_op = action_name in ['write_file', 'replace', 'replace_many']
@@ -314,8 +206,6 @@ class TerminalHandler:
                 self.ui.add_message(f"<b>Executing:</b> {command_str_for_ui}")
         # ---------------------------------------------
 
-        self._set_state(VisionState.EXECUTING)
-
         try:
             if not hasattr(self.computer, action_name):
                 raise AttributeError(f"Computer has no tool named '{action_name}'")
@@ -327,13 +217,13 @@ class TerminalHandler:
             if output_for_ui:
                 self.ui.add_message(output_for_ui)
 
-            self._continue_loop(output_for_llm)
+            return output_for_llm
 
         except Exception as e:
             logging.error(f"Error executing terminal action: {e}", exc_info=True)
             error_message = f"**Error:** {e}"
             self.ui.add_message(f"<i>{error_message}</i>")
-            self._continue_loop(error_message)
+            return error_message
 
     def _handle_web_request(self, action_name: str, action_args: dict):
         """ Handles web_fetchs and web_search asynchronously using a WebTaskThread."""
@@ -473,19 +363,10 @@ class TerminalHandler:
 
         return output_for_llm, output_for_ui
 
-    def stop(self):
-        """Stops the current terminal task and resets the state. """
-
+    def _cleanup_task(self):
         if self.active_edit_path:
             self.ui.add_message(self.html_formatter.format_container_end())
             self.active_edit_path = None
 
         if self.web_thread and self.web_thread.isRunning():
             self.web_thread.cancel()
-
-        if self.state != VisionState.IDLE:
-            logging.info("TerminalHandler stopped.")
-            self._set_state(VisionState.IDLE)
-            self._stop_thinking_timer()
-            self.original_user_request = None
-            self.command_history = []

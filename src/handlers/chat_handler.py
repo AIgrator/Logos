@@ -14,6 +14,14 @@ class ChatHandler:
 
     def start_chat(self, user_text: str, attachments: list):
         """Starts a new chat interaction."""
+        if self.controller.thinking_timer.isActive():
+            # New message while generating: cancel the in-flight request.
+            # The worker runs queued slots on one thread, so it finishes the
+            # cancelled call first and then picks up the new one; a stale
+            # chunk is wiped by the thinking-line reset on first new chunk.
+            if self.controller.llm_worker:
+                self.controller.llm_worker.cancel()
+            logging.info("New chat message during generation; previous request cancelled.")
         self.controller._set_state(ControllerState.CHATTING)
 
         self.ui.show_thinking_ui(True, "Thinking")

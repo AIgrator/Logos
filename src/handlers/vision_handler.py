@@ -241,6 +241,11 @@ class VisionHandler:
             "strategic_plan"
         )
 
+    def handle_response_chunk(self, chunk):
+        # Vision is non-streaming; stray chunks (e.g. a chat stream that
+        # outlived a mode switch) are ignored instead of crashing.
+        pass
+
     def handle_plan_response(self, reasoning: str, payload: any, schema_name: str):
         logging.info(f"--- Handling LLM response in state: {self.state.name} (received schema: {schema_name}) ---")
         self.ui.show_thinking_ui(False)
