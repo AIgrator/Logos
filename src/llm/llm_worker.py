@@ -289,7 +289,12 @@ class LLMWorker(QObject):
 
         logging.debug(f"LLM request payload built ({len(str(log_payload.get('prompt', '')))} prompt chars, "
                       f"schema={schema_name}); writing to llm_communication.log")
-        llm_logger.info(json.dumps(log_payload, ensure_ascii=False, indent=2))
+        try:
+            llm_logger.info(json.dumps(log_payload, ensure_ascii=False, indent=2))
+        except Exception as e:
+            # The emit path failing silently (no console) once hid all LLM
+            # traffic: breadcrumb proved arrival with an empty file.
+            logging.warning(f"LLM request log write failed: {e}", exc_info=True)
 
         max_retries = self.settings.get("max_retries", 3)
         retry_delay_seconds = self.settings.get("retry_delay_seconds", 2)
