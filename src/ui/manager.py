@@ -1157,6 +1157,12 @@ class UIManager(QWidget):
     def append_to_stream(self, text_chunk):
         self.chat_widget.append_to_stream(text_chunk)
 
+    def show_tool_progress(self, ticket: int, html_text: str):
+        self.chat_widget.show_tool_progress(ticket, html_text)
+
+    def hide_tool_progress(self, ticket: int):
+        self.chat_widget.hide_tool_progress(ticket)
+
     def finalize_stream(self, final_html_content: str):
         self.chat_widget.finalize_stream(final_html_content)
 

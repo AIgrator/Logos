@@ -181,6 +181,7 @@ class SettingsWindow(QDialog):
             "hotkeys": ("fa5s.keyboard", "Hotkeys"),
             "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
             "browser": ("fa5s.globe", "Browser"),
+            "terminal": ("fa5s.terminal", "Terminal"),
             "vision": ("fa5s.robot", "Vision"),
             "context": ("fa5s.file-alt", "Context"),
             "omniparser": ("fa5s.eye", "OmniParser"),
@@ -230,6 +231,7 @@ class SettingsWindow(QDialog):
             "hotkeys": self._create_hotkeys_section(),
             "compact": self._create_compact_mode_section(),
             "browser": self._create_browser_section(),
+            "terminal": self._create_terminal_section(),
             "vision": self._create_vision_section(),
             "context": self._create_context_section(),
             "omniparser": self._create_omniparser_section(),
@@ -365,6 +367,10 @@ class SettingsWindow(QDialog):
         self.browser_headless_checkbox.setChecked(bool(browser_settings.get("headless", False)))
         self.browser_timeout_spinbox.setValue(int(browser_settings.get("default_timeout_ms", 30000) or 30000))
 
+        # Terminal (long tasks need a generous shell timeout)
+        terminal_settings = self.settings_manager.get("terminal", {})
+        self.shell_timeout_spinbox.setValue(int(terminal_settings.get("shell_timeout_seconds", 60) or 60))
+
         # Vision
         vision_settings = self.settings_manager.get("vision", {})
         self.wait_check_interval_spinbox.setValue(vision_settings.get("wait_check_interval_ms", 5000) / 1000.0)
@@ -472,6 +478,17 @@ class SettingsWindow(QDialog):
         except Exception:
             pass
 
+        terminal_settings = {
+            "shell_timeout_seconds": self.shell_timeout_spinbox.value(),
+        }
+        # Preserve keys with no UI widget so saving never silently drops them.
+        try:
+            existing_terminal = self.settings_manager.get("terminal", {}) or {}
+            for key, value in existing_terminal.items():
+                terminal_settings.setdefault(key, value)
+        except Exception:
+            pass
+
         vision_settings = {
             "wait_check_interval_ms": int(self.wait_check_interval_spinbox.value() * 1000),
             "post_action_delay_ms": int(self.post_action_delay_spinbox.value() * 1000),
@@ -525,6 +542,7 @@ class SettingsWindow(QDialog):
             "prevent_multiple_instances": self.prevent_multiple_instances_checkbox.isChecked(),
             "vision": vision_settings,
             "browser": browser_settings,
+            "terminal": terminal_settings,
             "compact_mode": compact_mode_settings,
             "context": context_settings,
             "webp_lossless": self.webp_lossless_checkbox.isChecked(),
@@ -956,6 +974,28 @@ class SettingsWindow(QDialog):
         browser_layout.addWidget(QLabel("Action timeout:"), 2, 0)
         browser_layout.addWidget(self._create_help_label(timeout_tooltip), 2, 1, Qt.AlignLeft)
         browser_layout.addWidget(self.browser_timeout_spinbox, 2, 3)
+
+        return group
+
+    def _create_terminal_section(self):
+        """Creates the Terminal settings section."""
+        group = QGroupBox("Terminal")
+        terminal_layout = QGridLayout(group)
+        terminal_layout.setColumnStretch(2, 1)
+
+        self.shell_timeout_spinbox = QSpinBox()
+        self.shell_timeout_spinbox.setRange(10, 3600)
+        self.shell_timeout_spinbox.setSingleStep(10)
+        self.shell_timeout_spinbox.setSuffix(" s")
+        self.shell_timeout_spinbox.setFixedWidth(100)
+        shell_timeout_tooltip = (
+            "Max run time for shell commands. Long tasks (large copies, builds) "
+            "need a generous value; progress streams live into the chat and "
+            "Stop kills the process. Applies to the next command."
+        )
+        terminal_layout.addWidget(QLabel("Shell timeout:"), 0, 0)
+        terminal_layout.addWidget(self._create_help_label(shell_timeout_tooltip), 0, 1, Qt.AlignLeft)
+        terminal_layout.addWidget(self.shell_timeout_spinbox, 0, 3)
 
         return group
 

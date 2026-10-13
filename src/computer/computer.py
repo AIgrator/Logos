@@ -3,6 +3,7 @@ This module contains the concrete implementation for interacting with a local de
 It wraps libraries like pyautogui to perform actions.
 """
 import logging
+import threading
 import time
 import os
 import importlib
@@ -30,6 +31,10 @@ class Computer:
         self.working_directory = working_directory
         self._pyautogui = None
         self._pyperclip = None
+        # Cooperative cancellation + live progress for long-running tools
+        # (used by execute_shell; set by whoever runs the tools).
+        self.cancel_event = threading.Event()
+        self.progress_callback = None
         self._load_mode_tools(mode)
 
     def _resolve_path(self, path: str) -> str:

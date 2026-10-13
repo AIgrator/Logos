@@ -7,6 +7,7 @@ import logging
 import platform
 import html
 import json
+import re
 from PySide6.QtCore import Signal, Slot, QThread
 from ui.terminal_html_formatter import TerminalHtmlFormatter
 from src.computer.computer import Computer
@@ -85,7 +86,8 @@ class TerminalHandler(BaseAgentHandler):
 
     def __init__(self, controller, theme_manager, working_directory=None):
         super().__init__(controller)
-        self.computer = Computer(mode='terminal', working_directory=working_directory)
+        self.computer = Computer(mode='terminal', working_directory=working_directory,
+                                 settings_manager=getattr(controller, 'settings_manager', None))
         self.theme_manager = theme_manager
         self.html_formatter = TerminalHtmlFormatter(self.theme_manager)
         self.os_info = f"{platform.system()} {platform.release()}"
@@ -97,6 +99,7 @@ class TerminalHandler(BaseAgentHandler):
         self._exec_worker.moveToThread(self._exec_thread)
         self._exec_worker.finished.connect(self._on_tool_finished)
         self._exec_worker.error.connect(self._on_tool_error)
+        self._exec_worker.progress.connect(self._on_tool_progress)
         self._exec_thread.start()
         self._exec_ticket = 0
         self._pending_action_name = None
@@ -220,6 +223,10 @@ class TerminalHandler(BaseAgentHandler):
         self._ensure_exec_thread()
         self._pending_action_name = action_name
         self._pending_action_args = action_args
+        try:
+            self.computer.cancel_event.clear()
+        except Exception:
+            pass
         self._exec_ticket += 1
         logging.info(f"TerminalHandler: dispatching ticket {self._exec_ticket} ({action_name}) to exec thread.")
         self._exec_worker.dispatch.emit(self._exec_ticket, action_name, action_args)
@@ -367,11 +374,33 @@ class TerminalHandler(BaseAgentHandler):
         if not self._exec_thread.isRunning():
             self._exec_thread.start()
 
+    @Slot(int, float, str)
+    def _on_tool_progress(self, ticket: int, elapsed: float, last_line: str):
+        if ticket != self._exec_ticket:
+            return
+        pct = ""
+        try:
+            m = re.search(r"(\d{1,3}(?:\.\d+)?)\s*%", last_line or "")
+            if m:
+                pct = f" · {m.group(1)}%"
+        except Exception:
+            pass
+        tail = html.escape((last_line or "")[-200:]).strip()
+        tail_html = f"<br><code>{tail}</code>" if tail else ""
+        self.ui.show_tool_progress(
+            ticket,
+            f"⏳ <b>{html.escape(str(self._pending_action_name))}</b>{pct} · {elapsed:.0f}s{tail_html}"
+        )
+
     @Slot(int, object)
     def _on_tool_finished(self, ticket: int, result):
         if ticket != self._exec_ticket:
             logging.info(f"Stale tool result ignored (ticket {ticket} != {self._exec_ticket}).")
             return
+        try:
+            self.ui.hide_tool_progress(ticket)
+        except Exception:
+            pass
         logging.info(f"TerminalHandler: ticket {ticket} ({self._pending_action_name}) result received, continuing loop.")
         output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
             self._pending_action_name, result, self._pending_action_args
@@ -385,6 +414,10 @@ class TerminalHandler(BaseAgentHandler):
         if ticket != self._exec_ticket:
             logging.info(f"Stale tool error ignored (ticket {ticket} != {self._exec_ticket}).")
             return
+        try:
+            self.ui.hide_tool_progress(ticket)
+        except Exception:
+            pass
         logging.info(f"TerminalHandler: ticket {ticket} ({self._pending_action_name}) error received, continuing loop.")
         error_msg = f"**Error:** {error_message}"
         self.ui.add_message(f"<i>{error_msg}</i>")
@@ -392,6 +425,10 @@ class TerminalHandler(BaseAgentHandler):
 
     def _cleanup_task(self):
         self._exec_ticket += 1
+        try:
+            self.computer.cancel_event.set()
+        except Exception:
+            pass
         if self._exec_thread and self._exec_thread.isRunning():
             self._exec_worker.cancel()
             self._exec_thread.quit()

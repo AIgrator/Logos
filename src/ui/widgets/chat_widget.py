@@ -535,6 +535,34 @@ class ChatWidget(QAbstractScrollArea):
         self.viewport().update()
         self._follow_if_at_bottom(was_at_bottom)
 
+    def show_tool_progress(self, ticket: int, html_text: str):
+        """Creates or updates the live progress line of a running tool."""
+        for msg in self.messages:
+            if msg.get('live_ticket') == ticket:
+                msg['doc'].setHtml(html_text)
+                self._update_scroll_bar()
+                self.viewport().update()
+                return
+        was_at_bottom = self._is_at_bottom()
+        doc = QTextDocument(self)
+        doc.setDocumentMargin(0)
+        doc.setHtml(html_text)
+        self.messages.append({'type': 'live', 'live_ticket': ticket, 'doc': doc})
+        self._update_scroll_bar()
+        self._follow_if_at_bottom(was_at_bottom)
+        self.viewport().update()
+
+    def hide_tool_progress(self, ticket: int):
+        """Removes the live progress line of a finished tool."""
+        for i, msg in enumerate(self.messages):
+            if msg.get('live_ticket') == ticket:
+                self.messages.pop(i)
+                if self._retry_countdown_msg_idx > i:
+                    self._retry_countdown_msg_idx -= 1
+                self._update_scroll_bar()
+                self.viewport().update()
+                return
+
     def update_timer(self, seconds: int):
         was_at_bottom = self._is_at_bottom()
         if self.is_streaming and self.messages and "..." in self.messages[-1].get('raw_content', ''):

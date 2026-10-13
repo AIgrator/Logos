@@ -152,6 +152,9 @@ class SettingsManager(QObject):
             "default_timeout_ms": 30000,
             "block_ads": True
         },
+        "terminal": {
+            "shell_timeout_seconds": 60
+        },
         "context": {
             # Agent history compaction (browser mode). All defaults are
             # no-ops: full history is sent. Enable to cut transmitted context.
