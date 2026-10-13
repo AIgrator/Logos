@@ -69,7 +69,7 @@ def _compact_command(body: str, limit: int = 140) -> str:
             args = _json.loads(rest[:-1])
             if isinstance(args, dict):
                 if "command" in args:
-                    text = f"{name}: {args['command']}"
+                    text = f"{name}: {_strip_shell_wrapper(str(args['command']))}"
                 elif "job_id" in args:
                     text = f"{name} (job #{args['job_id']})"
                 elif "seconds" in args:
@@ -84,6 +84,27 @@ def _compact_command(body: str, limit: int = 140) -> str:
         except Exception:
             pass
     return body if len(body) <= limit else body[:limit] + "…"
+
+
+def _strip_shell_wrapper(command: str) -> str:
+    """Drops routing boilerplate so variants differ at first glance.
+
+    `powershell -Command "Compress-Archive ..."` vs `powershell -Command
+    "if (...)"` look identical for 40 chars; the inner cmdlets differ at
+    once. Same for `cmd /c`.
+    """
+    text = command.strip()
+    lowered = text.lower()
+    for prefix in ('powershell.exe -command', 'powershell -command',
+                   'pwsh.exe -command', 'pwsh -command'):
+        if lowered.startswith(prefix):
+            text = text[len(prefix):].strip()
+            if len(text) >= 2 and text[0] == text[-1] and text[0] in ('"', "'"):
+                text = text[1:-1]
+            return text
+    if lowered.startswith("cmd /c "):
+        return text[len("cmd /c "):].strip()
+    return text
 
 
 def _recent_commands(history, n: int = 3) -> str:
