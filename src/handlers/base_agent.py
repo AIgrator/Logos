@@ -193,6 +193,31 @@ def _summarize_failure(text, limit: int = 300) -> str:
     return out[:limit] + ("…" if len(out) > limit else "")
 
 
+def _is_formulation_error(text) -> bool:
+    """The model's own sloppiness (typos, quoting, bad args) — not the task.
+
+    A SyntaxError in a one-liner or an unknown flag says nothing about
+    whether the OPERATION can succeed; the next turn usually fixes it.
+    Counting these toward escalation pages the user over trifles, so they
+    neither build nor reset the streak (like neutral outputs).
+
+    NOTE (honest tradeoff): no perfect criterion exists — "does this error
+    relate to the requested action" is semantic, code sees only text. These
+    markers err toward NOT paging: a misclassified operation failure merely
+    delays escalation (identical-repeat and timeout guards still bound the
+    loop), while paging over every typo spams the user for nothing.
+    """
+    if not isinstance(text, str):
+        return False
+    lowered = text.lower()
+    markers = (
+        "syntaxerror", "parsererror:", "is not recognized",
+        "invalid job_id", "missing required", "has no tool named",
+        "typeerror", "attributeerror", "nameerror",
+    )
+    return any(m in lowered for m in markers)
+
+
 def _is_neutral_output(text) -> bool:
     """Background-launch handles: neither success nor failure.
 
@@ -372,6 +397,9 @@ class BaseAgentHandler:
             self.command_history.append(last_command_output)
             if _is_neutral_output(last_command_output):
                 pass
+            elif _is_formulation_error(last_command_output):
+                logging.debug(f"{type(self).__name__} ignoring formulation error "
+                              f"for escalation streak.")
             elif _is_timeout_death(last_command_output):
                 self._consecutive_errors += 1
                 self._consecutive_timeouts += 1
