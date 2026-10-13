@@ -455,6 +455,16 @@ class ShellJobManager:
             total_out = sum(len(p) for p in job.stdout_parts)
         return new_out, new_err, total_out
 
+    def status(self, job_id: int) -> dict:
+        """Lightweight state check: no output consumed, job kept."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return {"job_id": job_id, "status": "not_found"}
+        state = "done" if job.done.is_set() else "running"
+        return {"job_id": job_id, "status": state,
+                "elapsed_seconds": round(time.monotonic() - job.started, 1)}
+
     def poll(self, job_id: int) -> dict:
         with self._lock:
             job = self._jobs.get(job_id)

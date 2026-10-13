@@ -185,12 +185,22 @@ class BaseAgentHandler:
 
     # -- unified single-step loop ----------------------------------------
 
-    def _continue_loop(self, last_command_output=None):
+    def cancel_job_wait(self):
+        """Heir hook: drop a pending background-job wait. Default: none."""
+        return
+
+    def _continue_loop(self, last_command_output=None, from_job_wait=False):
         """
         Plan one action -> execute -> observe -> repeat.
         Evaluation is implicit: the next planning turn sees the result
         (plus loop-awareness notes) and corrects course itself.
         """
+        if not from_job_wait:
+            # Any explicit new turn supersedes a pending background wait.
+            try:
+                self.cancel_job_wait()
+            except Exception:
+                pass
         if last_command_output:
             self.command_history.append(last_command_output)
             if _is_error_output(last_command_output):

@@ -724,6 +724,12 @@ class AppController(QObject):
             return
         if self.state == target and self.current_handler is handler:
             return
+        try:
+            cancel_wait = getattr(handler, "cancel_job_wait", None)
+            if callable(cancel_wait):
+                cancel_wait()
+        except Exception:
+            pass
         logging.info(f"Re-entering {target.name} mode for resumed task.")
         self._set_state(target)
         self.current_handler = handler

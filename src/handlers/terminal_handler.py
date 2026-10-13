@@ -8,12 +8,31 @@ import platform
 import html
 import json
 import re
-from PySide6.QtCore import Slot, QThread
+from PySide6.QtCore import Slot, QThread, QTimer
+
+from states import VisionState
 from ui.terminal_html_formatter import TerminalHtmlFormatter
 from src.computer.computer import Computer
 
 from .base_agent import BaseAgentHandler
 from .tool_exec_worker import ToolExecRelay, ToolExecWorker
+
+# Background-job await: after a launch the loop waits handler-side instead
+# of asking the model immediately (it would act NOW, e.g. relaunch). Cheap
+# status polls run on this timer; the model is called back only when the
+# job finishes or after MAX rounds with fresh state.
+JOB_WAIT_INTERVAL_MS = 15000
+JOB_WAIT_MAX_ROUNDS = 20
+
+
+def _running_job_id(result) -> int | None:
+    """Job id when a tool result is a live background handle, else None."""
+    if isinstance(result, dict) and result.get('status') == 'running' and 'job_id' in result:
+        try:
+            return int(result['job_id'])
+        except Exception:
+            return None
+    return None
 
 class WebTaskThread(QThread):
     """ Thread to handle blocking web requests."""
@@ -102,6 +121,12 @@ class TerminalHandler(BaseAgentHandler):
         self._exec_ticket = 0
         self._pending_action_name = None
         self._pending_action_args = None
+
+        self._job_wait_timer = QTimer()
+        self._job_wait_timer.setSingleShot(True)
+        self._job_wait_timer.timeout.connect(self._on_job_wait_tick)
+        self._awaiting_job_id = None
+        self._job_wait_rounds = 0
 
         # Connect to theme changes to update the formatter
         self.theme_manager.theme_changed.connect(self._on_theme_changed)
@@ -316,8 +341,8 @@ class TerminalHandler(BaseAgentHandler):
         output_for_llm = ""
         output_for_ui = None # Can be str or dict
 
-        if tool_name == 'execute_shell' and isinstance(result, dict) and result.get('status') == 'running' and 'job_id' in result:
-            job_id = result.get('job_id')
+        job_id = _running_job_id(result)
+        if tool_name == 'execute_shell' and job_id is not None:
             output_for_llm = (
                 f"**Tool Result:** Background shell job #{job_id} started and is running.\n"
                 f"Poll it with poll_shell_job, pacing polls with wait_seconds."
@@ -436,6 +461,13 @@ class TerminalHandler(BaseAgentHandler):
         )
         if output_for_ui:
             self.ui.add_message(output_for_ui)
+        job_id = _running_job_id(result)
+        if job_id is not None:
+            # Background launch: do NOT ask the model immediately (it acts
+            # NOW — e.g. relaunches). Record the launch, wait handler-side.
+            self.command_history.append(output_for_llm)
+            self._arm_job_wait(job_id)
+            return
         self._continue_loop(output_for_llm)
 
     @Slot(int, str)
@@ -453,9 +485,83 @@ class TerminalHandler(BaseAgentHandler):
         self.ui.add_message(f"<i>{error_msg}</i>")
         self._continue_loop(error_msg)
 
+    def cancel_job_wait(self):
+        try:
+            self._job_wait_timer.stop()
+        except Exception:
+            pass
+        self._awaiting_job_id = None
+        self._job_wait_rounds = 0
+
+    def _arm_job_wait(self, job_id: int):
+        self.cancel_job_wait()
+        self._awaiting_job_id = job_id
+        self._job_wait_rounds = 0
+        logging.info(f"TerminalHandler: awaiting background job #{job_id} handler-side.")
+        self._start_thinking_timer(f"Waiting for job #{job_id}...")
+        try:
+            self._job_wait_timer.start(JOB_WAIT_INTERVAL_MS)
+        except Exception as e:
+            logging.warning(f"Job wait timer failed to start: {e}")
+            self._awaiting_job_id = None
+
+    def _on_job_wait_tick(self):
+        job_id = self._awaiting_job_id
+        if job_id is None or self.state != VisionState.EXECUTING or self._tool_in_flight:
+            # Stopped, paused, superseded, or a tool took over (its finish
+            # continues the loop and cancels this wait via _continue_loop).
+            self._awaiting_job_id = None
+            return
+        try:
+            manager = getattr(self.computer, "shell_jobs", None)
+            if manager is None:
+                raise RuntimeError("no shell job manager")
+            status = manager.status(job_id)
+        except Exception as e:
+            logging.warning(f"Job wait poll failed: {e}")
+            self._awaiting_job_id = None
+            return
+        if status.get("status") == "done":
+            self._awaiting_job_id = None
+            job_id_arg = job_id
+            try:
+                final = manager.poll(job_id)
+            except Exception as e:
+                logging.warning(f"Final job poll failed: {e}")
+                return
+            output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
+                "poll_shell_job", final, {"job_id": job_id_arg}
+            )
+            if output_for_ui:
+                self.ui.add_message(output_for_ui)
+            self._continue_loop(output_for_llm, from_job_wait=True)
+            return
+        self._job_wait_rounds += 1
+        if self._job_wait_rounds >= JOB_WAIT_MAX_ROUNDS:
+            self._awaiting_job_id = None
+            logging.info(f"TerminalHandler: job #{job_id} still running after "
+                         f"{JOB_WAIT_MAX_ROUNDS} waits; handing control back.")
+            try:
+                current = manager.poll(job_id)
+            except Exception as e:
+                logging.warning(f"Job poll failed: {e}")
+                return
+            output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
+                "poll_shell_job", current, {"job_id": job_id}
+            )
+            if output_for_ui:
+                self.ui.add_message(output_for_ui)
+            self._continue_loop(output_for_llm, from_job_wait=True)
+            return
+        try:
+            self._job_wait_timer.start(JOB_WAIT_INTERVAL_MS)
+        except Exception:
+            self._awaiting_job_id = None
+
     def _cleanup_task(self):
         self._exec_ticket += 1
         self._tool_in_flight = False
+        self.cancel_job_wait()
         try:
             self.computer.cancel_event.set()
         except Exception:
