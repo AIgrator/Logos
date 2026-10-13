@@ -250,8 +250,10 @@ def execute_shell(self, command: str) -> dict:
         if timed_out:
             return {
                 "stdout": stdout,
-                "stderr": (stderr + f"\nError: Command timed out after {timeout} seconds. "
-                                    f"Partial output kept above.").strip(),
+                "stderr": (stderr + f"\nError: Command timed out after {timeout} seconds and was "
+                                    f"TERMINATED (output above is partial). Do NOT simply retry the same "
+                                    f"command — it will time out again. Instead: split the work into smaller "
+                                    f"pieces (e.g. per-subfolder), or report the situation to the user.").strip(),
                 "exit_code": -1
             }
         return {
