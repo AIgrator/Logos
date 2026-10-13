@@ -19,6 +19,7 @@ Contract for heirs:
 """
 import html
 import logging
+import os
 import re
 
 from states import VisionState
@@ -385,6 +386,31 @@ class BaseAgentHandler:
         """Heir hook: drop a pending background-job wait. Default: none."""
         return
 
+    def _assessment_note(self, kind: str) -> str:
+        """Assessment instruction for the model, loaded from prompt files.
+
+        Prompts live in prompts/, never hardcoded: per-mode file first,
+        then the shared one. The short fallback only covers missing files.
+        """
+        candidates = []
+        subdir = getattr(self, "PROMPTS_SUBDIR", None)
+        if subdir:
+            candidates.append((f"assessment_{subdir}_{kind}",
+                               f"prompts/{subdir}/assessment_{kind}.txt"))
+        candidates.append((f"assessment_common_{kind}",
+                           f"prompts/common/assessment_{kind}.txt"))
+        for key, path in candidates:
+            try:
+                if not os.path.isfile(path):
+                    continue
+                text = self.brain._get_cached_prompt(key, path)
+                if text and "template not found" not in text:
+                    return text.strip()
+            except Exception:
+                pass
+        return ("**System note:** assess via communicate_to_user before acting "
+                "further. One message, then wait.")
+
     def _continue_loop(self, last_command_output=None, from_job_wait=False):
         """
         Plan one action -> execute -> observe -> repeat.
@@ -447,22 +473,7 @@ class BaseAgentHandler:
                 # a tool instead, the normal flow continues; the next trigger
                 # pauses directly with the template below.
                 self._assessment_sent = True
-                if escalate_kind == "timeout":
-                    note = ("**System note:** this task keeps dying at the shell timeout. "
-                            "Do NOT issue another tool call yet. First assess via "
-                            "communicate_to_user: which recent failures are REAL blockers vs "
-                            "your own trifles (typos/quoting)? Name the real wall with evidence, "
-                            "state your causal hypothesis (facts vs inference: 'I believe X "
-                            "because Y'), and give the user concrete options (raise Shell "
-                            "timeout / split the work / abort). One message, then wait.")
-                else:
-                    note = ("**System note:** the last steps keep failing. "
-                            "Do NOT issue another tool call yet. First assess via "
-                            "communicate_to_user: which recent failures are REAL blockers vs "
-                            "your own trifles (typos/quoting)? Name the real wall with evidence, "
-                            "state your causal hypothesis (facts vs inference: 'I believe X "
-                            "because Y'), and give the user concrete options. "
-                            "One message, then wait.")
+                note = self._assessment_note(escalate_kind)
                 self.command_history.append(note)
                 logging.info(f"{type(self).__name__} requesting self-assessment "
                              f"before paging the user ({escalate_kind}).")

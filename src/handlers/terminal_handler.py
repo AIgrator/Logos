@@ -99,6 +99,7 @@ class WebTaskThread(QThread):
 class TerminalHandler(BaseAgentHandler):
     MODE_NAME = "terminal"
     SCHEMA_NAME = "terminal_tool_code"
+    PROMPTS_SUBDIR = "terminal"
 
     def __init__(self, controller, theme_manager, working_directory=None):
         super().__init__(controller)
