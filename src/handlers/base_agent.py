@@ -156,11 +156,13 @@ def _recent_commands(history, n: int = 3) -> str:
         outcome = "pending"
         for h in lines[i + 1:]:
             if h.startswith(("**Agent Command:**", "**User guidance:**", "**User note",
-                             "**User Response:**", "Loop signal:")):
+                             "**User Response:**", "Loop signal:", "**Note:**")):
                 outcome = "dropped"
                 break
             if h.startswith(("**Tool Result:**", "**Command Result:**", "**Error:**")):
                 outcome = _outcome_of(h)
+                if _is_formulation_error(h):
+                    outcome += " (typo, not counted)"
                 break
         items.append(f"• {cmd} → {outcome}")
     return "\n".join(items) if items else "(none recorded)"
@@ -253,6 +255,7 @@ class BaseAgentHandler:
         self._last_action_sig = None  # (name, args) of the last launched action
         self._consecutive_errors = 0  # failed steps in a row (escalate at MAX_*)
         self._consecutive_timeouts = 0  # timeout deaths in a row (fuse is shorter)
+        self._assessment_sent = False  # her-verdict turn already spent this streak
 
     # -- shared state machine ------------------------------------------
 
@@ -371,6 +374,7 @@ class BaseAgentHandler:
         self._last_action_sig = None
         self._consecutive_errors = 0
         self._consecutive_timeouts = 0
+        self._assessment_sent = False
 
     def _cleanup_task(self):
         """Heir hook: release mode resources (browsers, threads, UI containers)."""
@@ -400,58 +404,97 @@ class BaseAgentHandler:
             elif _is_formulation_error(last_command_output):
                 logging.debug(f"{type(self).__name__} ignoring formulation error "
                               f"for escalation streak.")
+                # Tell the model too (not just the user-facing tried-list):
+                # that failure judged the command, not the task.
+                self.command_history.append(
+                    "**Note:** that failure was a command typo (quoting/args), "
+                    "not a task failure — fix the syntax and retry; the task "
+                    "itself is unjudged."
+                )
             elif _is_timeout_death(last_command_output):
                 self._consecutive_errors += 1
                 self._consecutive_timeouts += 1
             elif _is_error_output(last_command_output):
                 self._consecutive_errors += 1
                 self._consecutive_timeouts = 0
+                # NOTE: flag intentionally preserved — only success/None/stop
+                # grant a new assessment turn, otherwise it would loop forever.
             else:
                 self._consecutive_errors = 0
                 self._consecutive_timeouts = 0
+                self._assessment_sent = False
         else:
             self._consecutive_errors = 0
             self._consecutive_timeouts = 0
+            self._assessment_sent = False
 
         if self.state in (VisionState.IDLE, VisionState.PAUSED):
             return
 
+        escalate_kind = None
         if self._consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
-            self._consecutive_errors = 0
-            self._consecutive_timeouts = 0
-            logging.info(f"{type(self).__name__} escalating to user: task keeps "
-                         f"dying at the shell timeout.")
-            failure_summary = _summarize_failure(last_command_output)
-            tried = _recent_commands(self.command_history)
-            self.ui.add_text(
-                f"This task keeps getting killed by the shell timeout ({failure_summary}). "
-                f"One retry already failed the same way, so retrying is pointless. "
-                f"Tried most recently: {tried}. "
-                f"Options: raise \"Shell timeout\" in Terminal settings (tell me roughly "
-                f"how long the operation needs), split the work into smaller pieces, "
-                f"or abort it — your call, I'll continue when you reply.",
-                prefix_html=f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> "
-            )
-            self._set_state(VisionState.PAUSED_ON_ERROR)
-            self._stop_thinking_timer()
-            return
+            escalate_kind = "timeout"
+        elif self._consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            escalate_kind = "general"
 
-        if self._consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+        if escalate_kind is not None:
             self._consecutive_errors = 0
             self._consecutive_timeouts = 0
-            logging.info(f"{type(self).__name__} escalating to user after "
-                         f"{MAX_CONSECUTIVE_ERRORS} consecutive failures.")
-            failure_summary = _summarize_failure(last_command_output)
-            tried = _recent_commands(self.command_history)
-            self.ui.add_text(
-                f"I'm stuck — the last steps keep failing (latest: {failure_summary}). "
-                f"Tried most recently: {tried}. "
-                f"Tell me how to proceed and I'll continue when you reply.",
-                prefix_html=f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> "
-            )
-            self._set_state(VisionState.PAUSED_ON_ERROR)
-            self._stop_thinking_timer()
-            return
+            if not self._assessment_sent:
+                # Only the model itself can separate real blockers from its
+                # own trifles — so SHE gets the first word: one assessment
+                # turn via communicate_to_user. If she ignores it and issues
+                # a tool instead, the normal flow continues; the next trigger
+                # pauses directly with the template below.
+                self._assessment_sent = True
+                if escalate_kind == "timeout":
+                    note = ("**System note:** this task keeps dying at the shell timeout. "
+                            "Do NOT issue another tool call yet. First assess via "
+                            "communicate_to_user: which recent failures are REAL blockers vs "
+                            "your own trifles (typos/quoting)? Name the real wall with evidence, "
+                            "state your causal hypothesis (facts vs inference: 'I believe X "
+                            "because Y'), and give the user concrete options (raise Shell "
+                            "timeout / split the work / abort). One message, then wait.")
+                else:
+                    note = ("**System note:** the last steps keep failing. "
+                            "Do NOT issue another tool call yet. First assess via "
+                            "communicate_to_user: which recent failures are REAL blockers vs "
+                            "your own trifles (typos/quoting)? Name the real wall with evidence, "
+                            "state your causal hypothesis (facts vs inference: 'I believe X "
+                            "because Y'), and give the user concrete options. "
+                            "One message, then wait.")
+                self.command_history.append(note)
+                logging.info(f"{type(self).__name__} requesting self-assessment "
+                             f"before paging the user ({escalate_kind}).")
+            else:
+                failure_summary = _summarize_failure(last_command_output)
+                tried = _recent_commands(self.command_history)
+                if escalate_kind == "timeout":
+                    text = (
+                        f"This task keeps getting killed by the shell timeout ({failure_summary}). "
+                        f"One retry already failed the same way, so retrying is pointless. "
+                        f"Tried most recently: {tried}. "
+                        f"Options: raise \"Shell timeout\" in Terminal settings (tell me roughly "
+                        f"how long the operation needs), split the work into smaller pieces, "
+                        f"or abort it — your call, I'll continue when you reply."
+                    )
+                    logging.info(f"{type(self).__name__} escalating to user: task keeps "
+                                 f"dying at the shell timeout.")
+                else:
+                    text = (
+                        f"I'm stuck — the last steps keep failing (latest: {failure_summary}). "
+                        f"Tried most recently: {tried}. "
+                        f"Tell me how to proceed and I'll continue when you reply."
+                    )
+                    logging.info(f"{type(self).__name__} escalating to user after "
+                                 f"consecutive failures.")
+                self.ui.add_text(
+                    text,
+                    prefix_html=f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> "
+                )
+                self._set_state(VisionState.PAUSED_ON_ERROR)
+                self._stop_thinking_timer()
+                return
 
         self._start_thinking_timer("Thinking...")
 
