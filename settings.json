@@ -145,8 +145,15 @@
     "grounding_backend": "local"
   },
   "browser": {
+    "block_ads": true,
     "headless": false,
-    "profile_dir": "cache/browser_profile",
-    "default_timeout_ms": 30000
+    "default_timeout_ms": 30000,
+    "profile_dir": "cache/browser_profile"
+  },
+  "context": {
+    "history_keep_last_n": 0,
+    "history_max_result_chars": 0,
+    "history_dedup_snapshots": false,
+    "history_trim_tracebacks": false
   }
 }

@@ -451,6 +451,16 @@ class UIManager(QWidget):
         self.bottom_toolbar_layout.addWidget(self.attachment_button)
         self.bottom_toolbar_layout.addWidget(self.mode_button)
         self.bottom_toolbar_layout.addWidget(self.model_button)
+        self.pause_task_button = QPushButton()
+        self.pause_task_button.setIconSize(QSize(20, 20))
+        self.pause_task_button.setFixedSize(QSize(36, 36))
+        self.tooltip_manager.install(self.pause_task_button, "Pause/resume task (Ctrl+Alt+P)")
+        self.pause_task_button.installEventFilter(
+            IconHoverFilter(self.controller.theme_manager, 'fa5s.pause', parent=self.pause_task_button)
+        )
+        self.pause_task_button.clicked.connect(self._on_pause_task_clicked)
+        self.pause_task_button.setVisible(False)
+        self.bottom_toolbar_layout.addWidget(self.pause_task_button)
         self.bottom_toolbar_layout.addStretch()
         self.bottom_toolbar_layout.addWidget(self.action_button_stack)
 
@@ -834,6 +844,9 @@ class UIManager(QWidget):
         if self.is_compact:
             self.switchToFullMode()
 
+    def _on_pause_task_clicked(self):
+        self.pause_resume_clicked.emit()
+
     def _on_chat_mode_selected(self):
         self.mode_button.setText("Chat")
         self.chat_mode_selected.emit()
@@ -915,6 +928,9 @@ class UIManager(QWidget):
     def set_active_mode(self, mode: str):
         is_terminal = (mode == 'terminal')
         self.add_folder_action.setVisible(is_terminal)
+        # Pause button only where a pausable loop runs (terminal/browser).
+        # Plain chat has nothing to pause; vision has its own pause controls.
+        self.pause_task_button.setVisible(mode in ('terminal', 'browser'))
 
         if mode == 'chat':
             self.chat_mode_action.setChecked(True)

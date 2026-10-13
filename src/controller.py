@@ -321,6 +321,7 @@ class AppController(QObject):
         self.ui.set_main_window_title(title_string)
         self.ui.set_title_bar_text(title_string)
         self.ui.refresh_model_button(title_string)
+        self.ui.set_assistant_name(self._get_current_model_name())
         self._start_vision_initialization()
         self.indexer.start()
         self._check_initial_configuration()
@@ -752,6 +753,7 @@ class AppController(QObject):
         self.ui.set_main_window_title(title_string)
         self.ui.set_title_bar_text(title_string)
         self.ui.refresh_model_button(title_string)
+        self.ui.set_assistant_name(self._get_current_model_name())
 
     def switch_model(self, provider_id: str, model_id: str):
         """Switches the active provider/model for this session only.
@@ -791,6 +793,7 @@ class AppController(QObject):
         self.ui.set_main_window_title(title_string)
         self.ui.set_title_bar_text(title_string)
         self.ui.refresh_model_button(title_string)
+        self.ui.set_assistant_name(self._get_current_model_name())
         if self._can_continue():
             notice = (f"<i>Switched to <b>{title_string}</b> (this session only). "
                       f"Context preserved.</i>{CONTINUE_LINK}")
