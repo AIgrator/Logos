@@ -16,6 +16,27 @@ import time
 POLL_OUTPUT_CAP = 20000
 
 
+def parse_job_id(value) -> int:
+    """Tolerant job-id parsing: 2, '2', '#2', 'job 2', 'job #2' all work.
+
+    The model sees 'job #N' everywhere (history, hints), so it naturally
+    echoes that back. Rejecting it burned turns and hid a live job once.
+    """
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, str):
+        cleaned = value.strip().lower()
+        for prefix in ("job #", "job#", "job ", "#"):
+            if cleaned.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+                break
+        if cleaned.isdigit():
+            return int(cleaned)
+    raise ValueError(f"Invalid job_id '{value}': use the number, e.g. 2.")
+
+
 def resolve_shell_timeout(settings_manager, default: int = 60) -> int:
     timeout = default
     try:

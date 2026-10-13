@@ -22,11 +22,12 @@ def stop_shell_job(self, job_id: int) -> dict:
     """
     Aborts a background shell job and reaps it.
     """
+    from src.computer.shell_jobs import parse_job_id
     manager = getattr(self, "shell_jobs", None)
     if manager is None:
         raise RuntimeError("Background shell jobs are not available.")
     try:
-        job_id = int(job_id)
-    except Exception:
-        raise ValueError(f"Action 'stop_shell_job' failed: invalid job_id '{job_id}'.") from None
+        job_id = parse_job_id(job_id)
+    except ValueError as e:
+        raise ValueError(f"Action 'stop_shell_job' failed: {e}") from None
     return manager.stop(job_id)
