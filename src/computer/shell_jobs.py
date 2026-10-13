@@ -71,7 +71,14 @@ def build_shell_command(command: str):
     if inner is not None:
         # Make cmdlet errors terminating: by default powershell.exe
         # returns exit code 0 even when a cmdlet fails, which fakes success.
-        inner = "$ErrorActionPreference = 'Stop'; " + inner
+        # Pin console encoding to UTF-8 as well: powershell inherits whatever
+        # codepage the parent console uses (often 65001), while the reader
+        # side must know exactly one codec — otherwise Russian error text
+        # arrives as mojibake.
+        inner = ("$ErrorActionPreference = 'Stop'; "
+                 "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+                 "$OutputEncoding = [System.Text.Encoding]::UTF8; "
+                 + inner)
         return (['powershell', '-NoProfile', '-NonInteractive', '-Command', inner],
                 'utf-8', extra)
     if sys.platform == "win32":
