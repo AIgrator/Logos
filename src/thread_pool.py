@@ -28,8 +28,16 @@ class ThreadPool:
         if thread in self.pool and thread not in self.available:
             self.available.append(thread)
 
-    def cleanup(self):
-        """Cleans up all threads in the pool."""
+    def cleanup(self, timeout_ms: int = 1500):
+        """Quits pool threads with a bounded wait each (never hangs shutdown)."""
         for thread in self.pool:
-            thread.quit()
-            thread.wait()
+            try:
+                thread.quit()
+            except Exception:
+                pass
+        for thread in self.pool:
+            try:
+                if not thread.wait(timeout_ms):
+                    logging.warning("ThreadPool: a thread did not finish in time; continuing shutdown.")
+            except Exception:
+                pass

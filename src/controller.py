@@ -1,6 +1,5 @@
 import logging
 import io
-import sys
 import threading
 import time
 import os
@@ -96,6 +95,7 @@ class AppController(QObject):
         self.thinking_timer = QTimer(self)
         self.thinking_time = 0
         self.settings_window = None
+        self._shutting_down = False
 
         # Handlers
         comp_start = time.perf_counter()
@@ -257,32 +257,95 @@ class AppController(QObject):
         return response_data["response"]
 
     def handle_shutdown(self):
-        """Initiates a graceful shutdown with a timeout, then forces exit."""
-        logging.info("Shutdown requested. Cleaning up resources with a 1-second timeout...")
+        """Fast, bounded shutdown: hide at once, stop everything with budgets, quit.
 
-        # Run cleanup in a daemon thread. If the main thread exits, this one will be killed.
-        cleanup_thread = threading.Thread(target=self.cleanup, daemon=True)
-        cleanup_thread.start()
+        The old flow (daemon cleanup thread + sys.exit) was theater: sys.exit
+        still waits for non-daemon threads, so a worker sleeping in a retry
+        backoff or a blocked HTTP call hung the app for up to minutes.
+        """
+        if self._shutting_down:
+            logging.info("Shutdown already in progress; ignoring duplicate request.")
+            return
+        self._shutting_down = True
+        try:
+            self.ui.main_window.hide()
+        except Exception:
+            pass
+        logging.info("Shutdown requested. Cancelling work, then bounded cleanup.")
+        try:
+            if self.llm_worker:
+                self.llm_worker.cancel()
+        except Exception as e:
+            logging.warning(f"LLM cancel failed during shutdown: {e}")
+        self.cleanup()
+        try:
+            self.app.quit()
+        except Exception as e:
+            logging.warning(f"App quit failed during shutdown: {e}")
 
-        # Wait for the cleanup thread to finish, but for a maximum of 1 second.
-        cleanup_thread.join(timeout=1.0)
-
-        if cleanup_thread.is_alive():
-            logging.warning("Cleanup took too long. Forcing exit now.")
-        else:
-            logging.info("Cleanup complete. Forcing exit.")
-
-        sys.exit(0)
+    def _stop_thread(self, thread, name: str, timeout_ms: int):
+        try:
+            if thread is None:
+                return
+            try:
+                thread.quit()
+            except Exception:
+                pass
+            try:
+                running = thread.isRunning()
+            except Exception:
+                running = True
+            if running and not thread.wait(timeout_ms):
+                logging.warning(f"{name} thread did not finish in {timeout_ms}ms; continuing shutdown.")
+        except Exception as e:
+            logging.warning(f"Stopping {name} thread failed: {e}")
 
     def cleanup(self):
-        """Stops all background processes and animations before quitting."""
+        """Stops background processes with per-step guards and time budgets."""
         logging.info("AppController cleanup initiated.")
-        if self.indexer:
-            logging.info("Stopping file indexer.")
-            self.indexer.stop()
-        if self.hotkey_manager:
-            logging.info("Stopping hotkey manager.")
-            self.hotkey_manager.stop()
+        self._stop_thread(getattr(self, "llm_thread", None), "llm", 2000)
+        self._stop_thread(getattr(self, "vision_thread", None), "vision", 2500)
+        self._stop_thread(getattr(self, "screenshot_thread", None), "screenshot", 1000)
+        try:
+            pool = getattr(self, "thread_pool", None)
+            if pool is not None and hasattr(pool, "cleanup"):
+                try:
+                    pool.cleanup(timeout_ms=1500)
+                except TypeError:
+                    pool.cleanup()
+        except Exception as e:
+            logging.warning(f"Thread pool cleanup failed: {e}")
+        try:
+            web = getattr(getattr(self, "terminal_handler", None), "web_thread", None)
+            if web is not None:
+                try:
+                    web.cancel()
+                except Exception:
+                    pass
+                if web.isRunning() and not web.wait(1000):
+                    logging.warning("Terminal web thread did not finish in 1000ms; continuing shutdown.")
+        except Exception as e:
+            logging.warning(f"Terminal web thread stop failed: {e}")
+        try:
+            computer = getattr(getattr(self, "browser_handler", None), "computer", None)
+            mgr = getattr(computer, "browser_manager", None) if computer else None
+            if mgr is not None:
+                logging.info("Closing controlled browser (best effort).")
+                mgr.close()
+        except Exception as e:
+            logging.warning(f"Browser close failed during shutdown: {e}")
+        try:
+            if self.indexer:
+                logging.info("Stopping file indexer.")
+                self.indexer.stop()
+        except Exception as e:
+            logging.warning(f"Indexer stop failed: {e}")
+        try:
+            if getattr(self, "hotkey_manager", None):
+                logging.info("Stopping hotkey manager.")
+                self.hotkey_manager.stop()
+        except Exception as e:
+            logging.warning(f"Hotkey stop failed: {e}")
 
     # --- Thread-safe Hotkey Requesters ---
     # These methods are called from the background thread of the keyboard listener.

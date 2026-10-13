@@ -91,11 +91,13 @@ class HotkeyManager(QObject):
         self._last_registered_hotkeys = hotkeys_from_settings.copy()
 
     def stop(self):
-        """Stops the hotkey listener thread."""
+        """Stops the hotkey listener thread (bounded wait, never hangs shutdown)."""
         if self.listener and self.listener.is_alive():
             logger.info("Stopping hotkey listener.")
             self.listener.stop()
-            self.listener.join() # Wait for the thread to fully terminate
+            self.listener.join(timeout=2.0)
+            if self.listener.is_alive():
+                logger.warning("Hotkey listener did not terminate in 2s; continuing shutdown.")
         self.listener = None
 
     def __del__(self):

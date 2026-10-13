@@ -82,6 +82,7 @@ class Indexer(QObject):
             if self._reindex_timer:
                 self._reindex_timer.cancel()
             self._reindex_timer = threading.Timer(0.5, self.build_index)
+            self._reindex_timer.daemon = True  # never block interpreter exit
             self._reindex_timer.start()
 
     def _load_gitignore(self):
