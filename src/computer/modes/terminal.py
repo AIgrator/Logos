@@ -11,6 +11,9 @@ from src.computer.tools.terminal.fs.replace_many import replace_many
 from src.computer.tools.terminal.fs.search_file_content import search_file_content
 from src.computer.tools.terminal.fs.write_file import write_file
 from src.computer.tools.terminal.system.execute_shell import execute_shell
+from src.computer.tools.terminal.system.poll_shell_job import poll_shell_job
+from src.computer.tools.terminal.system.stop_shell_job import stop_shell_job
+from src.computer.tools.terminal.system.wait_seconds import wait_seconds
 from src.computer.tools.web.download_file import download_file
 from src.computer.tools.web.web_fetchs import web_fetchs
 from src.computer.tools.web.web_search import web_search
@@ -33,6 +36,9 @@ TOOLS_METADATA = {
     "search_file_content": search_file_content,
     "write_file": write_file,
     "execute_shell": execute_shell,
+    "poll_shell_job": poll_shell_job,
+    "stop_shell_job": stop_shell_job,
+    "wait_seconds": wait_seconds,
     "download_file": download_file,
     "web_fetchs": web_fetchs,
     "web_search": web_search,

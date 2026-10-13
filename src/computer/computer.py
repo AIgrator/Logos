@@ -35,6 +35,8 @@ class Computer:
         # (used by execute_shell; set by whoever runs the tools).
         self.cancel_event = threading.Event()
         self.progress_callback = None
+        from src.computer.shell_jobs import ShellJobManager
+        self.shell_jobs = ShellJobManager()
         self._load_mode_tools(mode)
 
     def _resolve_path(self, path: str) -> str:

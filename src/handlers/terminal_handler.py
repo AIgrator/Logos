@@ -305,6 +305,15 @@ class TerminalHandler(BaseAgentHandler):
         output_for_llm = ""
         output_for_ui = None # Can be str or dict
 
+        if tool_name == 'execute_shell' and isinstance(result, dict) and result.get('status') == 'running' and 'job_id' in result:
+            job_id = result.get('job_id')
+            output_for_llm = (
+                f"**Tool Result:** Background shell job #{job_id} started and is running.\n"
+                f"Poll it with poll_shell_job, pacing polls with wait_seconds."
+            )
+            output_for_ui = f"<i>Background shell job #{job_id} started.</i>"
+            return output_for_llm, output_for_ui
+
         if tool_name == 'execute_shell':
             stdout = result.get('stdout', '')
             stderr = result.get('stderr', '')
@@ -431,6 +440,12 @@ class TerminalHandler(BaseAgentHandler):
             self.computer.cancel_event.set()
         except Exception:
             pass
+        try:
+            manager = getattr(self.computer, "shell_jobs", None)
+            if manager is not None:
+                manager.kill_all()
+        except Exception as e:
+            logging.warning(f"Background shell jobs cleanup failed: {e}")
         if self._exec_thread and self._exec_thread.isRunning():
             self._exec_worker.cancel()
             self._exec_thread.quit()
