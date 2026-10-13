@@ -53,6 +53,16 @@ def _is_timeout_death(text) -> bool:
     return isinstance(text, str) and "timed out after" in text and "TERMINATED" in text
 
 
+def _recent_commands(history, n: int = 3) -> str:
+    """Compact 'tried' recap for escalation messages (names + arg hints)."""
+    cmds = [h for h in (history or []) if h.startswith("**Agent Command:**")]
+    short = []
+    for c in cmds[-n:]:
+        body = c[len("**Agent Command:**"):].strip().strip("`")
+        short.append(body[:60] + ("…" if len(body) > 60 else ""))
+    return " → ".join(short) if short else "(none recorded)"
+
+
 def _summarize_failure(text, limit: int = 300) -> str:
     """Most actionable lines of a failure output (not just the header).
 
@@ -266,11 +276,13 @@ class BaseAgentHandler:
             logging.info(f"{type(self).__name__} escalating to user: task keeps "
                          f"dying at the shell timeout.")
             failure_summary = _summarize_failure(last_command_output)
+            tried = _recent_commands(self.command_history)
             self.ui.add_message(
                 f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> "
                 f"This task keeps getting killed by the shell timeout "
                 f"({html.escape(failure_summary)}). One retry already failed the same way, "
-                f"so retrying is pointless. Options: raise \"Shell timeout\" in Terminal "
+                f"so retrying is pointless. Tried most recently: {html.escape(tried)}. "
+                f"Options: raise \"Shell timeout\" in Terminal "
                 f"settings (tell me roughly how long the operation needs), split the work "
                 f"into smaller pieces, or abort it — your call, I'll continue when you reply."
             )
@@ -284,9 +296,11 @@ class BaseAgentHandler:
             logging.info(f"{type(self).__name__} escalating to user after "
                          f"{MAX_CONSECUTIVE_ERRORS} consecutive failures.")
             failure_summary = _summarize_failure(last_command_output)
+            tried = _recent_commands(self.command_history)
             self.ui.add_message(
                 f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> I'm stuck — "
                 f"the last steps keep failing (latest: {html.escape(failure_summary)}). "
+                f"Tried most recently: {html.escape(tried)}. "
                 f"Tell me how to proceed and I'll continue when you reply."
             )
             self._set_state(VisionState.PAUSED_ON_ERROR)
