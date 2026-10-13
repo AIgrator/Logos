@@ -45,6 +45,8 @@ def _is_error_output(text) -> bool:
     # never fires while the loop circles a dead job.
     if "'status': 'done'" in text and "'exit_code': 0" not in text:
         return True
+    if "Background job #" in text and " done (exit " in text:
+        return "done (exit 0)" not in text
     return False
 
 
@@ -53,14 +55,43 @@ def _is_timeout_death(text) -> bool:
     return isinstance(text, str) and "timed out after" in text and "TERMINATED" in text
 
 
+def _compact_command(body: str, limit: int = 140) -> str:
+    """execute_shell({"command": "X", ...}) -> execute_shell: X (truncated).
+
+    The agent command's meaning is in the arguments (the shell command,
+    the job id, the path) — not in the JSON boilerplate around them.
+    """
+    name, _, rest = body.partition("(")
+    name = name.strip()
+    if rest.endswith(")"):
+        try:
+            import json as _json
+            args = _json.loads(rest[:-1])
+            if isinstance(args, dict):
+                if "command" in args:
+                    text = f"{name}: {args['command']}"
+                elif "job_id" in args:
+                    text = f"{name} (job #{args['job_id']})"
+                elif "seconds" in args:
+                    text = f"{name} ({args['seconds']}s)"
+                elif "path" in args:
+                    text = f"{name}: {args['path']}"
+                elif "paths" in args:
+                    text = f"{name}: {args['paths']}"
+                else:
+                    text = body
+                return text if len(text) <= limit else text[:limit] + "…"
+        except Exception:
+            pass
+    return body if len(body) <= limit else body[:limit] + "…"
+
+
 def _recent_commands(history, n: int = 3) -> str:
-    """Compact 'tried' recap for escalation messages (names + arg hints)."""
+    """Compact 'tried' recap for escalation messages (real commands)."""
     cmds = [h for h in (history or []) if h.startswith("**Agent Command:**")]
-    short = []
-    for c in cmds[-n:]:
-        body = c[len("**Agent Command:**"):].strip().strip("`")
-        short.append(body[:60] + ("…" if len(body) > 60 else ""))
-    return " → ".join(short) if short else "(none recorded)"
+    return " → ".join(_compact_command(
+        c[len("**Agent Command:**"):].strip().strip("`")) for c in cmds[-n:]) \
+        if cmds else "(none recorded)"
 
 
 def _summarize_failure(text, limit: int = 300) -> str:
@@ -89,7 +120,15 @@ def _is_neutral_output(text) -> bool:
     Previously they reset the error streak, so death → relaunch → death
     circled forever without ever escalating to the user.
     """
-    return isinstance(text, str) and "'status': 'running'" in text
+    if not isinstance(text, str):
+        return False
+    if "'status': 'running'" in text:
+        return True
+    if "Background job #" in text:
+        # Human-shaped reports: running / started / not-found are neutral;
+        # done is judged by the error rule (nonzero exit counts).
+        return " done (exit " not in text
+    return False
 
 
 class BaseAgentHandler:
@@ -277,14 +316,14 @@ class BaseAgentHandler:
                          f"dying at the shell timeout.")
             failure_summary = _summarize_failure(last_command_output)
             tried = _recent_commands(self.command_history)
-            self.ui.add_message(
-                f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> "
-                f"This task keeps getting killed by the shell timeout "
-                f"({html.escape(failure_summary)}). One retry already failed the same way, "
-                f"so retrying is pointless. Tried most recently: {html.escape(tried)}. "
-                f"Options: raise \"Shell timeout\" in Terminal "
-                f"settings (tell me roughly how long the operation needs), split the work "
-                f"into smaller pieces, or abort it — your call, I'll continue when you reply."
+            self.ui.add_text(
+                f"This task keeps getting killed by the shell timeout ({failure_summary}). "
+                f"One retry already failed the same way, so retrying is pointless. "
+                f"Tried most recently: {tried}. "
+                f"Options: raise \"Shell timeout\" in Terminal settings (tell me roughly "
+                f"how long the operation needs), split the work into smaller pieces, "
+                f"or abort it — your call, I'll continue when you reply.",
+                prefix_html=f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> "
             )
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()
@@ -297,11 +336,11 @@ class BaseAgentHandler:
                          f"{MAX_CONSECUTIVE_ERRORS} consecutive failures.")
             failure_summary = _summarize_failure(last_command_output)
             tried = _recent_commands(self.command_history)
-            self.ui.add_message(
-                f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> I'm stuck — "
-                f"the last steps keep failing (latest: {html.escape(failure_summary)}). "
-                f"Tried most recently: {html.escape(tried)}. "
-                f"Tell me how to proceed and I'll continue when you reply."
+            self.ui.add_text(
+                f"I'm stuck — the last steps keep failing (latest: {failure_summary}). "
+                f"Tried most recently: {tried}. "
+                f"Tell me how to proceed and I'll continue when you reply.",
+                prefix_html=f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> "
             )
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()

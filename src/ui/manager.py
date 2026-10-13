@@ -22,6 +22,7 @@ from states import ControllerState
 from . import styles
 from .utils import CustomToolTipManager, IconHoverFilter
 from .widgets.attachment_chip import AttachmentChip
+from .text_render import render_text
 from .widgets.chat_widget import ChatWidget
 from .widgets.model_switch_popup import ModelSwitchPopup
 from .widgets.custom_title_bar import CustomTitleBar
@@ -1105,38 +1106,15 @@ class UIManager(QWidget):
         """
         Processes raw text content, detects if it's Markdown, converts it to HTML,
         and adds it to the chat widget, optionally prepending a raw HTML prefix.
+        Single pipeline (see ui.text_render); behavior unchanged.
         """
-        import html
-        import markdown
+        self.add_message(render_text(content, prefix_html, markdown_ok=True),
+                         force_scroll=True)
 
-        is_markdown = (
-            "###" in content or
-            "**" in content or
-            "```" in content or
-            "\n-" in content or
-            "\n*" in content or
-            "\n1." in content
-        )
-
-        if is_markdown:
-            processed_content = markdown.markdown(content, extensions=['fenced_code'])
-        else:
-            # Just escape, don't wrap in <p> yet.
-            processed_content = html.escape(content)
-
-        if prefix_html:
-            # Combine prefix and content, then wrap the whole thing in a single <p>
-            # This ensures they stay on the same line.
-            final_html = f'<p style="white-space: pre-wrap;">{prefix_html}{processed_content}</p>'
-        else:
-            # No prefix. Wrap in <p> only if it was plain text.
-            # Markdown content already has its own block-level tags (p, ul, etc.)
-            if not is_markdown:
-                final_html = f'<p style="white-space: pre-wrap;">{processed_content}</p>'
-            else:
-                final_html = processed_content
-
-        self.add_message(final_html, force_scroll=True)
+    def add_text(self, content: str, prefix_html: str = ""):
+        """Adds machine-generated text (errors, statuses, reports) via the
+        unified pipeline with markdown detection OFF (deterministic escape)."""
+        self.add_message(render_text(content, prefix_html, markdown_ok=False))
 
     def add_message(self, html_content, force_scroll=False):
         if self.is_compact:

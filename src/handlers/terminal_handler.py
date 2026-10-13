@@ -351,6 +351,44 @@ class TerminalHandler(BaseAgentHandler):
             output_for_ui = f"<i>Background shell job #{job_id} started.</i>"
             return output_for_llm, output_for_ui
 
+        if tool_name in ('poll_shell_job', 'stop_shell_job') and isinstance(result, dict) \
+                and 'status' in result:
+            # Human-readable job reports (never raw dict reprs: their literal
+            # \n sequences render as an unreadable wall in HTML).
+            job_id = result.get('job_id', '?')
+            status = result.get('status', '?')
+            elapsed = result.get('elapsed_seconds', '?')
+            output = result.get('output', '')
+            if status == 'done':
+                exit_code = result.get('exit_code', '?')
+                output_for_llm = (
+                    f"**Tool Result:** Background job #{job_id} done (exit {exit_code}) "
+                    f"after {elapsed}s.\n```\n{output or '(no output)'}\n```"
+                )
+                title = f"Background job #{job_id}: done (exit {exit_code})"
+            elif status == 'running':
+                output_for_llm = (
+                    f"**Tool Result:** Background job #{job_id} running after {elapsed}s.\n```\n"
+                    f"{output or '(no new output)'}\n```"
+                )
+                title = f"Background job #{job_id}: running"
+            else:
+                output_for_llm = (
+                    f"**Tool Result:** Background job #{job_id} not found "
+                    f"(already reaped after finishing, or wrong id)."
+                )
+                title = f"Background job #{job_id}: not found"
+            content = output if status in ('done', 'running') else output_for_llm
+            output_for_ui = {'type': 'collapsible', 'title': title, 'content': content or '(empty)'}
+            return output_for_llm, output_for_ui
+
+        if tool_name == 'wait_seconds' and isinstance(result, dict):
+            waited = result.get('waited_seconds', '?')
+            state_word = 'completed' if result.get('completed') else 'interrupted'
+            output_for_llm = f"**Tool Result:** Waited {waited}s ({state_word})."
+            output_for_ui = f"<i>Waited {waited}s.</i>"
+            return output_for_llm, output_for_ui
+
         if tool_name == 'execute_shell':
             stdout = result.get('stdout', '')
             stderr = result.get('stderr', '')

@@ -166,6 +166,28 @@ def _cap(text: str, limit: int = POLL_OUTPUT_CAP) -> str:
     return text
 
 
+def _mute_diagnostic(exit_code: int, stdout: str, stderr: str,
+                     elapsed: float, timeout: float) -> str:
+    """Explains an abnormal end with no output (otherwise unreadable).
+
+    A mute abnormal death (timeout text lost, external kill, silent
+    crash/OOM) must still tell the user what is known: how long it ran
+    against the allowed limit.
+    """
+    if exit_code == 0 or stdout.strip() or stderr.strip():
+        return stderr
+    verdict = (f"\n(Process exited with code {exit_code} after {elapsed:.0f}s "
+               f"of {timeout:.0f}s allowed with no output at all. Likely: it was "
+               f"killed right at the timeout, terminated externally, ran out of "
+               f"memory, or crashed silently.)")
+    return (stderr + verdict).strip()
+
+
+NO_RESULT_TEXT = ("No result was recorded (the worker ended without storing one). "
+                  "Process state unknown — it may have been killed externally or "
+                  "crashed silently.")
+
+
 def pump_shell(proc: subprocess.Popen, timeout: float, cancel_event,
                progress_cb, out_sink: list, err_sink: list, lock=None):
     """Runs the pump loop; returns (timed_out, cancelled)."""
