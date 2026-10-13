@@ -227,6 +227,7 @@ class TerminalHandler(BaseAgentHandler):
             pass
         self._exec_ticket += 1
         logging.info(f"TerminalHandler: dispatching ticket {self._exec_ticket} ({action_name}) to exec thread.")
+        self._tool_in_flight = True
         self._exec_worker.dispatch.emit(self._exec_ticket, action_name, action_args)
         return None
 
@@ -234,6 +235,7 @@ class TerminalHandler(BaseAgentHandler):
         """ Handles web_fetchs and web_search asynchronously using a WebTaskThread."""
 
         self._start_thinking_timer("Accessing web...")
+        self._tool_in_flight = True
         provider = self.controller.llm_worker.provider
 
         if self.web_thread and self.web_thread.isRunning():
@@ -253,6 +255,7 @@ class TerminalHandler(BaseAgentHandler):
     @Slot(str, str, dict)
     def _on_web_request_complete(self, action_name: str, result: str, original_args: dict):
         logging.info(f"Web request '{action_name}' completed successfully.")
+        self._tool_in_flight = False
         self._stop_thinking_timer()
         self._handle_final_response(action_name, result, original_args)
         self.web_thread = None
@@ -260,6 +263,7 @@ class TerminalHandler(BaseAgentHandler):
     @Slot(str, str, dict)
     def _on_web_request_error(self, action_name: str, error_message: str, original_args: dict):
         logging.error(f"Web request for {action_name} failed: {error_message}")
+        self._tool_in_flight = False
         self._stop_thinking_timer()
         error_msg_for_llm = f"**Error:** Local fallback for {action_name} also failed: {error_message}"
         self.ui.add_message(f"<i>{error_msg_for_llm}</i>")
@@ -392,6 +396,7 @@ class TerminalHandler(BaseAgentHandler):
         if ticket != self._exec_ticket:
             logging.info(f"Stale tool result ignored (ticket {ticket} != {self._exec_ticket}).")
             return
+        self._tool_in_flight = False
         try:
             self.ui.hide_tool_progress(ticket)
         except Exception:
@@ -409,6 +414,7 @@ class TerminalHandler(BaseAgentHandler):
         if ticket != self._exec_ticket:
             logging.info(f"Stale tool error ignored (ticket {ticket} != {self._exec_ticket}).")
             return
+        self._tool_in_flight = False
         try:
             self.ui.hide_tool_progress(ticket)
         except Exception:
@@ -420,6 +426,7 @@ class TerminalHandler(BaseAgentHandler):
 
     def _cleanup_task(self):
         self._exec_ticket += 1
+        self._tool_in_flight = False
         try:
             self.computer.cancel_event.set()
         except Exception:

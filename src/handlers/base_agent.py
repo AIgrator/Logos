@@ -17,9 +17,27 @@ Contract for heirs:
   - _cleanup_task(): heir hook called by stop() (close browsers, kill
     threads, end UI containers). Default does nothing.
 """
+import html
 import logging
 
 from states import VisionState
+
+# After this many failed steps in a row the loop stops asking the model
+# and calls the user instead (PAUSED_ON_ERROR). Endless silent retries
+# are worse than one honest question.
+MAX_CONSECUTIVE_ERRORS = 3
+
+
+def _is_error_output(text) -> bool:
+    """Whether a loop output line reports a failure (fact, not verdict)."""
+    if not text or not isinstance(text, str):
+        return False
+    if text.startswith("**Error:**") or text.startswith("**Tool Result:** Error"):
+        return True
+    if text.startswith("**Command Result:** (Exit Code:"):
+        first_line = text.split("\n", 1)[0]
+        return "(Exit Code: 0)" not in first_line
+    return False
 
 
 class BaseAgentHandler:
@@ -36,6 +54,9 @@ class BaseAgentHandler:
         self.original_user_request = None
         self.command_history = []
         self._stashed_response = None  # LLM answer arrived while paused
+        self._tool_in_flight = False  # async tool running; superseded answers drop
+        self._last_action_sig = None  # (name, args) of the last launched action
+        self._consecutive_errors = 0  # failed steps in a row (escalate at MAX_*)
 
     # -- shared state machine ------------------------------------------
 
@@ -147,6 +168,9 @@ class BaseAgentHandler:
         self._stop_thinking_timer()
         self.original_user_request = None
         self.command_history = []
+        self._tool_in_flight = False
+        self._last_action_sig = None
+        self._consecutive_errors = 0
 
     def _cleanup_task(self):
         """Heir hook: release mode resources (browsers, threads, UI containers)."""
@@ -161,8 +185,28 @@ class BaseAgentHandler:
         """
         if last_command_output:
             self.command_history.append(last_command_output)
+            if _is_error_output(last_command_output):
+                self._consecutive_errors += 1
+            else:
+                self._consecutive_errors = 0
+        else:
+            self._consecutive_errors = 0
 
         if self.state in (VisionState.IDLE, VisionState.PAUSED):
+            return
+
+        if self._consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+            self._consecutive_errors = 0
+            logging.info(f"{type(self).__name__} escalating to user after "
+                         f"{MAX_CONSECUTIVE_ERRORS} consecutive failures.")
+            last_line = (last_command_output or "").strip().split("\n")[0][:200]
+            self.ui.add_message(
+                f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> I'm stuck — "
+                f"the last steps keep failing (latest: {html.escape(last_line)}). "
+                f"Tell me how to proceed and I'll continue when you reply."
+            )
+            self._set_state(VisionState.PAUSED_ON_ERROR)
+            self._stop_thinking_timer()
             return
 
         self._start_thinking_timer("Thinking...")
@@ -242,11 +286,31 @@ class BaseAgentHandler:
 
     def _run_action(self, action: dict):
         import json
+        if self._tool_in_flight:
+            # A duplicate/superseded answer (e.g. user guidance sent a second
+            # request while the first answer's tool still runs). The running
+            # tool's result continues the loop; running this too would queue
+            # a second tool behind it and stall on slow outputs.
+            logging.info(f"{type(self).__name__} dropping superseded action "
+                         f"'{action.get('name')}' (a tool is still running).")
+            return
         action_name = action.get('name')
         action_args = action.get('arguments', {})
         if not isinstance(action_args, dict):
             action_args = {}
             action['arguments'] = action_args
+        sig = (action_name, json.dumps(action_args, sort_keys=True, ensure_ascii=False))
+        if sig == self._last_action_sig:
+            # Identical consecutive action: history already holds it and its
+            # result. Executing again cannot produce new information.
+            logging.info(f"{type(self).__name__} blocking identical repeat of '{action_name}'.")
+            self._continue_loop(
+                "**Tool Result:** Error: this action is identical to the previous one "
+                "(see its result above). Do not repeat it — vary the approach, check the "
+                "current state first, or report to the user."
+            )
+            return
+        self._last_action_sig = sig
         command_str_for_llm = f"`{action_name}({json.dumps(action_args, ensure_ascii=False)})`"
         self.command_history.append(f"**Agent Command:** {command_str_for_llm}")
         try:
