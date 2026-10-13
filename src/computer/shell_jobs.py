@@ -478,6 +478,10 @@ class ShellJobManager:
         if job.done.is_set():
             with self._lock:
                 self._jobs.pop(job_id, None)
+            if job.result is None:
+                # Should be impossible (result is stored before done.set()):
+                # canary for a result-visibility race seen once in prod.
+                logging.warning(f"poll: job #{job_id} done with no result stored.")
             res = job.result or {"stdout": "", "stderr": "", "exit_code": -1}
             return {"job_id": job_id, "status": "done",
                     "exit_code": res.get("exit_code", -1),
