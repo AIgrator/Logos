@@ -128,10 +128,17 @@ def _summarize_failure(text, limit: int = 300) -> str:
         if "timed out after" in ln and "TERMINATED" in text:
             return ln[:limit]
     useful = [ln for ln in lines
-              if ln and not ln.startswith("**") and not ln.startswith("```")]
+              if ln and ln != "(empty)"
+              and not ln.startswith("**") and not ln.startswith("```")]
     if not useful:
         useful = [ln for ln in lines if ln][:2]
-    out = " / ".join(useful[:2])
+    keywords = ("error", "exception", "cannot", "failed", "failure",
+                "not found", "timed out", "denied", "missing", "invalid",
+                "terminated", "killed")
+    prioritized = [ln for ln in useful
+                   if any(k in ln.lower() for k in keywords)]
+    picked = (prioritized + [ln for ln in useful if ln not in prioritized])[:2]
+    out = " / ".join(picked)
     return out[:limit] + ("…" if len(out) > limit else "")
 
 
