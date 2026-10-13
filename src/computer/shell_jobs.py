@@ -262,9 +262,9 @@ def run_shell_command(command: str, working_directory, timeout: float,
             return {
                 "stdout": stdout,
                 "stderr": (stderr + f"\nError: Command timed out after {timeout} seconds and was "
-                                    f"TERMINATED (output above is partial). Do NOT simply retry the same "
-                                    f"command — it will time out again. Instead: split the work into smaller "
-                                    f"pieces (e.g. per-subfolder), or report the situation to the user.").strip(),
+                                    f"TERMINATED (output above is partial). Do NOT keep retrying it as-is — "
+                                    f"one varied retry at most; if it dies by timeout again, stop and report "
+                                    f"to the user (or split the work into smaller pieces).").strip(),
                 "exit_code": -1
             }
         return {"stdout": stdout, "stderr": stderr, "exit_code": exit_code}
@@ -350,7 +350,9 @@ class ShellJobManager:
                 elif timed_out:
                     job.result = {"stdout": stdout,
                                   "stderr": (stderr + f"\nError: job timed out after {timeout} "
-                                                      f"seconds and was TERMINATED.").strip(),
+                                                      f"seconds and was TERMINATED. One varied retry at most — "
+                                                      f"a second timeout death means the limit is the wall: "
+                                                      f"report to the user.").strip(),
                                   "exit_code": -1}
                 else:
                     job.result = {"stdout": stdout, "stderr": stderr,

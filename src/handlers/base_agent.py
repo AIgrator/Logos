@@ -26,6 +26,9 @@ from states import VisionState
 # and calls the user instead (PAUSED_ON_ERROR). Endless silent retries
 # are worse than one honest question.
 MAX_CONSECUTIVE_ERRORS = 3
+# Timeout deaths get their own shorter fuse: one retry is legitimate
+# triage, the second identical death means the limit itself is the wall.
+MAX_CONSECUTIVE_TIMEOUTS = 2
 
 
 def _is_error_output(text) -> bool:
@@ -43,6 +46,11 @@ def _is_error_output(text) -> bool:
     if "'status': 'done'" in text and "'exit_code': 0" not in text:
         return True
     return False
+
+
+def _is_timeout_death(text) -> bool:
+    """A command/job killed by the shell timeout (not just any failure)."""
+    return isinstance(text, str) and "timed out after" in text and "TERMINATED" in text
 
 
 def _summarize_failure(text, limit: int = 300) -> str:
@@ -91,6 +99,7 @@ class BaseAgentHandler:
         self._tool_in_flight = False  # async tool running; superseded answers drop
         self._last_action_sig = None  # (name, args) of the last launched action
         self._consecutive_errors = 0  # failed steps in a row (escalate at MAX_*)
+        self._consecutive_timeouts = 0  # timeout deaths in a row (fuse is shorter)
 
     # -- shared state machine ------------------------------------------
 
@@ -208,6 +217,7 @@ class BaseAgentHandler:
         self._tool_in_flight = False
         self._last_action_sig = None
         self._consecutive_errors = 0
+        self._consecutive_timeouts = 0
 
     def _cleanup_task(self):
         """Heir hook: release mode resources (browsers, threads, UI containers)."""
@@ -234,18 +244,43 @@ class BaseAgentHandler:
             self.command_history.append(last_command_output)
             if _is_neutral_output(last_command_output):
                 pass
+            elif _is_timeout_death(last_command_output):
+                self._consecutive_errors += 1
+                self._consecutive_timeouts += 1
             elif _is_error_output(last_command_output):
                 self._consecutive_errors += 1
+                self._consecutive_timeouts = 0
             else:
                 self._consecutive_errors = 0
+                self._consecutive_timeouts = 0
         else:
             self._consecutive_errors = 0
+            self._consecutive_timeouts = 0
 
         if self.state in (VisionState.IDLE, VisionState.PAUSED):
             return
 
+        if self._consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+            self._consecutive_errors = 0
+            self._consecutive_timeouts = 0
+            logging.info(f"{type(self).__name__} escalating to user: task keeps "
+                         f"dying at the shell timeout.")
+            failure_summary = _summarize_failure(last_command_output)
+            self.ui.add_message(
+                f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> "
+                f"This task keeps getting killed by the shell timeout "
+                f"({html.escape(failure_summary)}). One retry already failed the same way, "
+                f"so retrying is pointless. Options: raise \"Shell timeout\" in Terminal "
+                f"settings (tell me roughly how long the operation needs), split the work "
+                f"into smaller pieces, or abort it — your call, I'll continue when you reply."
+            )
+            self._set_state(VisionState.PAUSED_ON_ERROR)
+            self._stop_thinking_timer()
+            return
+
         if self._consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
             self._consecutive_errors = 0
+            self._consecutive_timeouts = 0
             logging.info(f"{type(self).__name__} escalating to user after "
                          f"{MAX_CONSECUTIVE_ERRORS} consecutive failures.")
             failure_summary = _summarize_failure(last_command_output)
