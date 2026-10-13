@@ -45,6 +45,15 @@ def _is_error_output(text) -> bool:
     return False
 
 
+def _is_neutral_output(text) -> bool:
+    """Background-launch handles: neither success nor failure.
+
+    Previously they reset the error streak, so death → relaunch → death
+    circled forever without ever escalating to the user.
+    """
+    return isinstance(text, str) and "'status': 'running'" in text
+
+
 class BaseAgentHandler:
     MODE_NAME = "agent"
     SCHEMA_NAME = None
@@ -203,7 +212,9 @@ class BaseAgentHandler:
                 pass
         if last_command_output:
             self.command_history.append(last_command_output)
-            if _is_error_output(last_command_output):
+            if _is_neutral_output(last_command_output):
+                pass
+            elif _is_error_output(last_command_output):
                 self._consecutive_errors += 1
             else:
                 self._consecutive_errors = 0

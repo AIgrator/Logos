@@ -345,7 +345,8 @@ class TerminalHandler(BaseAgentHandler):
         if tool_name == 'execute_shell' and job_id is not None:
             output_for_llm = (
                 f"**Tool Result:** Background shell job #{job_id} started and is running.\n"
-                f"Poll it with poll_shell_job, pacing polls with wait_seconds."
+                f"Poll it with poll_shell_job, pacing polls with wait_seconds.\n"
+                f"```\n{result}\n```"
             )
             output_for_ui = f"<i>Background shell job #{job_id} started.</i>"
             return output_for_llm, output_for_ui
