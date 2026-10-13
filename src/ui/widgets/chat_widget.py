@@ -161,19 +161,45 @@ class ChatWidget(QAbstractScrollArea):
 
         super().mousePressEvent(event)
 
+    # Max chars rendered inside an expanded block. Beyond this Qt's text
+    # layout on huge docs freezes the UI; full text stays in full_content
+    # (copy-all still gives everything).
+    MAX_RENDERED_CONTENT = 30000
+
     def _toggle_collapsible_block(self, block_id: str, new_state: str):
-        """Finds a collapsible block by its ID, toggles its state, and re-renders it."""
+        """Finds a collapsible block by its ID, toggles its state, and re-renders it.
+
+        Builds a FRESH QTextDocument instead of re-setHtml'ing the old one:
+        reusing a document whose layout/resources are live (paint, hit-test,
+        cursors) is a use-after-free risk that once killed the app here.
+        """
         for msg in self.messages:
             if msg.get('id') == block_id:
                 msg['state'] = new_state
-                # Re-render the document for this specific message
-                new_html = self.collapsible_formatter.format_block(
-                    title=msg['title'],
-                    content=msg['full_content'],
-                    block_id=msg['id'],
-                    state=msg['state']
-                )
-                msg['doc'].setHtml(new_html)
+                try:
+                    full = msg.get('full_content') or ''
+                    if not isinstance(full, str):
+                        full = str(full)
+                    shown = full
+                    if len(shown) > self.MAX_RENDERED_CONTENT:
+                        shown = (shown[:self.MAX_RENDERED_CONTENT]
+                                 + f"\n… [truncated for display, "
+                                   f"{len(full) - self.MAX_RENDERED_CONTENT} chars hidden]")
+                    new_html = self.collapsible_formatter.format_block(
+                        title=msg.get('title', 'Details'),
+                        content=shown,
+                        block_id=msg['id'],
+                        state=msg['state']
+                    )
+                except Exception as e:
+                    logging.warning(f"Collapsible render failed for {block_id}: {e}")
+                    return
+                logging.info(f"ChatWidget: toggling {block_id} -> {new_state} "
+                             f"(content {len(msg.get('full_content') or '')} chars).")
+                new_doc = QTextDocument(self)
+                new_doc.setDocumentMargin(0)
+                new_doc.setHtml(new_html)
+                msg['doc'] = new_doc
                 self._update_scroll_bar()
                 self.viewport().update()
                 break
