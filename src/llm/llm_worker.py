@@ -287,6 +287,8 @@ class LLMWorker(QObject):
         log_payload["system_prompt"] = clean_system_prompt
         log_payload["prompt"] = clean_prompt
 
+        logging.debug(f"LLM request payload built ({len(str(log_payload.get('prompt', '')))} prompt chars, "
+                      f"schema={schema_name}); writing to llm_communication.log")
         llm_logger.info(json.dumps(log_payload, ensure_ascii=False, indent=2))
 
         max_retries = self.settings.get("max_retries", 3)
