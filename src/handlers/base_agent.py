@@ -45,6 +45,26 @@ def _is_error_output(text) -> bool:
     return False
 
 
+def _summarize_failure(text, limit: int = 300) -> str:
+    """Most actionable lines of a failure output (not just the header).
+
+    'Exit Code: 1' alone tells the user nothing; the timeout sentence or
+    the first stderr line does.
+    """
+    if not text or not isinstance(text, str):
+        return "(no details)"
+    lines = [ln.strip() for ln in text.split("\n")]
+    for ln in lines:
+        if "timed out after" in ln and "TERMINATED" in text:
+            return ln[:limit]
+    useful = [ln for ln in lines
+              if ln and not ln.startswith("**") and not ln.startswith("```")]
+    if not useful:
+        useful = [ln for ln in lines if ln][:2]
+    out = " / ".join(useful[:2])
+    return out[:limit] + ("…" if len(out) > limit else "")
+
+
 def _is_neutral_output(text) -> bool:
     """Background-launch handles: neither success nor failure.
 
@@ -228,10 +248,10 @@ class BaseAgentHandler:
             self._consecutive_errors = 0
             logging.info(f"{type(self).__name__} escalating to user after "
                          f"{MAX_CONSECUTIVE_ERRORS} consecutive failures.")
-            last_line = (last_command_output or "").strip().split("\n")[0][:200]
+            failure_summary = _summarize_failure(last_command_output)
             self.ui.add_message(
                 f"<b>{html.escape(str(self.controller._get_current_model_name()))}:</b> I'm stuck — "
-                f"the last steps keep failing (latest: {html.escape(last_line)}). "
+                f"the last steps keep failing (latest: {html.escape(failure_summary)}). "
                 f"Tell me how to proceed and I'll continue when you reply."
             )
             self._set_state(VisionState.PAUSED_ON_ERROR)
