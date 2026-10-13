@@ -4,7 +4,7 @@ from pydantic import BaseModel, Field
 from typing import Any, Literal
 
 class ToolCall(BaseModel):
-    name: Literal['execute_shell', 'list_directory', 'write_file', 'search_file_content', 'finish', 'find_files', 'create_directory', 'replace', 'replace_many', 'web_search', 'web_fetchs', 'download_file', 'path_exists', 'display_message', 'communicate_to_user', 'read_files', 'delete_files', 'move_files', 'copy_files'] = Field(..., example="execute_shell")
+    name: Literal['execute_shell', 'list_directory', 'write_file', 'search_file_content', 'finish', 'find_files', 'create_directory', 'replace', 'replace_many', 'web_search', 'web_fetchs', 'download_file', 'path_exists', 'display_message', 'communicate_to_user', 'read_files', 'delete_files', 'move_files', 'copy_files', 'poll_shell_job', 'stop_shell_job', 'wait_seconds'] = Field(..., example="execute_shell")
     arguments: dict[str, Any] | None = Field(default=None, example={"command": "ls -l"})
 
 class TerminalToolCodePayload(BaseModel):
