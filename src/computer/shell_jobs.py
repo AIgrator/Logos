@@ -7,6 +7,7 @@ All tool calls still execute on worker threads — the registry is lock
 guarded because guidance-during-run can overlap two runners.
 """
 import logging
+import re
 import signal
 import subprocess
 import sys
@@ -530,6 +531,16 @@ class ShellJobManager:
                 logging.warning(f"poll: job #{job_id} done with no result stored.")
             res = job.result or {"stdout": "", "stderr": NO_RESULT_TEXT,
                                  "exit_code": -1}
+            # The kill verdict lives in the stored result, but polls return
+            # raw stream buffers — without this note a timeout death looks
+            # like a plain failure downstream (loop rules, her assessment).
+            stored_err = res.get("stderr", "")
+            if "timed out after" in stored_err:
+                m = re.search(r"timed out after (\d+) seconds", stored_err)
+                new_out += (f"\n[system: this job was killed by the shell timeout — "
+                            f"timed out after {m.group(1) if m else '?'}s, TERMINATED]")
+            elif "Stopped by user." in stored_err:
+                new_out += "\n[system: this job was stopped by the user]"
             return {"job_id": job_id, "status": "done",
                     "exit_code": res.get("exit_code", -1),
                     "elapsed_seconds": elapsed,
