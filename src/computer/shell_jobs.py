@@ -280,8 +280,10 @@ def run_shell_command(command: str, working_directory, timeout: float,
 
         out_lines: list = []
         err_lines: list = []
+        run_start = time.monotonic()
         timed_out, cancelled = pump_shell(
             proc, timeout, cancel_event, progress_cb, out_lines, err_lines)
+        run_elapsed = time.monotonic() - run_start
 
         stdout = "".join(out_lines)
         stderr = "".join(err_lines)
@@ -303,7 +305,10 @@ def run_shell_command(command: str, working_directory, timeout: float,
                                     f"to the user (or split the work into smaller pieces).").strip(),
                 "exit_code": -1
             }
-        return {"stdout": stdout, "stderr": stderr, "exit_code": exit_code}
+        return {"stdout": stdout,
+                "stderr": _mute_diagnostic(exit_code, stdout, stderr,
+                                           run_elapsed, timeout),
+                "exit_code": exit_code}
     except Exception as e:
         logging.error(f"An unexpected error occurred while executing command '{command}': {e}",
                       exc_info=True)
@@ -391,8 +396,12 @@ class ShellJobManager:
                                                       f"report to the user.").strip(),
                                   "exit_code": -1}
                 else:
-                    job.result = {"stdout": stdout, "stderr": stderr,
-                                  "exit_code": exit_code}
+                    job.result = {
+                        "stdout": stdout,
+                        "stderr": _mute_diagnostic(
+                            exit_code, stdout, stderr,
+                            time.monotonic() - job.started, timeout),
+                        "exit_code": exit_code}
                 logging.info(f"Background shell job #{job.job_id} finished with exit code {exit_code}.")
             except Exception as e:
                 logging.error(f"Background shell job #{job.job_id} failed: {e}", exc_info=True)
@@ -447,7 +456,8 @@ class ShellJobManager:
             job = self._jobs.pop(job_id, None)
         if job is None:
             return {"job_id": job_id, "status": "not_found"}
-        res = job.result or {"stdout": "", "stderr": "", "exit_code": -1}
+        res = job.result or {"stdout": "", "stderr": NO_RESULT_TEXT,
+                             "exit_code": -1}
         return {"stdout": res.get("stdout", ""), "stderr": res.get("stderr", ""),
                 "exit_code": res.get("exit_code", -1)}
 
@@ -518,7 +528,8 @@ class ShellJobManager:
                 # Should be impossible (result is stored before done.set()):
                 # canary for a result-visibility race seen once in prod.
                 logging.warning(f"poll: job #{job_id} done with no result stored.")
-            res = job.result or {"stdout": "", "stderr": "", "exit_code": -1}
+            res = job.result or {"stdout": "", "stderr": NO_RESULT_TEXT,
+                                 "exit_code": -1}
             return {"job_id": job_id, "status": "done",
                     "exit_code": res.get("exit_code", -1),
                     "elapsed_seconds": elapsed,
