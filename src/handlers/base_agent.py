@@ -316,8 +316,11 @@ class BaseAgentHandler:
             # Identical consecutive action: history already holds it and its
             # result. Executing again cannot produce new information.
             logging.info(f"{type(self).__name__} blocking identical repeat of '{action_name}'.")
+            # NOTE: "Blocked", not "Error" — guardrail hits must NOT count
+            # toward the escalation streak (a healthy job with busy-looped
+            # polls once paged the user while everything worked).
             self._continue_loop(
-                "**Tool Result:** Error: this action is identical to the previous one "
+                "**Tool Result:** Blocked: this action is identical to the previous one "
                 "(see its result above). Do not repeat it — vary the approach, check the "
                 "current state first, or report to the user."
             )
