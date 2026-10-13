@@ -9,6 +9,7 @@ from PySide6.QtWidgets import QFileDialog
 from PIL import Image
 
 from brain import Brain
+from build_info import get_build_id
 from llm.error_formatter import CONTINUE_LINK
 from llm.llm_worker import LLMWorker
 from settings_manager import SettingsManager
@@ -818,30 +819,32 @@ class AppController(QObject):
             provider_config = providers.get(active_provider_name)
 
             if not provider_config:
-                return "Logos AI Assistant"
+                title = "Logos AI Assistant"
+            else:
+                model_name = provider_config.get("model", "Unknown Model")
+                provider_static_config = self.settings_manager.PROVIDER_CONFIG.get(active_provider_name, {})
+                provider_display_name_main = provider_static_config.get("display_name", active_provider_name.replace('_', ' ').title())
 
-            model_name = provider_config.get("model", "Unknown Model")
-            provider_static_config = self.settings_manager.PROVIDER_CONFIG.get(active_provider_name, {})
-            provider_display_name_main = provider_static_config.get("display_name", active_provider_name.replace('_', ' ').title())
+                if active_provider_name == "openrouter":
+                    sub_provider_id, model_id = model_name.split('/', 1)
+                    models_by_provider = provider_static_config.get("models_by_provider", {})
 
-            if active_provider_name == "openrouter":
-                sub_provider_id, model_id = model_name.split('/', 1)
-                models_by_provider = provider_static_config.get("models_by_provider", {})
-
-                provider_display_name_sub = next(
-                    (name for name in models_by_provider.keys() if name.lower() == sub_provider_id),
-                    sub_provider_id.upper()
-                )
-
-                model_display_name = model_id
-                if provider_display_name_sub in models_by_provider:
-                    model_display_name = next(
-                        (name for name in models_by_provider[provider_display_name_sub] if self._format_openrouter_model_id(name) == model_id),
-                        model_id
+                    provider_display_name_sub = next(
+                        (name for name in models_by_provider.keys() if name.lower() == sub_provider_id),
+                        sub_provider_id.upper()
                     )
-                return f"OpenRouter: {provider_display_name_sub} - {model_display_name}"
 
-            return f"{provider_display_name_main} - {model_name}"
+                    model_display_name = model_id
+                    if provider_display_name_sub in models_by_provider:
+                        model_display_name = next(
+                            (name for name in models_by_provider[provider_display_name_sub] if self._format_openrouter_model_id(name) == model_id),
+                            model_id
+                        )
+                    title = f"OpenRouter: {provider_display_name_sub} - {model_display_name}"
+                else:
+                    title = f"{provider_display_name_main} - {model_name}"
+
+            return f"{title} [{get_build_id()}]"
         except Exception as e:
             logging.error(f"Failed to generate LLM title string: {e}", exc_info=True)
             return "Logos AI Assistant"

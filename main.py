@@ -58,6 +58,9 @@ def main():
     logs_dir = settings_manager.get('APP_LOGS_DIR')
     logging_config.setup_logging(log_to_file=True, logs_dir=logs_dir)
 
+    from build_info import get_build_id
+    logging.info(f"Build: {get_build_id()} (running from {script_dir})")
+
     # Crash diagnostics: on a hard crash (segfault) faulthandler writes the
     # Python stack of every thread to crash.log (normal logs die with the buffer).
     try:
