@@ -69,16 +69,23 @@ def build_shell_command(command: str):
         extra["start_new_session"] = True
 
     if inner is not None:
-        # Make cmdlet errors terminating: by default powershell.exe
-        # returns exit code 0 even when a cmdlet fails, which fakes success.
+        # Surface cmdlet failures WITHOUT killing bulk work on the first
+        # warning: $ErrorActionPreference='Stop' turned any per-file warning
+        # (inevitable on a live tree — open logs, loaded binaries) into an
+        # instant death before anything was done. Instead count session
+        # errors around the command: warnings stay visible AND fail the run
+        # at the end, while native exit codes pass through untouched.
         # Pin console encoding to UTF-8 as well: powershell inherits whatever
         # codepage the parent console uses (often 65001), while the reader
         # side must know exactly one codec — otherwise Russian error text
         # arrives as mojibake.
-        inner = ("$ErrorActionPreference = 'Stop'; "
+        inner = ("$Error.Clear(); "
                  "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
                  "$OutputEncoding = [System.Text.Encoding]::UTF8; "
-                 + inner)
+                 + inner +
+                 "; $__code = $LASTEXITCODE; if ($null -eq $__code) { $__code = 0 }; "
+                 "if (($Error.Count -gt 0) -and ($__code -eq 0)) { $__code = 1 }; "
+                 "exit $__code")
         return (['powershell', '-NoProfile', '-NonInteractive', '-Command', inner],
                 'utf-8', extra)
     if sys.platform == "win32":
