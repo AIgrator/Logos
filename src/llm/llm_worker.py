@@ -288,7 +288,9 @@ class LLMWorker(QObject):
         log_payload["prompt"] = clean_prompt
 
         logging.debug(f"LLM request payload built ({len(str(log_payload.get('prompt', '')))} prompt chars, "
-                      f"schema={schema_name}); writing to llm_communication.log")
+                      f"schema={schema_name}); writing to llm_communication.log; "
+                      f"handler_files={[getattr(h, 'baseFilename', None) for h in llm_logger.handlers]}; "
+                      f"live_jobs_note={'Live background jobs' in str(log_payload.get('prompt', ''))}")
         try:
             llm_logger.info(json.dumps(log_payload, ensure_ascii=False, indent=2))
         except Exception as e:
