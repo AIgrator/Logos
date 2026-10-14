@@ -1,5 +1,5 @@
 {
-  "active_provider": "openrouter",
+  "active_provider": "google",
   "llm_providers": {
     "anthropic": {
       "model": "claude-fable-5",
@@ -155,5 +155,10 @@
     "history_max_result_chars": 0,
     "history_dedup_snapshots": false,
     "history_trim_tracebacks": false
+  },
+  "max_consecutive_errors": 3,
+  "terminal": {
+    "shell_timeout_seconds": 60,
+    "shell_detach_seconds": 25
   }
 }

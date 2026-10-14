@@ -529,6 +529,9 @@ class BaseAgentHandler:
 
         if reasoning:
             self.ui.add_message(f"<b>{self.controller._get_current_model_name()}:</b> {reasoning}")
+            # Her own thoughts persist: without this the next turn sees what
+            # was DONE but never what was MEANT — stage tracking evaporates.
+            self.command_history.append(f"**Model reasoning:** {reasoning}")
 
         if schema_name != self.SCHEMA_NAME or not payload or 'action' not in payload:
             self.ui.add_message("<i>Received an unexpected response from the model. Cannot proceed.</i>")
