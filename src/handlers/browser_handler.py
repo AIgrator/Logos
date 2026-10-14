@@ -271,7 +271,7 @@ class BrowserHandler(BaseAgentHandler):
         self._exec_ticket += 1
         logging.info(f"BrowserHandler: dispatching ticket {self._exec_ticket} ({action_name}) to exec thread.")
         self._tool_in_flight = True
-        self._exec_worker.dispatch.emit(self._exec_ticket, action_name, action_args)
+        self._exec_worker.dispatch(self._exec_ticket, action_name, action_args)
         return None
 
     @Slot(int, bool, str)
