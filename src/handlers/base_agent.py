@@ -24,13 +24,13 @@ import re
 
 from states import VisionState
 
-# After this many failed steps in a row the loop stops asking the model
-# and calls the user instead (PAUSED_ON_ERROR). Endless silent retries
-# are worse than one honest question.
+# After this many unsuccessful turns in a row the loop stops asking the
+# model and calls the user instead (PAUSED_ON_ERROR). Endless silent
+# retries are worse than one honest question. ONE counter for everything:
+# timeout deaths count as ordinary failures. Significance is judged only by
+# the model (assessment turn); the code below merely picks message wording
+# from what actually failed.
 MAX_CONSECUTIVE_ERRORS = 3
-# Timeout deaths get their own shorter fuse: one retry is legitimate
-# triage, the second identical death means the limit itself is the wall.
-MAX_CONSECUTIVE_TIMEOUTS = 2
 
 
 def _is_error_output(text) -> bool:
@@ -227,9 +227,11 @@ class BaseAgentHandler:
         self._stashed_response = None  # LLM answer arrived while paused
         self._tool_in_flight = False  # async tool running; superseded answers drop
         self._last_action_sig = None  # (name, args) of the last launched action
-        self._consecutive_errors = 0  # failed steps in a row (escalate at MAX_*)
-        self._consecutive_timeouts = 0  # timeout deaths in a row (fuse is shorter)
+        self._consecutive_errors = 0  # unsuccessful turns in a row (escalate at MAX_*)
         self._assessment_sent = False  # her-verdict turn already spent this streak
+        # NOTE: there is deliberately NO timeout counter. Timeouts count as
+        # ordinary failures; significance is the model's call (assessment
+        # turn). Do not reintroduce a second fuse.
 
     # -- shared state machine ------------------------------------------
 
@@ -347,7 +349,6 @@ class BaseAgentHandler:
         self._tool_in_flight = False
         self._last_action_sig = None
         self._consecutive_errors = 0
-        self._consecutive_timeouts = 0
         self._assessment_sent = False
 
     def _cleanup_task(self):
@@ -359,23 +360,20 @@ class BaseAgentHandler:
         """Heir hook: drop a pending background-job wait. Default: none."""
         return
 
-    def _escalation_limits(self):
-        """User-configured escalation thresholds, read live (no restart needed).
+    def _escalation_limit(self):
+        """User-configured escalation threshold, read live (no restart needed).
 
-        Shared by all agent modes (vision inherits them when it moves onto
-        the unified loop). Falls back to module defaults on any trouble.
+        ONE knob shared by all agent modes (vision inherits it when it moves
+        onto the unified loop). Falls back to the module default on trouble.
         """
         try:
             settings = getattr(getattr(self, "controller", None), "settings", None) or {}
             max_errors = int(settings.get("max_consecutive_errors",
                                           MAX_CONSECUTIVE_ERRORS)
                              or MAX_CONSECUTIVE_ERRORS)
-            max_timeouts = int(settings.get("max_consecutive_timeouts",
-                                            MAX_CONSECUTIVE_TIMEOUTS)
-                               or MAX_CONSECUTIVE_TIMEOUTS)
         except Exception:
-            max_errors, max_timeouts = MAX_CONSECUTIVE_ERRORS, MAX_CONSECUTIVE_TIMEOUTS
-        return max(1, max_errors), max(1, max_timeouts)
+            max_errors = MAX_CONSECUTIVE_ERRORS
+        return max(1, max_errors)
 
     def _assessment_note(self, kind: str) -> str:
         """Assessment instruction for the model, loaded from prompt files.
@@ -414,10 +412,10 @@ class BaseAgentHandler:
                 self.cancel_job_wait()
             except Exception:
                 pass
-        # Doctrine: significance is the MODEL's call, never the code's.
-        # The code counts only mechanical facts — timeout deaths (our own
-        # exact text), neutral launches/polls (no outcome yet), and everything
-        # else failure-shaped as plain unsuccessful turns. Whether a
+        # Doctrine: significance is the MODEL's call, never the code's. ONE
+        # counter counts unsuccessful turns (timeout deaths included — they
+        # are ordinary failures). Neutral launches/polls have no outcome yet
+        # and preserve the streak; success/None/stop reset it. Whether a
         # SyntaxError is a trifle or the wall is judged by her in the
         # assessment turn, not by marker lists here. The user is only ever
         # bothered via her communicate_to_user or the second-tripwire pause.
@@ -425,36 +423,32 @@ class BaseAgentHandler:
             self.command_history.append(last_command_output)
             if _is_neutral_output(last_command_output):
                 pass
-            elif _is_timeout_death(last_command_output):
-                self._consecutive_errors += 1
-                self._consecutive_timeouts += 1
             elif _is_error_output(last_command_output):
                 self._consecutive_errors += 1
-                self._consecutive_timeouts = 0
                 # NOTE: flag intentionally preserved — only success/None/stop
                 # grant a new assessment turn, otherwise it would loop forever.
             else:
                 self._consecutive_errors = 0
-                self._consecutive_timeouts = 0
                 self._assessment_sent = False
         else:
             self._consecutive_errors = 0
-            self._consecutive_timeouts = 0
             self._assessment_sent = False
 
         if self.state in (VisionState.IDLE, VisionState.PAUSED):
             return
 
-        escalate_kind = None
-        max_errors, max_timeouts = self._escalation_limits()
-        if self._consecutive_timeouts >= max_timeouts:
-            escalate_kind = "timeout"
-        elif self._consecutive_errors >= max_errors:
-            escalate_kind = "general"
+        max_errors = self._escalation_limit()
+        if self._consecutive_errors < max_errors:
+            escalate_kind = None
+        else:
+            # Timeout flavor is message wording, not a second fuse: if any of
+            # the recent failures was a timeout death, the pause names the limit.
+            recent = self.command_history[-8:]
+            escalate_kind = ("timeout" if any(_is_timeout_death(h) for h in recent)
+                             else "general")
 
         if escalate_kind is not None:
             self._consecutive_errors = 0
-            self._consecutive_timeouts = 0
             if not self._assessment_sent:
                 # Only the model itself can separate real blockers from its
                 # own trifles — so SHE gets the first word: one assessment

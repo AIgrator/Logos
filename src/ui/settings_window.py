@@ -347,7 +347,6 @@ class SettingsWindow(QDialog):
         self.max_retries_spinbox.setValue(self.settings_manager.get("max_retries", 3))
         self.retry_delay_spinbox.setValue(self.settings_manager.get("retry_delay_seconds", 2))
         self.max_errors_spinbox.setValue(int(self.settings_manager.get("max_consecutive_errors", 3) or 3))
-        self.max_timeouts_spinbox.setValue(int(self.settings_manager.get("max_consecutive_timeouts", 2) or 2))
         self.prevent_multiple_instances_checkbox.setChecked(
             self.settings_manager.get("prevent_multiple_instances", True)
         )
@@ -544,7 +543,6 @@ class SettingsWindow(QDialog):
             "max_retries": self.max_retries_spinbox.value(),
             "retry_delay_seconds": self.retry_delay_spinbox.value(),
             "max_consecutive_errors": self.max_errors_spinbox.value(),
-            "max_consecutive_timeouts": self.max_timeouts_spinbox.value(),
             "prevent_multiple_instances": self.prevent_multiple_instances_checkbox.isChecked(),
             "vision": vision_settings,
             "browser": browser_settings,
@@ -780,18 +778,6 @@ class SettingsWindow(QDialog):
         agent_layout.addWidget(QLabel("Failures before asking:"), 0, 0)
         agent_layout.addWidget(self._create_help_label(max_errors_tooltip), 0, 1, Qt.AlignLeft)
         agent_layout.addWidget(self.max_errors_spinbox, 0, 3)
-
-        self.max_timeouts_spinbox = QSpinBox()
-        self.max_timeouts_spinbox.setRange(1, 10)
-        self.max_timeouts_spinbox.setFixedWidth(80)
-        max_timeouts_tooltip = (
-            "Shorter fuse for jobs killed by the shell timeout: after this many "
-            "timeout deaths in a row the agent asks you (usually: raise the timeout "
-            "or split the work). Shared by all agent modes. Applies immediately."
-        )
-        agent_layout.addWidget(QLabel("Timeout deaths before asking:"), 1, 0)
-        agent_layout.addWidget(self._create_help_label(max_timeouts_tooltip), 1, 1, Qt.AlignLeft)
-        agent_layout.addWidget(self.max_timeouts_spinbox, 1, 3)
         tab_layout.addWidget(agent_group)
 
         app_group = QGroupBox("Application")
