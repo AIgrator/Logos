@@ -120,6 +120,8 @@ class SettingsManager(QObject):
         "webp_lossless": True,
         "max_retries": 3,
         "retry_delay_seconds": 2,
+        "max_consecutive_errors": 3,
+        "max_consecutive_timeouts": 2,
         "omniparser": {
             "mode": "local",
             "api_url": "http://127.0.0.1:5000/parse",

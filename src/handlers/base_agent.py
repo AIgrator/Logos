@@ -359,6 +359,24 @@ class BaseAgentHandler:
         """Heir hook: drop a pending background-job wait. Default: none."""
         return
 
+    def _escalation_limits(self):
+        """User-configured escalation thresholds, read live (no restart needed).
+
+        Shared by all agent modes (vision inherits them when it moves onto
+        the unified loop). Falls back to module defaults on any trouble.
+        """
+        try:
+            settings = getattr(getattr(self, "controller", None), "settings", None) or {}
+            max_errors = int(settings.get("max_consecutive_errors",
+                                          MAX_CONSECUTIVE_ERRORS)
+                             or MAX_CONSECUTIVE_ERRORS)
+            max_timeouts = int(settings.get("max_consecutive_timeouts",
+                                            MAX_CONSECUTIVE_TIMEOUTS)
+                               or MAX_CONSECUTIVE_TIMEOUTS)
+        except Exception:
+            max_errors, max_timeouts = MAX_CONSECUTIVE_ERRORS, MAX_CONSECUTIVE_TIMEOUTS
+        return max(1, max_errors), max(1, max_timeouts)
+
     def _assessment_note(self, kind: str) -> str:
         """Assessment instruction for the model, loaded from prompt files.
 
@@ -428,9 +446,10 @@ class BaseAgentHandler:
             return
 
         escalate_kind = None
-        if self._consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS:
+        max_errors, max_timeouts = self._escalation_limits()
+        if self._consecutive_timeouts >= max_timeouts:
             escalate_kind = "timeout"
-        elif self._consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+        elif self._consecutive_errors >= max_errors:
             escalate_kind = "general"
 
         if escalate_kind is not None:
@@ -453,7 +472,7 @@ class BaseAgentHandler:
                 if escalate_kind == "timeout":
                     text = (
                         f"This task keeps getting killed by the shell timeout ({failure_summary}). "
-                        f"One retry already failed the same way, so retrying is pointless. "
+                        f"Repeated retries already failed the same way, so retrying is pointless. "
                         f"Tried most recently: {tried}. "
                         f"Options: raise \"Shell timeout\" in Terminal settings (tell me roughly "
                         f"how long the operation needs), split the work into smaller pieces, "
