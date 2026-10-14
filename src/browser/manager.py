@@ -10,8 +10,13 @@ import time
 
 logger = logging.getLogger(__name__)
 
+_SVG_SHAPE_ONCLICK = (
+    "svg[onclick], circle[onclick], ellipse[onclick], rect[onclick], "
+    "polygon[onclick], path[onclick]"
+)
 _INTERACTIVE_SELECTOR = (
     "a[href], button, input, select, textarea, div[onclick], "
+    + _SVG_SHAPE_ONCLICK + ", "
     "[role=button], [role=link], [role=checkbox], [role=radio], "
     "[role=switch], [role=tab], [role=menuitem]"
 )
@@ -19,8 +24,14 @@ _INTERACTIVE_SELECTOR = (
 _TAG_TO_ROLE = {
     "a": "link", "button": "button", "input": "textbox",
     "select": "combobox", "textarea": "textbox",
-    # Only clickable divs match the selector, so "button" is honest.
+    # Only clickable divs/shapes match the selector, so "button" is honest.
     "div": "button",
+    "svg": "button",
+    "circle": "button",
+    "ellipse": "button",
+    "rect": "button",
+    "polygon": "button",
+    "path": "button",
 }
 
 
@@ -264,7 +275,7 @@ class BrowserManager:
                         or loc.get_attribute("placeholder")
                         or loc.get_attribute("value")
                         or loc.get_attribute("alt")
-                        or (loc.inner_text(timeout=500).strip().split("\n")[0] if tag in ("a", "button", "div") else "")
+                        or self._element_text(loc, tag)
                         or "").strip()[:120]
                 ref = len(elements) + 1
                 self._refs[ref] = loc
@@ -297,6 +308,22 @@ class BrowserManager:
             return " | ".join(out)
         except Exception:
             return ""
+
+    @staticmethod
+    def _element_text(loc, tag: str) -> str:
+        """First-line text for label-bearing tags, '' otherwise.
+
+        Uses text_content (never throws on SVG nodes, unlike inner_text)
+        and never lets a label failure drop the element's ref.
+        """
+        if tag not in ("a", "button", "div", "svg", "circle", "ellipse",
+                       "rect", "polygon", "path"):
+            return ""
+        try:
+            text = loc.text_content(timeout=500) or ""
+        except Exception:
+            return ""
+        return text.strip().split("\n")[0]
 
     def find_in_snapshot(self, text: str | None = None, pattern: str | None = None,
                          context_lines: int = 2) -> str:
