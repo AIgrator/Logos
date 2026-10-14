@@ -142,6 +142,19 @@ until the execution core is ready. Voice will dock onto the same
 8. Virtual displays for parallel Vision tasks (only on demand; requires
    the arbiter from step 4 to be display-aware).
 
+## Backlog: known execution gaps (low priority, tracked — do not lose)
+
+- **Native terminal tools ignore timeout and Stop.** `execute_shell` is bounded by
+  `shell_timeout_seconds` and killed (whole process tree) on Stop, but direct tools
+  (`copy_files`, `write_file`, `read_files`, `delete_files`, `move_files`, …) run on
+  the worker thread with no time bound and do not honor cancellation: a long or hung
+  call blocks subsequent dispatches (they queue behind it), and `quit()` cannot release
+  a thread blocked inside `run()` (`QThread.terminate()` is forbidden — state corruption).
+  Fix direction (ONLY when it becomes a priority, not now): cooperative cancellation —
+  long tools check `Computer.cancel_event` per file/batch. Infinite loops are
+  structurally impossible (no loop tool; shell loops die at the timeout). Proven painless
+  so far (76s copy completed, no hangs observed); revisit only on real hangs.
+
 ## Non-goals (explicitly deferred)
 
 - Adding ~20 new direct LLM providers: other models stay reachable
