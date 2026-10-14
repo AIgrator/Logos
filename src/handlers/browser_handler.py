@@ -12,8 +12,10 @@ browser specifics remain: prompts, Playwright manager, result rendering.
 import json
 import logging
 import platform
+import queue
+import threading
 
-from PySide6.QtCore import QMetaObject, QObject, Qt, QThread, Signal, Slot
+from PySide6.QtCore import Slot
 
 from src.computer.computer import Computer
 from src.executor.executor import Executor
@@ -21,29 +23,72 @@ from src.executor.executor import Executor
 from .base_agent import BaseAgentHandler
 from .tool_exec_worker import ToolExecRelay
 
+_CLOSE_SENTINEL = object()
+_STOP_SENTINEL = object()
 
-class BrowserExecWorker(QObject):
-    """Runs browser tools on the handler's dedicated thread (off the GUI).
+
+class BrowserExecWorker:
+    """Runs browser tools on a dedicated plain thread (off the GUI).
 
     Playwright objects are created and used ONLY here (affinity): the
     BrowserManager object is built lazily on first tool call, launched and
     closed on this same thread. Results travel back via the GUI-thread relay.
+
+    Deliberately NOT a QThread with queued slots: Playwright's sync API
+    (greenlets) crashes the process when driven from under a Qt event-loop
+    dispatch on Windows — proven by repro (plain thread and QThread-subclass
+    run() are clean, queued slot delivery is fatal). Work arrives through a
+    plain queue; the GUI side never blocks.
     """
 
-    dispatch = Signal(int, str, dict)  # ticket, action_name, action_args
-
     def __init__(self, computer, executor, ensure_manager, relay: ToolExecRelay):
-        super().__init__()
         self.computer = computer
         self.executor = executor
         self._ensure_manager = ensure_manager
         self._relay = relay
-        self._cancelled = False
-        self.dispatch.connect(self.run_tool)
+        self._cancel_event = threading.Event()
+        self._queue: queue.Queue = queue.Queue()
+        self._close_done = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._started = False
 
-    @Slot(str, dict, int)
-    def run_tool(self, ticket: int, action_name: str, action_args: dict):
-        if self._cancelled:
+    def start(self):
+        # (Re)creates the thread when needed: a dead threading.Thread can
+        # never restart, but the queue survives, so pending work is kept.
+        if self._thread is not None and self._thread.is_alive():
+            return
+        if self._started and (self._thread is None or not self._thread.is_alive()):
+            logging.warning("Browser exec thread died; starting a fresh one.")
+        self._thread = threading.Thread(
+            target=self._run_loop, name="browser-exec", daemon=True)
+        self._started = True
+        self._thread.start()
+
+    def dispatch(self, ticket: int, action_name: str, action_args: dict):
+        self._cancel_event.clear()
+        self.start()
+        self._queue.put((ticket, action_name, action_args))
+
+    def cancel(self):
+        self._cancel_event.set()
+
+    def _run_loop(self):
+        while True:
+            item = self._queue.get()
+            try:
+                if item is _STOP_SENTINEL:
+                    return
+                if item is _CLOSE_SENTINEL:
+                    self._close_browser()
+                    self._close_done.set()
+                    continue
+                ticket, action_name, action_args = item
+                self._run_tool(ticket, action_name, action_args)
+            finally:
+                self._queue.task_done()
+
+    def _run_tool(self, ticket: int, action_name: str, action_args: dict):
+        if self._cancel_event.is_set():
             logging.info(f"BrowserExecWorker: ticket {ticket} ({action_name}) dropped, cancelled.")
             return
         logging.info(f"BrowserExecWorker: ticket {ticket} running {action_name}.")
@@ -54,11 +99,11 @@ class BrowserExecWorker(QObject):
                 {"shell_allowed": False},
             )
         except Exception as e:  # noqa: BLE001 - report back to the loop
-            if not self._cancelled:
+            if not self._cancel_event.is_set():
                 logging.error(f"Browser tool execution error in worker: {e}", exc_info=True)
                 self._relay.browser_error.emit(ticket, str(e))
             return
-        if self._cancelled:
+        if self._cancel_event.is_set():
             logging.info(f"BrowserExecWorker: ticket {ticket} ({action_name}) done but cancelled.")
             return
         if result.ok:
@@ -67,10 +112,8 @@ class BrowserExecWorker(QObject):
         else:
             self._relay.browser_finished.emit(ticket, False, result.error or "unknown error")
 
-    @Slot()
-    def close_browser(self):
-        """Closes the controlled browser. Runs on the worker thread via
-        blocking invoke (Playwright affinity); safe no-op when never started."""
+    def _close_browser(self):
+        """Closes the controlled browser on the worker thread (affinity)."""
         try:
             mgr = getattr(self.computer, "browser_manager", None)
             if mgr is not None:
@@ -79,8 +122,22 @@ class BrowserExecWorker(QObject):
         except Exception as e:
             logging.warning(f"Browser close failed: {e}")
 
-    def cancel(self):
-        self._cancelled = True
+    def shutdown(self, close_timeout: float = 3.0, join_timeout: float = 3.0) -> None:
+        """Best-effort browser close + thread stop, both bounded (for app exit)."""
+        self._cancel_event.set()
+        self._close_done.clear()
+        try:
+            self._queue.put(_CLOSE_SENTINEL)
+        except Exception:
+            pass
+        self._close_done.wait(timeout=close_timeout)
+        try:
+            self._queue.put(_STOP_SENTINEL)
+        except Exception:
+            pass
+        self._thread.join(timeout=join_timeout)
+        if self._thread.is_alive():
+            logging.warning("Browser exec thread did not stop in time; continuing shutdown.")
 
 
 class BrowserHandler(BaseAgentHandler):
@@ -93,15 +150,13 @@ class BrowserHandler(BaseAgentHandler):
         self.os_info = f"{platform.system()} {platform.release()}"
         self.executor = Executor(self.computer, ui=None)
 
-        self._exec_thread = QThread()
         # Relay first: it must live on the GUI thread so results are queued
         # back here (direct connects would run slots on the worker thread).
         self._exec_relay = ToolExecRelay(self)
         self._exec_worker = BrowserExecWorker(
             self.computer, self.executor,
             self._ensure_browser_manager, self._exec_relay)
-        self._exec_worker.moveToThread(self._exec_thread)
-        self._exec_thread.start()
+        self._exec_worker.start()
         self._exec_ticket = 0
         self._pending_action_name = None
         self._pending_action_args = None
@@ -146,45 +201,27 @@ class BrowserHandler(BaseAgentHandler):
         self.computer.browser_factory = lambda: mgr
         return mgr
 
-    def _ensure_exec_thread(self):
-        if not self._exec_thread.isRunning():
-            self._exec_thread.start()
-
     def _cleanup_task(self):
-        # The controlled browser persists across tasks (relaunching Chromium
-        # per task is slow); only in-flight work is dropped here. The browser
-        # itself closes at app shutdown (see shutdown()).
+        # The controlled browser (and its thread) persist across tasks;
+        # only in-flight work is dropped here. The browser itself closes
+        # at app shutdown (see shutdown()).
         self._exec_ticket += 1
         self._tool_in_flight = False
-        if self._exec_thread and self._exec_thread.isRunning():
-            try:
-                self._exec_worker.cancel()
-            except Exception:
-                pass
-            self._exec_thread.quit()
-            if not self._exec_thread.wait(2000):
-                logging.warning("Browser exec thread did not stop in 2000ms.")
+        try:
+            self._exec_worker.cancel()
+        except Exception:
+            pass
 
     def shutdown(self):
         """Stops the exec thread and closes the browser (bounded, for app exit)."""
         self._exec_ticket += 1
         self._tool_in_flight = False
-        thread = getattr(self, "_exec_thread", None)
-        worker = getattr(self, "_exec_worker", None)
-        if thread is not None and thread.isRunning() and worker is not None:
-            try:
-                QMetaObject.invokeMethod(worker, "close_browser", Qt.BlockingQueuedConnection)
-            except Exception as e:
-                logging.warning(f"Browser close invoke failed: {e}")
-            try:
-                thread.quit()
-            except Exception:
-                pass
-            try:
-                if not thread.wait(3000):
-                    logging.warning("Browser exec thread did not stop in 3000ms.")
-            except Exception as e:
-                logging.warning(f"Browser exec thread wait failed: {e}")
+        try:
+            worker = getattr(self, "_exec_worker", None)
+            if worker is not None:
+                worker.shutdown()
+        except Exception as e:
+            logging.warning(f"Browser shutdown failed: {e}")
 
     def build_prompts(self):
         system_prompt, user_prompt = self.brain.get_browser_prompts(
@@ -229,7 +266,6 @@ class BrowserHandler(BaseAgentHandler):
             'content': json.dumps(action_args, indent=2, ensure_ascii=False),
         })
 
-        self._ensure_exec_thread()
         self._pending_action_name = action_name
         self._pending_action_args = action_args
         self._exec_ticket += 1

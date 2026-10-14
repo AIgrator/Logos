@@ -11,7 +11,7 @@ import time
 logger = logging.getLogger(__name__)
 
 _INTERACTIVE_SELECTOR = (
-    "a[href], button, input, select, textarea, "
+    "a[href], button, input, select, textarea, div[onclick], "
     "[role=button], [role=link], [role=checkbox], [role=radio], "
     "[role=switch], [role=tab], [role=menuitem]"
 )
@@ -19,6 +19,8 @@ _INTERACTIVE_SELECTOR = (
 _TAG_TO_ROLE = {
     "a": "link", "button": "button", "input": "textbox",
     "select": "combobox", "textarea": "textbox",
+    # Only clickable divs match the selector, so "button" is honest.
+    "div": "button",
 }
 
 
@@ -262,7 +264,7 @@ class BrowserManager:
                         or loc.get_attribute("placeholder")
                         or loc.get_attribute("value")
                         or loc.get_attribute("alt")
-                        or (loc.inner_text(timeout=500).strip().split("\n")[0] if tag in ("a", "button") else "")
+                        or (loc.inner_text(timeout=500).strip().split("\n")[0] if tag in ("a", "button", "div") else "")
                         or "").strip()[:120]
                 ref = len(elements) + 1
                 self._refs[ref] = loc
