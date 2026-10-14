@@ -67,7 +67,10 @@ def browser_snapshot(self, **kwargs):
         context = ""
     head = f"Page context: {context}\n" if context else ""
     if not elements:
-        return head + "No interactive elements found on this page."
+        return (head + "No interactive elements found on this page. "
+                "If the visible page already shows what you need (a final score, "
+                "a confirmation, read-only results), take a screenshot to read it "
+                "and finish the task with a summary instead of clicking nothing.")
     lines = [f"[{e['ref']}] {e['role']}: {e['name'] or '(no label)'}" for e in elements]
     return head + "Interactive elements:\n" + "\n".join(lines)
 
