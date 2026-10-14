@@ -61,10 +61,15 @@ def browser_goto(self, **kwargs):
 def browser_snapshot(self, **kwargs):
     mgr = _manager(self)
     elements = mgr.snapshot()
+    try:
+        context = mgr.heading_context()
+    except Exception:
+        context = ""
+    head = f"Page context: {context}\n" if context else ""
     if not elements:
-        return "No interactive elements found on this page."
+        return head + "No interactive elements found on this page."
     lines = [f"[{e['ref']}] {e['role']}: {e['name'] or '(no label)'}" for e in elements]
-    return "Interactive elements:\n" + "\n".join(lines)
+    return head + "Interactive elements:\n" + "\n".join(lines)
 
 
 @tool_meta(

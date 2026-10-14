@@ -275,6 +275,29 @@ class BrowserManager:
         self._last_snapshot = elements
         return elements
 
+    def heading_context(self, max_headings: int = 3, max_chars: int = 120) -> str:
+        """Visible h1/h2 texts: screen identity for quiz/wizard-style pages.
+
+        Snapshots list controls only, so without this the model cannot tell
+        which screen it is on (all quiz questions look alike as bare refs).
+        """
+        try:
+            page = self._require_page()
+            heads = page.locator("h1, h2")
+            out = []
+            for i in range(min(heads.count(), max_headings)):
+                try:
+                    if not heads.nth(i).is_visible():
+                        continue
+                    text = (heads.nth(i).inner_text(timeout=500) or "").strip()
+                    if text:
+                        out.append(" ".join(text.split())[:max_chars])
+                except Exception:
+                    continue
+            return " | ".join(out)
+        except Exception:
+            return ""
+
     def find_in_snapshot(self, text: str | None = None, pattern: str | None = None,
                          context_lines: int = 2) -> str:
         """Cheap substring/regex search over the latest snapshot (with ref context)."""
