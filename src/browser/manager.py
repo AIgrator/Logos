@@ -359,8 +359,16 @@ class BrowserManager:
             opener_url = ""
         before = {id(p) for p in self._browser.pages}
         loc.click(timeout=self.timeout_ms)
-        self._refs = {}  # a click may navigate: force a fresh snapshot
-        self._last_snapshot = []
+        try:
+            after_url = self._page.url if self._page else ""
+        except Exception:
+            after_url = ""
+        if after_url != opener_url:
+            # Real navigation: positional refs may point elsewhere now.
+            # Same-page JS clicks keep refs (wiping them broke consecutive
+            # clicks: every second click died with "unknown ref").
+            self._refs = {}
+            self._last_snapshot = []
         new_pages = [p for p in self._browser.pages if id(p) not in before]
         if new_pages:
             marks = []
@@ -546,8 +554,62 @@ class BrowserManager:
     def wait_for_load(self, state: str = "domcontentloaded") -> None:
         self._require_page().wait_for_load_state(state, timeout=self.timeout_ms)
 
+    def _overlay_ref_badges(self) -> None:
+        """Draws numbered badges over snapshot refs (removed after capture).
+
+        Bridges vision to refs: the screenshot alone never says which circle
+        is ref 2, and the snapshot text never says where ref 2 is. Badges do.
+        """
+        try:
+            page = self._require_page()
+            items = []
+            for ref, loc in list(self._refs.items())[:50]:
+                try:
+                    box = loc.bounding_box(timeout=500)
+                except Exception:
+                    continue
+                if not box:
+                    continue
+                items.append([ref, int(box["x"]), int(box["y"])])
+            if not items:
+                return
+            page.evaluate(
+                """(items) => {
+                  const old = document.getElementById('__logos_ref_badges__');
+                  if (old) old.remove();
+                  const layer = document.createElement('div');
+                  layer.id = '__logos_ref_badges__';
+                  layer.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:2147483647;';
+                  for (const [ref, x, y] of items) {
+                    const b = document.createElement('div');
+                    b.textContent = String(ref);
+                    b.style.cssText = 'position:absolute;left:' + Math.max(0, x) + 'px;top:' + Math.max(0, y) +
+                      'px;background:#d00;color:#fff;font:bold 14px sans-serif;' +
+                      'border-radius:50%;width:22px;height:22px;line-height:22px;text-align:center;';
+                    layer.appendChild(b);
+                  }
+                  document.documentElement.appendChild(layer);
+                }""",
+                items,
+            )
+        except Exception as e:
+            logger.debug(f"Ref badge overlay failed (non-fatal): {e}")
+
+    def _remove_ref_badges(self) -> None:
+        try:
+            self._require_page().evaluate(
+                """() => { const old = document.getElementById('__logos_ref_badges__');
+                           if (old) old.remove(); }""")
+        except Exception:
+            pass
+
     def screenshot(self, path: str) -> str:
-        self._require_page().screenshot(path=path)
+        self._require_page()
+        self._overlay_ref_badges()
+        try:
+            self._require_page().screenshot(path=path)
+        finally:
+            self._remove_ref_badges()
         return path
 
     def capture_screenshot(self, prefix: str = "browser") -> str:
