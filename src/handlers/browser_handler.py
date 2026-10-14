@@ -236,12 +236,14 @@ class BrowserHandler(BaseAgentHandler):
         return self._consume_pending_screenshot()
 
     def _consume_pending_screenshot(self) -> list:
-        """Attaches the latest browser_screenshot (once) to the next request."""
+        """Attaches the latest browser_screenshot to the request (persistent:
+        peek, don't consume — navigation/tab-change already invalidate it)."""
         try:
             mgr = getattr(self.computer, "browser_manager", None)
-            if mgr is None or not hasattr(mgr, "consume_screenshot_path"):
+            peek = getattr(mgr, "peek_screenshot_path", None)
+            if mgr is None or not callable(peek):
                 return []
-            path = mgr.consume_screenshot_path()
+            path = peek()
             if not path:
                 return []
             with open(path, "rb") as f:

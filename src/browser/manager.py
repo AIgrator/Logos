@@ -567,6 +567,15 @@ class BrowserManager:
         path, self._last_screenshot_path = self._last_screenshot_path, None
         return path
 
+    def peek_screenshot_path(self) -> str | None:
+        """Returns the pending screenshot path WITHOUT clearing it.
+
+        Screenshots ride along every request until navigation, tab switch
+        or close clears them (those already reset _last_screenshot_path):
+        one-shot vision made the model ask humans instead of seeing.
+        """
+        return self._last_screenshot_path
+
     # -- helpers ------------------------------------------------------------
 
     def wait_seconds(self, seconds: float) -> None:
