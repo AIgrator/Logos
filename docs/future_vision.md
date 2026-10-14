@@ -155,6 +155,22 @@ until the execution core is ready. Voice will dock onto the same
   structurally impossible (no loop tool; shell loops die at the timeout). Proven painless
   so far (76s copy completed, no hangs observed); revisit only on real hangs.
 
+- **Client-side streaming tool execution (Chat first).** As of Oct 2026 all six
+  providers support streaming tool calls: OpenAI/Anthropic/Google server-side
+  (already used — vendor executes, nothing to do client-side); OpenRouter/xAI/HF
+  client-side (documented: `delta.tool_calls`, Responses API). Today the client-side
+  path is a dead end: `tool_call_received` has no subscribers, `all_tool_calls` is
+  only logged (xAI parses then drops; OpenRouter/HF send no `tools` in stream).
+  Reliability win over hand-formed JSON: the call arrives framed (name + arguments
+  as separate fields, JSON parsed server-side or accumulated to `stop` event), so
+  envelope errors (quotes/brackets) are structurally impossible; semantic correctness
+  (right tool, right values) stays the model's job, guarded by our `json.loads`
+  fallback + pydantic `ChatFunctionCall` + skip. Work items (Chat only — agent modes
+  need whole validated actions per turn, not fragments): send `tools` in stream
+  requests, accumulate `delta.tool_calls` per index, connect execution, feed results
+  back into the conversation, flip `supports_streaming_tools`. HF additionally blocked
+  by billing (402 on accounts without credits).
+
 ## Non-goals (explicitly deferred)
 
 - Adding ~20 new direct LLM providers: other models stay reachable
