@@ -339,13 +339,12 @@ class AppController(QObject):
         except Exception as e:
             logging.warning(f"Terminal exec thread stop failed: {e}")
         try:
-            computer = getattr(getattr(self, "browser_handler", None), "computer", None)
-            mgr = getattr(computer, "browser_manager", None) if computer else None
-            if mgr is not None:
-                logging.info("Closing controlled browser (best effort).")
-                mgr.close()
+            handler = getattr(self, "browser_handler", None)
+            shutdown = getattr(handler, "shutdown", None)
+            if callable(shutdown):
+                shutdown()
         except Exception as e:
-            logging.warning(f"Browser close failed during shutdown: {e}")
+            logging.warning(f"Browser shutdown failed during shutdown: {e}")
         try:
             if self.indexer:
                 logging.info("Stopping file indexer.")

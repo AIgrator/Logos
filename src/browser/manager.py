@@ -45,6 +45,7 @@ class BrowserManager:
         self._last_dialog = None  # last auto-dismissed dialog note
         self._last_dialog_result = None  # last armed-handling outcome note
         self._dialog_pages = set()  # id(page) with the dialog router installed
+        self.last_known_url = ""  # plain-string URL cache, safe to read from any thread
 
     # -- lifecycle ------------------------------------------------------
 
@@ -142,6 +143,10 @@ class BrowserManager:
     def _use_page(self, page) -> None:
         """Makes page the active one: timeouts, dialog router, refs expire."""
         self._page = page
+        try:
+            self.last_known_url = page.url or ""
+        except Exception:
+            pass
         self._page.set_default_timeout(self.timeout_ms)
         self._install_dialog_router(page)
         self._refs = {}
@@ -206,6 +211,7 @@ class BrowserManager:
         self._last_snapshot = []
         self._last_screenshot_path = None
         page.goto(url, wait_until=wait)
+        self.last_known_url = url
 
     def title(self) -> str:
         return self._require_page().title()
@@ -429,6 +435,10 @@ class BrowserManager:
         self._refs = {}
         self._last_snapshot = []
         self._last_screenshot_path = None
+        try:
+            self.last_known_url = page.url or ""
+        except Exception:
+            pass
         return f"Went back. URL: {page.url}. Take a fresh browser_snapshot before acting."
 
     def wait_for(self, seconds: float | None = None, text: str | None = None,
