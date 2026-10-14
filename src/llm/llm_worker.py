@@ -2,6 +2,8 @@ from PySide6.QtCore import QObject, Signal, Slot
 import logging
 import json
 import copy
+import threading
+import time
 from datetime import datetime
 
 from .llm_parsing import repair_json_string, validate_object, universal_fallback_parser
@@ -233,6 +235,51 @@ class LLMWorker(QObject):
         }
         raw_llm_logger.info(json.dumps(raw_log_payload, indent=2))
 
+    # Total budget for one provider call. Providers enforce only per-gap
+    # timeouts (120s between bytes here), so a dribbling chunked response
+    # can stall forever inside a single attempt (observed: 9+ minutes of
+    # silence with "Thinking..." ticking). Derived from that gap timeout
+    # (3x120s) — deliberately not another user knob.
+    ATTEMPT_TOTAL_SECONDS = 360
+
+    def _get_response_budgeted(self, **kwargs):
+        """Runs provider.get_response with a total deadline.
+
+        Returns the response dict, or None if the user cancelled while
+        waiting (the abandoned call is left to die on its daemon thread).
+        Raises RetryableError on budget breach so the normal retry flow
+        (countdown UI, then an honest error card) takes over instead of an
+        eternal "Thinking...".
+        """
+        box = {}
+
+        def _call():
+            try:
+                box["res"] = self.provider.get_response(**kwargs)
+            except Exception as e:  # noqa: BLE001 - re-raised below
+                box["err"] = e
+
+        call_thread = threading.Thread(target=_call, daemon=True)
+        call_thread.start()
+        deadline = time.monotonic() + self.ATTEMPT_TOTAL_SECONDS
+        while call_thread.is_alive():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                logging.error(
+                    f"LLM request exceeded total budget ({self.ATTEMPT_TOTAL_SECONDS}s) "
+                    f"with no complete response; abandoning the attempt.")
+                raise RetryableError(
+                    f"LLM request stalled: no complete response within "
+                    f"{self.ATTEMPT_TOTAL_SECONDS}s (server dribbling chunks?)")
+            if self.is_cancelled:
+                return None
+            call_thread.join(timeout=min(1.0, remaining))
+        if "err" in box:
+            raise box["err"]
+        if "res" not in box:
+            raise RetryableError("LLM provider call ended with no result.")
+        return box["res"]
+
     @Slot(str, list, str, list, str)
     def execute_request(self, prompt, attachments, system_prompt, history, schema_name=None):
         """
@@ -306,13 +353,16 @@ class LLMWorker(QObject):
             try:
                 # --- Structured Response for Assistant (Planning, Evaluation, etc.) ---
                 if schema_name:
-                    response_dict = self.provider.get_response(
+                    response_dict = self._get_response_budgeted(
                         prompt=prompt,
                         attachments=attachments,
                         system_prompt=system_prompt,
                         history=copy.deepcopy(history),
                         schema_name=schema_name
                     )
+                    if response_dict is None:
+                        # Cancelled while waiting (abandoned in-flight call).
+                        return
 
                     raw_llm_logger.info(json.dumps(response_dict, indent=2))
                     if self.is_cancelled:
@@ -390,13 +440,16 @@ class LLMWorker(QObject):
                             raise FatalError("Could not generate self-correction prompts.")
 
                         logging.info("Sending self-correction request to LLM.")
-                        correction_response_dict = self.provider.get_response(
+                        correction_response_dict = self._get_response_budgeted(
                             prompt=corr_user_prompt,
                             attachments=[],
                             system_prompt=corr_system_prompt,
                             history=[],
                             schema_name=schema_name
                         )
+                        if correction_response_dict is None:
+                            # Cancelled while waiting (abandoned in-flight call).
+                            return
                         raw_llm_logger.info(json.dumps({"self_correction_response": correction_response_dict}, indent=2))
 
                         corr_tool_calls = correction_response_dict.get("tool_calls", {})

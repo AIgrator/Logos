@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Visual Quiz for Logos</title>
+<style>
+  body { font-family: sans-serif; margin: 24px; background: #f4f4f4; }
+  h1 { color: #222; font-size: 22px; }
+  .screen { display: none; }
+  .screen.active { display: block; }
+  .row { display: flex; gap: 28px; margin: 20px 0; align-items: center; }
+  .circle { border-radius: 50%; cursor: pointer; }
+  .shape { cursor: pointer; }
+  .status { font-size: 18px; min-height: 30px; margin: 12px 0; color: #333; }
+  .good { color: #1a7f1a; font-weight: bold; }
+  .bad { color: #b00; font-weight: bold; }
+  button.next { font-size: 18px; padding: 10px 26px; cursor: pointer; margin-top: 8px; }
+  #final-score { font-size: 26px; font-weight: bold; margin: 16px 0; }
+  #final-list { font-size: 18px; }
+</style>
+</head>
+<body>
+<h1>Визуальная викторина (5 вопросов)</h1>
+
+<div class="screen active" id="q1">
+  <h1>Вопрос 1 из 5: кликни ЗЕЛЁНЫЙ круг</h1>
+  <div class="row">
+    <div class="circle" style="width:90px;height:90px;background:#d33" onclick="answer(1,'red')"></div>
+    <div class="circle" style="width:90px;height:90px;background:#36c" onclick="answer(1,'blue')"></div>
+    <div class="circle" style="width:90px;height:90px;background:#2a2" onclick="answer(1,'green')"></div>
+  </div>
+  <div class="status" id="status1">Статус: ожидание</div>
+  <button class="next" onclick="next(2)">Далее</button>
+</div>
+
+<div class="screen" id="q2">
+  <h1>Вопрос 2 из 5: кликни ТРЕУГОЛЬНИК (все фигуры серые)</h1>
+  <div class="row">
+    <svg width="110" height="110"><circle cx="55" cy="55" r="42" fill="#888" class="shape" onclick="answer(2,'circle')"/></svg>
+    <svg width="110" height="110"><rect x="13" y="13" width="84" height="84" fill="#888" class="shape" onclick="answer(2,'square')"/></svg>
+    <svg width="110" height="110"><polygon points="55,8 102,97 8,97" fill="#888" class="shape" onclick="answer(2,'triangle')"/></svg>
+  </div>
+  <div class="status" id="status2">Статус: ожидание</div>
+  <button class="next" onclick="next(3)">Далее</button>
+</div>
+
+<div class="screen" id="q3">
+  <h1>Вопрос 3 из 5: кликни САМЫЙ БОЛЬШОЙ круг (все бирюзовые)</h1>
+  <div class="row">
+    <div class="circle" style="width:60px;height:60px;background:#0aa" onclick="answer(3,'small')"></div>
+    <div class="circle" style="width:110px;height:110px;background:#0aa" onclick="answer(3,'big')"></div>
+    <div class="circle" style="width:80px;height:80px;background:#0aa" onclick="answer(3,'medium')"></div>
+  </div>
+  <div class="status" id="status3">Статус: ожидание</div>
+  <button class="next" onclick="next(4)">Далее</button>
+</div>
+
+<div class="screen" id="q4">
+  <h1>Вопрос 4 из 5: кликни ПТИЦУ</h1>
+  <div class="row">
+    <svg width="130" height="110" class="shape" onclick="answer(4,'fish')">
+      <ellipse cx="60" cy="55" rx="42" ry="28" fill="#e80"/>
+      <polygon points="100,55 128,30 128,80" fill="#e80"/>
+      <circle cx="42" cy="48" r="5" fill="#fff"/><circle cx="43" cy="49" r="2.5" fill="#000"/>
+    </svg>
+    <svg width="130" height="110" class="shape" onclick="answer(4,'bird')">
+      <circle cx="62" cy="58" r="34" fill="#36c"/>
+      <polygon points="94,52 118,60 94,70" fill="#f80"/>
+      <circle cx="52" cy="48" r="6" fill="#fff"/><circle cx="53" cy="49" r="3" fill="#000"/>
+      <path d="M35,75 Q55,90 78,76" stroke="#1a3f8f" stroke-width="5" fill="none"/>
+    </svg>
+    <svg width="130" height="110" class="shape" onclick="answer(4,'cat')">
+      <circle cx="62" cy="62" r="32" fill="#888"/>
+      <polygon points="38,42 30,12 56,30" fill="#888"/>
+      <polygon points="86,42 94,12 68,30" fill="#888"/>
+      <circle cx="52" cy="58" r="4" fill="#fff"/><circle cx="72" cy="58" r="4" fill="#fff"/>
+      <circle cx="52" cy="59" r="2" fill="#000"/><circle cx="72" cy="59" r="2" fill="#000"/>
+    </svg>
+  </div>
+  <div class="status" id="status4">Статус: ожидание</div>
+  <button class="next" onclick="next(5)">Далее</button>
+</div>
+
+<div class="screen" id="q5">
+  <h1>Вопрос 5 из 5: кликни ЖЁЛТУЮ звезду</h1>
+  <div class="row" id="stars"></div>
+  <div class="status" id="status5">Статус: ожидание</div>
+  <button class="next" onclick="finish()">Показать результат</button>
+</div>
+
+<div class="screen" id="final">
+  <h1>Результат</h1>
+  <div id="final-score">Счёт: 0 из 5</div>
+  <div id="final-list"></div>
+</div>
+
+<script>
+  var score = 0, results = [];
+  var correct = {1: 'green', 2: 'triangle', 3: 'big', 4: 'bird', 5: 'yellow'};
+  var names = {1: 'зелёный круг', 2: 'треугольник', 3: 'самый большой круг',
+               4: 'птица', 5: 'жёлтая звезда'};
+  function answer(q, val) {
+    var ok = (val === correct[q]);
+    var el = document.getElementById('status' + q);
+    if (el.dataset.done) return;
+    el.dataset.done = '1';
+    if (ok) {
+      score += 1;
+      el.innerHTML = 'Статус: <span class="good">Верно!</span>';
+      results[q] = 'Вопрос ' + q + ': верно (' + names[q] + ')';
+    } else {
+      el.innerHTML = 'Статус: <span class="bad">Неверно!</span>';
+      results[q] = 'Вопрос ' + q + ': неверно (нужно: ' + names[q] + ')';
+    }
+  }
+  function star(cx, cy, r, fill, val) {
+    var pts = [];
+    for (var i = 0; i < 10; i++) {
+      var rr = (i % 2 === 0) ? r : r * 0.45;
+      var a = -Math.PI / 2 + i * Math.PI / 5;
+      pts.push((cx + rr * Math.cos(a)).toFixed(1) + ',' + (cy + rr * Math.sin(a)).toFixed(1));
+    }
+    return '<svg width="110" height="110"><polygon points="' + pts.join(' ') +
+           '" fill="' + fill + '" class="shape" onclick="answer(5,\'' + val + '\')"/></svg>';
+  }
+  document.getElementById('stars').innerHTML =
+    star(55, 55, 45, '#36c', 'blue') + star(55, 55, 45, '#fc0', 'yellow') +
+    star(55, 55, 45, '#d33', 'red') + star(55, 55, 45, '#888', 'gray');
+  function next(n) {
+    document.querySelectorAll('.screen').forEach(function (s) { s.classList.remove('active'); });
+    document.getElementById('q' + n).classList.add('active');
+  }
+  function finish() {
+    document.querySelectorAll('.screen').forEach(function (s) { s.classList.remove('active'); });
+    document.getElementById('final').classList.add('active');
+    document.getElementById('final-score').textContent = 'Счёт: ' + score + ' из 5';
+    var html = '';
+    for (var q = 1; q <= 5; q++) {
+      html += '<div>' + (results[q] || ('Вопрос ' + q + ': без ответа')) + '</div>';
+    }
+    document.getElementById('final-list').innerHTML = html;
+  }
+</script>
+</body>
+</html>
