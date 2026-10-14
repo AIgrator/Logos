@@ -177,6 +177,7 @@ class SettingsWindow(QDialog):
         self.nav_sections = {
             "general": ("fa5s.cog", "General"),
             "common": ("fa5s.cogs", "Common"),
+            "agent": ("fa5s.brain", "Agent"),
             "apps": ("fa5s.th-large", "Applications"),
             "hotkeys": ("fa5s.keyboard", "Hotkeys"),
             "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
@@ -227,6 +228,7 @@ class SettingsWindow(QDialog):
         sections = {
             "general": self._create_general_section(),
             "common": self._create_common_section(),
+            "agent": self._create_agent_section(),
             "apps": self._create_apps_section(),
             "hotkeys": self._create_hotkeys_section(),
             "compact": self._create_compact_mode_section(),
@@ -763,23 +765,6 @@ class SettingsWindow(QDialog):
         network_layout.addWidget(self.retry_delay_spinbox, 1, 3)
         tab_layout.addWidget(network_group)
 
-        agent_group = QGroupBox("Agent")
-        agent_layout = QGridLayout(agent_group)
-        agent_layout.setColumnStretch(2, 1)
-
-        self.max_errors_spinbox = QSpinBox()
-        self.max_errors_spinbox.setRange(1, 10)
-        self.max_errors_spinbox.setFixedWidth(80)
-        max_errors_tooltip = (
-            "Failed steps in a row before the agent stops and asks you "
-            "(after one self-assessment turn). Shared by all agent modes. "
-            "Applies immediately."
-        )
-        agent_layout.addWidget(QLabel("Failures before asking:"), 0, 0)
-        agent_layout.addWidget(self._create_help_label(max_errors_tooltip), 0, 1, Qt.AlignLeft)
-        agent_layout.addWidget(self.max_errors_spinbox, 0, 3)
-        tab_layout.addWidget(agent_group)
-
         app_group = QGroupBox("Application")
         app_layout = QGridLayout(app_group)
         app_layout.setColumnStretch(2, 1)
@@ -961,6 +946,26 @@ class SettingsWindow(QDialog):
         context_layout.addWidget(QLabel("Trim long tracebacks:"), 3, 0)
         context_layout.addWidget(self._create_help_label(trim_tooltip), 3, 1, Qt.AlignLeft)
         context_layout.addWidget(self.history_trim_tracebacks_checkbox, 3, 3)
+
+        return group
+
+    def _create_agent_section(self):
+        """Creates the Agent settings section (terminal/browser/vision modes)."""
+        group = QGroupBox("Agent")
+        agent_layout = QGridLayout(group)
+        agent_layout.setColumnStretch(2, 1)
+
+        self.max_errors_spinbox = QSpinBox()
+        self.max_errors_spinbox.setRange(1, 10)
+        self.max_errors_spinbox.setFixedWidth(80)
+        max_errors_tooltip = (
+            "Failed steps in a row before the agent stops and asks you "
+            "(after one self-assessment turn). Shared by all agent modes. "
+            "Applies immediately."
+        )
+        agent_layout.addWidget(QLabel("Failures before asking:"), 0, 0)
+        agent_layout.addWidget(self._create_help_label(max_errors_tooltip), 0, 1, Qt.AlignLeft)
+        agent_layout.addWidget(self.max_errors_spinbox, 0, 3)
 
         return group
 
