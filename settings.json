@@ -1,5 +1,5 @@
 {
-  "active_provider": "google",
+  "active_provider": "huggingface",
   "llm_providers": {
     "anthropic": {
       "model": "claude-fable-5",
@@ -11,7 +11,7 @@
       "require_json_output": true
     },
     "huggingface": {
-      "model": "Qwen/Qwen3.8-27B:novita",
+      "model": "microsoft/phi-4",
       "max_tokens": "4096",
       "require_json_output": true
     },

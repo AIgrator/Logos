@@ -6,13 +6,13 @@ Implementation details belong in per-step technical docs.
 
 ## Where we stand
 
-Logos today is a provider-agnostic desktop agent with three modes
-(Chat / Vision / Terminal) and a "conductor, not performer" philosophy:
+Logos today is a provider-agnostic desktop agent with four modes
+(Chat / Vision / Terminal / Browser) and a "conductor, not performer" philosophy:
 the LLM plans and evaluates, deterministic code executes, the user reviews
 and approves plans. Screen understanding is a local pipeline
 (YOLO icon detection + EasyOCR + Florence-2 captions) wired directly
 into `ParserAdapter`. Toolsets are mutually exclusive per mode
-(`src/computer/modes/vision.py` vs `terminal.py`).
+(`src/computer/modes/vision.py` vs `terminal.py` vs `browser.py`, plus web tools for `chat.py`).
 
 Two structural limitations follow from this:
 
