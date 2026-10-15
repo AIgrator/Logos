@@ -121,6 +121,66 @@ def scale_point(x: float, y: float, scale: float) -> tuple:
     return (x * scale, y * scale)
 
 
+def _annotation_font(size: int = 22):
+    """Best-effort truetype font; falls back to PIL's bitmap default."""
+    from PIL import ImageFont
+    for candidate in ("arial.ttf", "DejaVuSans.ttf"):
+        try:
+            return ImageFont.truetype(candidate, size)
+        except Exception:
+            continue
+    return ImageFont.load_default()
+
+
+def annotate_screenshot(img, actions: list, scale: float = 1.0):
+    """
+    Draws what the model did onto a COPY of the screenshot (PIL only):
+    red circles + labels for clicks, polylines for drags, corner stamp
+    for keypress/type/wait. Returns the annotated copy.
+    """
+    from PIL import ImageDraw
+    canvas = img.copy()
+    draw = ImageDraw.Draw(canvas)
+    font = _annotation_font()
+    red = (255, 0, 0)
+
+    def dot(x, y, r=14, label=None):
+        x, y = scale_point(float(x), float(y), scale)
+        draw.ellipse([x - r, y - r, x + r, y + r], outline=red, width=4)
+        draw.ellipse([x - 3, y - 3, x + 3, y + 3], fill=red)
+        if label:
+            draw.text((x + r + 6, y - r - 6), label, fill=red, font=font)
+
+    corner_notes = []
+    for action in actions or []:
+        if not isinstance(action, dict):
+            continue
+        kind = action.get("type", "?")
+        if kind in ("click", "double_click"):
+            dot(action.get("x", 0), action.get("y", 0),
+                label=f"{kind} {action.get('x')},{action.get('y')}")
+        elif kind == "move":
+            dot(action.get("x", 0), action.get("y", 0), r=8,
+                label=f"move {action.get('x')},{action.get('y')}")
+        elif kind == "drag":
+            pts = [scale_point(float(p["x"]), float(p["y"]), scale)
+                   for p in (action.get("path") or [])]
+            if len(pts) >= 2:
+                draw.line(pts, fill=red, width=4)
+                dot(action["path"][0]["x"], action["path"][0]["y"], r=10)
+                dot(action["path"][-1]["x"], action["path"][-1]["y"],
+                    label="drag end")
+        elif kind == "scroll":
+            dot(action.get("x", 0), action.get("y", 0), r=10,
+                label=f"scroll {action.get('scroll_x', 0)},{action.get('scroll_y', 0)}")
+        elif kind in ("keypress", "type", "wait"):
+            corner_notes.append(describe_action(action))
+
+    if corner_notes:
+        draw.text((20, 20), "\n".join(corner_notes), fill=red, font=font)
+    return canvas
+
+
 # ---------------------------------------------------------------------------
 # Worker: one CUA turn (network + execution + screenshot), off the GUI thread.
 # ---------------------------------------------------------------------------
@@ -195,16 +255,29 @@ class CuaTurnWorker(QThread):
 
             actions = turn.get("actions") or []
             done_text = turn.get("done_text")
+            tag = self._request.get("tag", "cua")
+            turn_no = self._request.get("turn_no", 0)
+            flags = self._request.get("debug_flags") or {}
+
+            if flags.get("save_pre"):
+                try:
+                    pre_b64, _, _ = self._handler.capture_screenshot_b64()
+                    self._handler.save_debug_shot(tag, turn_no, pre_b64, "pre")
+                except Exception as e:
+                    logging.warning(f"pre-action shot failed: {e}")
+
             if not actions:
                 outcome = {
                     "done": True,
                     "done_text": done_text or "",
                     "response_id": turn.get("response_id"),
                 }
+                self._handler.trace_turn(tag, turn_no, [], False, None)
                 self.turn_done.emit(outcome)
                 return
 
             executed: list = []
+            executed_raw: list = []
             for action in actions:
                 if self._stop:
                     outcome = {"aborted": True}
@@ -217,6 +290,7 @@ class CuaTurnWorker(QThread):
                 try:
                     self._handler.execute_action(action)
                     executed.append(describe_action(action))
+                    executed_raw.append(action)
                 except Exception as e:
                     logging.warning(f"CUA action failed: {action} -> {e}")
                     outcome = {
@@ -225,10 +299,22 @@ class CuaTurnWorker(QThread):
                         "response_id": turn.get("response_id"),
                         "call_id": turn.get("call_id"),
                     }
+                    self._handler.trace_turn(tag, turn_no, executed_raw, False, None)
                     self.turn_done.emit(outcome)
                     return
 
             shot_b64, _, _ = self._handler.capture_screenshot_b64()
+            shot_file = None
+            if flags.get("save_post"):
+                try:
+                    shot_file = self._handler.save_debug_shot(
+                        tag, turn_no, shot_b64, "post",
+                        annotate_with=executed_raw)
+                except Exception as e:
+                    logging.warning(f"post-action shot failed: {e}")
+            self._handler.trace_turn(
+                tag, turn_no, executed_raw,
+                bool(turn.get("pending_safety_checks")), shot_file)
             outcome = {
                 "executed": executed,
                 "response_id": turn.get("response_id"),
@@ -277,6 +363,7 @@ class VisionHandler(BaseAgent):
         self._cua_response_id = None
         self._cua_call_id = None
         self._cua_turns = 0
+        self._cua_tag = time.strftime("%H%M%S")
         super().start_task(user_text)
 
     def resume_with_guidance(self, user_text: str, attachments=None):
@@ -345,6 +432,7 @@ class VisionHandler(BaseAgent):
             return
 
         self._start_thinking_timer("Thinking (computer use)…")
+        debug_flags = self._debug_flags()
         if self._cua_response_id is None:
             request = {"task": self.original_user_request}
         else:
@@ -353,6 +441,11 @@ class VisionHandler(BaseAgent):
                 "screenshot_b64": self._last_screenshot_b64,
                 "previous_response_id": self._cua_response_id,
             }
+        request.update({
+            "tag": getattr(self, "_cua_tag", "cua"),
+            "turn_no": self._cua_turns + 1,
+            "debug_flags": debug_flags,
+        })
         self._worker = CuaTurnWorker(self, self._provider(), request)
         self._worker.turn_done.connect(self._on_turn_done)
         self._worker.safety_needed.connect(self._on_safety_needed)
@@ -441,6 +534,76 @@ class VisionHandler(BaseAgent):
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode("ascii"), img.size[0], img.size[1]
+
+    def _debug_flags(self) -> dict:
+        """Reads the Debugging settings section (all default ON)."""
+        try:
+            cfg = (self.settings.get("omniparser", {}) or {})
+        except Exception:
+            cfg = {}
+        return {
+            "save_pre": bool(cfg.get("save_pre_intent_screenshot", True)),
+            "save_post": bool(cfg.get("save_post_screenshot", True)),
+            "save_trace": bool(cfg.get("save_trace_log", True)),
+            "trace_path": cfg.get("trace_log_path", "logs/parser_trace.json"),
+        }
+
+    def _shots_dir(self) -> str:
+        try:
+            d = self.settings.get("APP_SCREENSHOTS_DIR", "screenshots")
+        except Exception:
+            d = "screenshots"
+        try:
+            import os
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            pass
+        return d
+
+    def save_debug_shot(self, tag: str, turn_no: int, shot_b64: str,
+                        when: str, annotate_with: list | None = None) -> str:
+        """Saves a turn screenshot (post shots annotated, PIL red marks)."""
+        import os
+        from PIL import Image
+        raw = base64.b64decode(shot_b64)
+        img = Image.open(io.BytesIO(raw))
+        if annotate_with:
+            try:
+                img = annotate_screenshot(img, annotate_with)
+            except Exception as e:
+                logging.warning(f"annotation failed: {e}")
+        path = os.path.join(
+            self._shots_dir(), f"cua_{tag}_turn{turn_no:02d}_{when}.png")
+        img.save(path)
+        logging.info(f"CUA debug shot saved: {path}")
+        return path
+
+    def trace_turn(self, tag: str, turn_no: int, actions: list,
+                   had_safety: bool, shot_file: str | None) -> None:
+        """Appends one JSON line per turn (respects save_trace_log)."""
+        if not self._debug_flags().get("save_trace"):
+            return
+        import json
+        import os
+        flags = self._debug_flags()
+        record = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "tag": tag,
+            "turn": turn_no,
+            "actions": [describe_action(a) for a in (actions or [])],
+            "raw_actions": actions or [],
+            "safety": had_safety,
+            "screenshot": shot_file,
+        }
+        try:
+            path = flags["trace_path"]
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        except Exception as e:
+            logging.warning(f"trace write failed: {e}")
 
     def execute_action(self, action: dict) -> str | None:
         """
