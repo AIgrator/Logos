@@ -4,96 +4,18 @@ It guides the user through the essential first-time configuration steps.
 """
 import os
 import sys
-import shutil
 import logging
 import json
 from PySide6.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QHBoxLayout, QPushButton, QStackedWidget,
-    QLabel, QWidget, QProgressDialog, QMessageBox, QCheckBox
+    QLabel, QWidget, QMessageBox, QCheckBox
 )
-from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtGui import QIcon
-from huggingface_hub import hf_hub_download
 
 # Assuming settings_manager is available in the path
-from settings_manager import SettingsManager
 from src.ui.widgets.llm_provider_widget import LLMProviderWidget
-from src.ui.widgets.ocr_language_widget import OCRLanguageWidget
 from src.ui.theme_manager import ThemeManager, DARK_THEME
 from llm.model_config_manager import ModelConfigManager
-
-
-class DownloadWorker(QThread):
-    """Worker thread to download models without blocking the UI."""
-    status_updated = Signal(str)
-    finished = Signal() # Simplified signal
-
-    def __init__(self, ocr_languages):
-        super().__init__()
-        self.ocr_languages = ocr_languages
-        self.success = False
-        self.message = ""
-
-    def run(self):
-        try:
-            # 1. Download EasyOCR models
-            self.status_updated.emit("Initializing OCR: downloading language models...")
-            import easyocr
-            _ = easyocr.Reader(self.ocr_languages, model_storage_directory='models/easyocr/')
-
-            # Check for cancellation after the first blocking call
-            if self.isInterruptionRequested():
-                self.message = "Download cancelled by user."
-                self.finished.emit()
-                return
-
-            # 2. Download OmniParser models
-            self.status_updated.emit("Downloading UI analysis models (OmniParser)...")
-
-            repo_id = "microsoft/OmniParser-v2.0"
-            local_dir = "models/omniparser"
-
-            files_to_download = [
-                "icon_detect/train_args.yaml", "icon_detect/model.pt", "icon_detect/model.yaml",
-                "icon_caption/config.json", "icon_caption/generation_config.json", "icon_caption/model.safetensors",
-            ]
-
-            for repo_path in files_to_download:
-                if self.isInterruptionRequested():
-                    self.message = "Download cancelled by user."
-                    self.finished.emit()
-                    return
-
-                self.status_updated.emit(f"Downloading {os.path.basename(repo_path)}...")
-                hf_hub_download(
-                    repo_id=repo_id,
-                    filename=repo_path,
-                    local_dir=local_dir,
-                    local_dir_use_symlinks=False
-                )
-
-            # 3. Cross-platform rename for icon_caption
-            self.status_updated.emit("Finalizing model setup...")
-            source = os.path.join(local_dir, 'icon_caption')
-            destination = os.path.join(local_dir, 'icon_caption_florence')
-            if os.path.exists(source):
-                if os.path.exists(destination):
-                    shutil.rmtree(destination)
-                shutil.move(source, destination)
-
-            self.success = True
-            self.message = "All models downloaded successfully!"
-
-        except Exception as e:
-            # Catch exceptions from hf_hub_download if cancellation happens mid-download
-            if 'cancelled' in str(e).lower():
-                 self.message = "Download cancelled by user."
-            else:
-                logging.error(f"Error during model download: {e}", exc_info=True)
-                self.success = False
-                self.message = f"An unexpected error occurred: {e}"
-        finally:
-            self.finished.emit()
 
 
 class InitialSetupWizard(QDialog):
@@ -122,7 +44,6 @@ class InitialSetupWizard(QDialog):
             return
         # --- End Pre-UI Setup ---
 
-        self.download_thread = None
         self.settings_manager = settings_manager # Use the passed-in instance
         self.theme_manager = ThemeManager(self.settings_manager)
 
@@ -140,23 +61,11 @@ class InitialSetupWizard(QDialog):
         self.next_button.clicked.connect(self.go_to_next_page)
         # --- End Button Creation ---
 
-        # --- Create Doc Link ---
-        self.doc_link_label = QLabel(
-            '<a href="https://github.com/AIgrator/Logos/blob/main/docs/easyocr_language_model_guide.md">'
-            "Why can't I select all languages?"
-            '</a>'
-        )
-        self.doc_link_label.setStyleSheet(self.theme_manager.get_style("DOC_LINK_STYLE"))
-        self.doc_link_label.setOpenExternalLinks(True)
-        # --- End Doc Link ---
-
         self.create_llm_page()
-        self.create_ocr_page()
         self.create_final_choices_page()
 
         self.layout.addWidget(self.stacked_widget)
 
-        self.nav_layout.addWidget(self.doc_link_label)
         self.nav_layout.addStretch()
         self.nav_layout.addWidget(self.prev_button)
         self.nav_layout.addWidget(self.next_button)
@@ -168,7 +77,7 @@ class InitialSetupWizard(QDialog):
     def create_llm_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        label = QLabel("<h3>Step 1 of 3: Configure AI Provider</h3>"
+        label = QLabel("<h3>Step 1 of 2: Configure AI Provider</h3>"
                        "Welcome! Please select your preferred AI provider and enter your API key to begin.")
         label.setWordWrap(True)
         layout.addWidget(label)
@@ -206,25 +115,10 @@ class InitialSetupWizard(QDialog):
         layout.addWidget(self.llm_widget)
         self.stacked_widget.addWidget(page)
 
-    def create_ocr_page(self):
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        label = QLabel("<h3>Step 2 of 3: Select OCR Languages</h3>"
-                       "Choose the languages you want the assistant to recognize on the screen.")
-        label.setWordWrap(True)
-        layout.addWidget(label)
-
-        self.ocr_widget = OCRLanguageWidget(self.settings_manager, self.theme_manager)
-        self.ocr_widget.load_languages(
-            SettingsManager.DEFAULTS['omniparser']['ocr_languages']
-        )
-        layout.addWidget(self.ocr_widget)
-        self.stacked_widget.addWidget(page)
-
     def create_final_choices_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        label = QLabel("<h3>Step 3 of 3: Final Setup Options</h3>"
+        label = QLabel("<h3>Step 2 of 2: Final Setup Options</h3>"
                        "Your application is almost ready! Please select additional setup options:")
         label.setWordWrap(True)
         layout.addWidget(label)
@@ -255,60 +149,13 @@ class InitialSetupWizard(QDialog):
     def go_to_next_page(self):
         current_index = self.stacked_widget.currentIndex()
 
-        if current_index == 0: # After LLM page, go to OCR
+        if current_index == 0: # After LLM page, go to Final Choices
             self.stacked_widget.setCurrentIndex(current_index + 1)
-        elif current_index == 1: # After OCR page, start download
-            self.create_model_directories()
-            self.start_download()
-        elif current_index == 2: # After Final Choices page, finish setup
+        elif current_index == 1: # After Final Choices page, finish setup
             self._save_setup_choices()
             self.accept() # Close the wizard successfully
 
         self.update_button_states()
-
-    def start_download(self):
-        """Initiates the model download process using a QProgressDialog."""
-        self.next_button.setEnabled(False)
-        self.prev_button.setEnabled(False)
-
-        selected_languages = self.ocr_widget.get_selected_languages()
-
-        progress_dialog = QProgressDialog("Starting download...", "Cancel", 0, 0, self)
-        progress_dialog.setWindowTitle("Downloading Models")
-        progress_dialog.setStyleSheet(self.theme_manager.get_style("PROGRESS_BAR_STYLE"))
-        progress_dialog.setWindowModality(Qt.WindowModal)
-        progress_dialog.setMinimumDuration(0)
-        progress_dialog.setRange(0, 0)
-
-        self.download_thread = DownloadWorker(selected_languages)
-        self.download_thread.status_updated.connect(progress_dialog.setLabelText)
-        self.download_thread.finished.connect(progress_dialog.accept)
-
-        progress_dialog.canceled.connect(self.download_thread.requestInterruption)
-
-        self.download_thread.start()
-
-        progress_dialog.exec()
-
-        # This code runs *after* the dialog is closed.
-        if self.download_thread.success:
-            logging.info(self.download_thread.message)
-            # Transition to the final choices page instead of immediately accepting
-            self.stacked_widget.setCurrentIndex(2)
-            self.update_button_states() # Update buttons for the new page
-        elif self.download_thread.isInterruptionRequested():
-            logging.warning("Download was cancelled by the user.")
-            self.stacked_widget.setCurrentIndex(0) # Go back to the first page
-            self.update_button_states() # Reset and re-enable buttons
-        else:
-            logging.error(f"Download failed: {self.download_thread.message}")
-            # On failure, just re-enable buttons to allow retry from the current step
-            self.prev_button.setEnabled(True)
-            self.next_button.setEnabled(True)
-
-    def create_model_directories(self):
-        os.makedirs('models/easyocr', exist_ok=True)
-        os.makedirs('models/omniparser', exist_ok=True)
 
     def go_to_previous_page(self):
         current_index = self.stacked_widget.currentIndex()
@@ -342,15 +189,10 @@ class InitialSetupWizard(QDialog):
         current_index = self.stacked_widget.currentIndex()
         total_pages = self.stacked_widget.count()
 
-        # Control visibility of the doc link
-        self.doc_link_label.setVisible(current_index == 1)
-
         self.prev_button.setVisible(current_index > 0)
 
         if current_index == total_pages - 1:
             self.next_button.setText("Finish")
-        elif current_index == 1:
-            self.next_button.setText("Start Download Models")
         else:
             self.next_button.setText("Next")
 
@@ -367,7 +209,6 @@ class InitialSetupWizard(QDialog):
             self.next_button.setEnabled(True)
     def get_settings(self):
         active_provider, providers_from_widget = self.llm_widget.get_all_settings()
-        ocr_languages = self.ocr_widget.get_selected_languages()
 
         final_settings = self.settings_manager.all().copy()
         final_settings['active_provider'] = active_provider
@@ -378,11 +219,6 @@ class InitialSetupWizard(QDialog):
         for provider_name, user_settings in providers_from_widget.items():
             if provider_name in final_settings['llm_providers']:
                 final_settings['llm_providers'][provider_name].update(user_settings)
-
-        final_settings['omniparser']['ocr_languages'] = ocr_languages
-        # IMPORTANT: Update paths to use local models
-        final_settings['omniparser']['model_path'] = "models/omniparser/icon_detect/model.pt"
-        final_settings['omniparser']['caption_model_path'] = "models/omniparser/icon_caption_florence"
 
         return final_settings
 

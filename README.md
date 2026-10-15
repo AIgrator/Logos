@@ -52,13 +52,7 @@ When you launch the application for the first time, if the `settings.json` file 
 **Step 1: Configure AI Provider**
 In this step, you will select your preferred AI provider from a list and paste the API key you obtained earlier.
 
-**Step 2: Select OCR Languages**
-Choose the languages the assistant will use to recognize text on the screen. Immediately after, the application will automatically download all necessary neural network models. This may take a few minutes.
-
-> [!NOTE]
-> Some language models are incompatible with each other. To learn more about how to correctly select languages, read [**this guide**](./docs/easyocr_language_model_guide.md).
-
-**Step 3: Final Setup and Model Download**
+**Step 2: Final Setup**
 In the final step, you can choose additional integration options, such as:
 * 1. Creating a global `logos` command.
 * 2. Creating a desktop shortcut. 
