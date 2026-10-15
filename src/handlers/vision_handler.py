@@ -246,10 +246,17 @@ class CuaTurnWorker(QThread):
         self._safety_event.set()
 
     def _paused_spin(self, where: str) -> bool:
-        """Returns False when the task was stopped while paused."""
+        """Returns False when the task was stopped while paused.
+
+        Announces once per wait site — never a line every 0.4s (that
+        flooded the chat when the user paused to type).
+        """
         h = self._handler
+        announced = False
         while h.state == VisionState.PAUSED and not self._stop:
-            self.progress.emit(f"Paused ({where}) — waiting for Resume…")
+            if not announced:
+                self.progress.emit(f"Paused ({where}) — waiting for Resume…")
+                announced = True
             time.sleep(0.4)
         return not self._stop and h.state != VisionState.IDLE
 
