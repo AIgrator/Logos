@@ -11,8 +11,7 @@ from typing import Any
 # call (llm_worker, CUA worker); read by the automatic base wrapper below.
 # ContextVar = thread/task-local, so worker threads don't clash, and provider
 # files stay untouched (no signature changes, no logger lines required).
-log_ctx: ContextVar = ContextVar(
-    "llm_log_ctx", default={"tag": "untagged", "turn": 0})
+log_ctx: ContextVar = ContextVar("llm_log_ctx", default=None)
 
 
 def set_log_ctx(tag: str, turn: int = 0) -> None:
@@ -48,9 +47,12 @@ class BaseLLMProvider(ABC):
 
         def _ctx():
             try:
-                return dict(log_ctx.get())
+                current = log_ctx.get()
+                if isinstance(current, dict):
+                    return dict(current)
             except Exception:
-                return {"tag": "untagged", "turn": 0}
+                pass
+            return {"tag": "untagged", "turn": 0}
 
         orig_call = self._execute_get_response
 
