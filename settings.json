@@ -1,5 +1,5 @@
 {
-  "active_provider": "huggingface",
+  "active_provider": "openai",
   "llm_providers": {
     "anthropic": {
       "model": "claude-fable-5",
@@ -16,7 +16,7 @@
       "require_json_output": true
     },
     "openai": {
-      "model": "gpt-5",
+      "model": "gpt-6-luna",
       "require_json_output": true
     },
     "openrouter": {

@@ -17,17 +17,14 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QListWidget,
     QListWidgetItem,
-    QProgressDialog,
-    QStackedWidget,
     QButtonGroup,
     QScrollArea,
     QToolButton,
     QFrame,
     QRadioButton
 )
-from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon
-import qtawesome as qta
 from src.ui.theme_manager import LIGHT_THEME, DARK_THEME
 
 from settings_manager import SettingsManager
@@ -35,34 +32,8 @@ from src.ui.widgets.font_manager.font_combobox import FontComboBox
 from src.ui.widgets.hotkey.hotkey_edit import HotkeyEdit
 from src.apps.installed_apps import AppScanner
 from src.ui.widgets.llm_provider_widget import LLMProviderWidget
-from src.ui.widgets.ocr_language_widget import OCRLanguageWidget
 from src.ui.utils import CustomToolTipManager, NavButtonHoverFilter
 import logging
-
-class LanguageUpdateWorker(QObject):
-    """A worker to handle OCR language updates in a background thread."""
-    download_status_changed = Signal(str)
-    finished = Signal()
-    error = Signal(str)
-
-    def __init__(self, vision_manager, new_settings):
-        super().__init__()
-        self.vision_manager = vision_manager
-        self.new_settings = new_settings
-
-    def run(self):
-        """Performs the re-initialization and emits status."""
-        try:
-            if self.vision_manager:
-                self.vision_manager.reinitialize_ocr(
-                    self.new_settings,
-                    status_callback=self.download_status_changed.emit
-                )
-        except Exception as e:
-            logging.error(f"Error during language update: {e}", exc_info=True)
-            self.error.emit(str(e))
-        finally:
-            self.finished.emit()
 
 
 class SettingsWindow(QDialog):
@@ -77,16 +48,6 @@ class SettingsWindow(QDialog):
         self.setModal(True)
 
         self.tooltip_manager = CustomToolTipManager(self)
-        omniparser_cfg = self.settings_manager.get("omniparser", {})
-        self.initial_ocr_languages = set(omniparser_cfg.get("ocr_languages", []))
-        self.update_thread = None
-        self.update_worker = None
-
-        # --- Spinner animations for nav buttons ---
-        self.omniparser_spinner = qta.Spin(self)
-        self.debug_spinner = qta.Spin(self)
-        self.icon_spinner = qta.icon('fa5s.spinner', color='#d3d3d3', animation=self.omniparser_spinner)
-        # --- End spinner setup ---
 
         # Main layout
         self.layout = QVBoxLayout(self)
@@ -127,21 +88,13 @@ class SettingsWindow(QDialog):
 
         self.load_settings()
 
-        self._update_vision_sections_state()
-        self.controller.vision_module_ready.connect(self._on_vision_module_ready)
         self.controller.theme_manager.theme_changed.connect(self._update_icon_colors)
         self._update_icon_colors()
 
     def _update_icon_colors(self):
         """Updates all icon colors based on the current theme."""
-        disabled_color = self.controller.theme_manager.get_style("ICON_COLOR_DISABLED")
-
         # The NavButtonHoverFilter will handle nav button icon updates automatically.
-
-        # Update spinner icon color
-        self.icon_spinner = qta.icon('fa5s.spinner', color=disabled_color, animation=self.omniparser_spinner)
-
-        self._update_vision_sections_state()
+        pass
 
     def _update_all_nav_button_icons(self):
         """Forces an update of all navigation button icons."""
@@ -183,9 +136,7 @@ class SettingsWindow(QDialog):
             "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
             "browser": ("fa5s.globe", "Browser"),
             "terminal": ("fa5s.terminal", "Terminal"),
-            "vision": ("fa5s.robot", "Vision"),
             "context": ("fa5s.file-alt", "Context"),
-            "omniparser": ("fa5s.eye", "OmniParser"),
             "debug": ("fa5s.bug", "Debug")
         }
 
@@ -234,9 +185,7 @@ class SettingsWindow(QDialog):
             "compact": self._create_compact_mode_section(),
             "browser": self._create_browser_section(),
             "terminal": self._create_terminal_section(),
-            "vision": self._create_vision_section(),
             "context": self._create_context_section(),
-            "omniparser": self._create_omniparser_section(),
             "debug": self._create_debug_section()
         }
 
@@ -300,42 +249,7 @@ class SettingsWindow(QDialog):
         self._on_nav_button_clicked(first_button)
         super().showEvent(event)
 
-    def _on_vision_module_ready(self):
-        """Slot to enable vision-related sections when the module is ready."""
-        self._update_vision_sections_state()
-
-    def _update_vision_sections_state(self):
-        """Enables or disables vision-related sections based on controller state."""
-        is_ready = self.controller.is_vision_module_initialized
-
-        self.omniparser_stack.setCurrentIndex(1 if is_ready else 0)
-        self.debug_stack.setCurrentIndex(1 if is_ready else 0)
-
-        for button in self.nav_button_group.buttons():
-            key = button.property("section_key")
-            if key not in ["omniparser", "debug"]:
-                continue
-
-            button.setEnabled(is_ready)
-            spinner = self.omniparser_spinner if key == "omniparser" else self.debug_spinner
-
-            filter_instance = button.findChild(NavButtonHoverFilter)
-            if is_ready:
-                spinner.stop()
-                if filter_instance:
-                    filter_instance.force_update()
-            else:
-                # The spinner icon's color is managed by _update_icon_colors
-                button.setIcon(self.icon_spinner)
-                spinner.start()
-
-
     def closeEvent(self, event):
-        """Disconnect the signal when the window is closed."""
-        try:
-            self.controller.vision_module_ready.disconnect(self._on_vision_module_ready)
-        except (RuntimeError, TypeError):
-            pass
         super().closeEvent(event)
 
     def load_settings(self):
@@ -375,20 +289,9 @@ class SettingsWindow(QDialog):
         self.shell_timeout_spinbox.setValue(int(terminal_settings.get("shell_timeout_seconds", 60) or 60))
         self.shell_detach_spinbox.setValue(int(terminal_settings.get("shell_detach_seconds", 25) or 25))
 
-        # Vision
-        vision_settings = self.settings_manager.get("vision", {})
-        self.wait_check_interval_spinbox.setValue(vision_settings.get("wait_check_interval_ms", 5000) / 1000.0)
-        self.post_action_delay_spinbox.setValue(vision_settings.get("post_action_delay_ms", 1000) / 1000.0)
-        self.max_correction_attempts_spinbox.setValue(vision_settings.get("max_correction_attempts", 3))
-        self.allow_shell_commands_checkbox.setChecked(bool(vision_settings.get("allow_shell_commands", False)))
-
-        # OmniParser
+        # Debug (keys persist under "omniparser" for now; the recognizer
+        # service will adopt them later)
         omniparser_settings = self.settings_manager.get("omniparser", {})
-        self.box_threshold_spinbox.setValue(omniparser_settings.get("box_threshold", 0.35))
-        self.text_threshold_spinbox.setValue(omniparser_settings.get("text_threshold", 0.8))
-        self.containment_ratio_spinbox.setValue(omniparser_settings.get("containment_ratio", 0.8))
-        selected_lang_codes = omniparser_settings.get("ocr_languages", [])
-        self.ocr_language_widget.load_languages(selected_lang_codes)
 
         # Debug
         self.font_combo.set_selected_font(omniparser_settings.get("font_path", "cv2_default"))
@@ -435,19 +338,13 @@ class SettingsWindow(QDialog):
 
         omniparser_settings = self.settings_manager.get("omniparser", {}).copy()
 
-        selected_lang_codes = self.ocr_language_widget.get_selected_languages()
-
         omniparser_settings.update({
             "font_path": self.font_combo.get_selected_font_path(),
             "font_size": self.font_size_spinbox.value(),
             "text_padding": self.text_padding_spinbox.value(),
-            "box_threshold": self.box_threshold_spinbox.value(),
-            "text_threshold": self.text_threshold_spinbox.value(),
-            "containment_ratio": self.containment_ratio_spinbox.value(),
             "save_trace_log": self.save_trace_log_checkbox.isChecked(),
             "save_pre_intent_screenshot": self.save_pre_intent_checkbox.isChecked(),
             "save_post_screenshot": self.save_post_checkbox.isChecked(),
-            "ocr_languages": selected_lang_codes
         })
 
         new_allowed_apps = [
@@ -494,14 +391,10 @@ class SettingsWindow(QDialog):
         except Exception:
             pass
 
-        vision_settings = {
-            "wait_check_interval_ms": int(self.wait_check_interval_spinbox.value() * 1000),
-            "post_action_delay_ms": int(self.post_action_delay_spinbox.value() * 1000),
-            "max_correction_attempts": self.max_correction_attempts_spinbox.value(),
-            "allow_shell_commands": self.allow_shell_commands_checkbox.isChecked(),
-        }
-        # Preserve keys with no UI widget (e.g. grounding_backend) so saving
-        # settings never silently drops them.
+        # No Vision widgets remain (plan-era section removed; the unified
+        # agent loop is governed by the Agent tab). Preserve stored keys so
+        # saving never silently drops them.
+        vision_settings = {}
         try:
             existing_vision = self.settings_manager.get("vision", {}) or {}
             for key, value in existing_vision.items():
@@ -558,67 +451,10 @@ class SettingsWindow(QDialog):
         }
 
     def save_and_accept(self):
-        """Saves settings and handles OCR language updates if necessary."""
+        """Saves settings."""
         self.all_settings_to_save = self._collect_settings_from_ui()
-        new_ocr_languages = set(self.all_settings_to_save["omniparser"]["ocr_languages"])
-
-        if new_ocr_languages != self.initial_ocr_languages:
-            if self._trigger_language_update():
-                logging.info("Language update finished, saving settings.")
-                self.settings_manager.set_many(self.all_settings_to_save)
-                self.hide()
-            else:
-                logging.warning("Language model download was cancelled. Settings not saved.")
-        else:
-            self.settings_manager.set_many(self.all_settings_to_save)
-            self.hide()
-
-    def _trigger_language_update(self):
-        """Handles the UI and worker thread for updating languages."""
-        vision_manager = self.controller.vision
-        if not vision_manager:
-            logging.error("Vision manager not available, cannot update languages.")
-            return False
-
-        self.progress_dialog = QProgressDialog("Initializing language models...", "Cancel", 0, 0, self)
-        self.progress_dialog.setWindowTitle("Downloading models")
-        self.progress_dialog.setStyleSheet(self.controller.theme_manager.get_style("PROGRESS_BAR_STYLE"))
-        self.progress_dialog.setWindowModality(Qt.WindowModal)
-        self.progress_dialog.setMinimumDuration(0)
-        self.progress_dialog.setRange(0, 0)
-        self.progress_dialog.setValue(0)
-
-        update_thread = QThread()
-        update_worker = LanguageUpdateWorker(vision_manager, self.all_settings_to_save)
-        update_worker.moveToThread(update_thread)
-
-        update_worker.download_status_changed.connect(self._on_download_status_changed)
-        update_worker.finished.connect(self.progress_dialog.accept)
-        update_worker.error.connect(self.progress_dialog.reject)
-        self.progress_dialog.canceled.connect(update_thread.quit)
-
-        update_thread.finished.connect(update_worker.deleteLater)
-        update_thread.finished.connect(update_thread.deleteLater)
-
-        update_thread.started.connect(update_worker.run)
-        update_thread.start()
-
-        result = self.progress_dialog.exec()
-
-        if update_thread.isRunning():
-            update_thread.quit()
-            update_thread.wait()
-
-        return result == QDialog.Accepted
-
-    def _on_download_status_changed(self, status: str):
-        """Updates the progress dialog label based on download status."""
-        if 'downloading' in status.lower():
-            self.progress_dialog.setLabelText("Downloading language models... This may take several minutes.")
-        elif 'complete' in status.lower():
-            self.progress_dialog.setLabelText("Download complete. Finalizing...")
-        else:
-            self.progress_dialog.setLabelText(status)
+        self.settings_manager.set_many(self.all_settings_to_save)
+        self.hide()
 
     def _create_general_section(self):
         """Creates the General settings section."""
@@ -857,48 +693,6 @@ class SettingsWindow(QDialog):
 
         return group
 
-    def _create_vision_section(self):
-        """Creates the Vision  Mode settings section."""
-        group = QGroupBox("Vision Mode")
-        vision_layout = QGridLayout(group)
-        vision_layout.setColumnStretch(2, 1)
-
-        self.wait_check_interval_spinbox = QDoubleSpinBox()
-        self.wait_check_interval_spinbox.setRange(1.0, 30.0)
-        self.wait_check_interval_spinbox.setSingleStep(0.5)
-        self.wait_check_interval_spinbox.setSuffix(" s")
-        self.wait_check_interval_spinbox.setFixedWidth(80)
-        wait_check_tooltip = "How often the assistant checks if a 'wait' condition is met."
-        vision_layout.addWidget(QLabel("Wait Check Interval:"), 0, 0)
-        vision_layout.addWidget(self._create_help_label(wait_check_tooltip), 0, 1, Qt.AlignLeft)
-        vision_layout.addWidget(self.wait_check_interval_spinbox, 0, 3)
-
-        self.post_action_delay_spinbox = QDoubleSpinBox()
-        self.post_action_delay_spinbox.setRange(0.5, 10.0)
-        self.post_action_delay_spinbox.setSingleStep(0.1)
-        self.post_action_delay_spinbox.setSuffix(" s")
-        self.post_action_delay_spinbox.setFixedWidth(80)
-        post_action_tooltip = "How long the assistant waits after an action before evaluating the outcome."
-        vision_layout.addWidget(QLabel("Post-Action Delay:"), 1, 0)
-        vision_layout.addWidget(self._create_help_label(post_action_tooltip), 1, 1, Qt.AlignLeft)
-        vision_layout.addWidget(self.post_action_delay_spinbox, 1, 3)
-
-        self.max_correction_attempts_spinbox = QSpinBox()
-        self.max_correction_attempts_spinbox.setRange(1, 10)
-        self.max_correction_attempts_spinbox.setFixedWidth(80)
-        max_correction_tooltip = "Max number of times the assistant will try to correct a failed step."
-        vision_layout.addWidget(QLabel("Max Correction Attempts:"), 2, 0)
-        vision_layout.addWidget(self._create_help_label(max_correction_tooltip), 2, 1, Qt.AlignLeft)
-        vision_layout.addWidget(self.max_correction_attempts_spinbox, 2, 3)
-
-        self.allow_shell_commands_checkbox = QCheckBox("Allow shell commands in Vision plans")
-        shell_tooltip = ("Lets Vision plans mix mouse/keyboard actions with shell and file "
-                         "commands (execute_shell, read/write files). Disabled by default.")
-        self.allow_shell_commands_checkbox.setToolTip(shell_tooltip)
-        vision_layout.addWidget(self.allow_shell_commands_checkbox, 3, 0, 1, 4)
-
-        return group
-
     def _create_context_section(self):
         """Creates the Context (agent history compaction) settings section."""
         group = QGroupBox("Agent History (browser mode)")
@@ -1069,19 +863,7 @@ class SettingsWindow(QDialog):
         return grid_widget
 
     def _create_debug_section(self):
-        """Creates the Debug settings section with a loading placeholder."""
-        self.debug_stack = QStackedWidget()
-
-        # --- Page 1: Loading Placeholder ---
-        loading_widget = QWidget()
-        loading_layout = QVBoxLayout(loading_widget)
-        loading_layout.setAlignment(Qt.AlignCenter)
-        loading_label = QLabel("Initializing Vision module, please wait...")
-        loading_label.setStyleSheet("font-style: italic; color: #9E9E9E;")
-        loading_layout.addWidget(loading_label)
-        self.debug_stack.addWidget(loading_widget)
-
-        # --- Page 2: Actual Settings ---
+        """Creates the Debug settings section."""
         group = QGroupBox("Debug")
         form_layout = QVBoxLayout(group)
         form_layout.setContentsMargins(10, 20, 10, 10)
@@ -1137,67 +919,4 @@ class SettingsWindow(QDialog):
         annotation_layout.addWidget(self.text_padding_spinbox, 2, 3)
         form_layout.addWidget(annotation_group)
 
-        self.debug_stack.addWidget(group)
-        return self.debug_stack
-
-    def _create_omniparser_section(self):
-        """Creates the OmniParser settings section with a loading placeholder."""
-        self.omniparser_stack = QStackedWidget()
-
-        # --- Page 1: Loading Placeholder ---
-        loading_widget = QWidget()
-        loading_layout = QVBoxLayout(loading_widget)
-        loading_layout.setAlignment(Qt.AlignCenter)
-        loading_label = QLabel("Initializing Vision module, please wait...")
-        loading_label.setStyleSheet("font-style: italic; color: #9E9E9E;")
-        loading_layout.addWidget(loading_label)
-        self.omniparser_stack.addWidget(loading_widget)
-
-        # --- Page 2: Actual Settings ---
-        group = QGroupBox("OmniParser")
-        form_layout = QVBoxLayout(group)
-        form_layout.setContentsMargins(10, 20, 10, 10)
-        form_layout.setSpacing(15)
-
-        recognition_group = QGroupBox("Recognition Settings")
-        recognition_layout = QGridLayout(recognition_group)
-        recognition_layout.setColumnStretch(2, 1)
-        self.box_threshold_spinbox = QDoubleSpinBox()
-        self.box_threshold_spinbox.setRange(0.01, 1.0)
-        self.box_threshold_spinbox.setSingleStep(0.01)
-        self.box_threshold_spinbox.setDecimals(2)
-        self.box_threshold_spinbox.setFixedWidth(80)
-        box_threshold_tooltip = "Confidence threshold for detecting UI elements."
-        recognition_layout.addWidget(QLabel("Box Threshold:"), 0, 0)
-        recognition_layout.addWidget(self._create_help_label(box_threshold_tooltip), 0, 1, Qt.AlignLeft)
-        recognition_layout.addWidget(self.box_threshold_spinbox, 0, 3)
-        self.text_threshold_spinbox = QDoubleSpinBox()
-        self.text_threshold_spinbox.setRange(0.1, 1.0)
-        self.text_threshold_spinbox.setSingleStep(0.1)
-        self.text_threshold_spinbox.setDecimals(2)
-        self.text_threshold_spinbox.setFixedWidth(80)
-        text_threshold_tooltip = "Confidence threshold for recognizing text (OCR)."
-        recognition_layout.addWidget(QLabel("Text Threshold:"), 1, 0)
-        recognition_layout.addWidget(self._create_help_label(text_threshold_tooltip), 1, 1, Qt.AlignLeft)
-        recognition_layout.addWidget(self.text_threshold_spinbox, 1, 3)
-        self.containment_ratio_spinbox = QDoubleSpinBox()
-        self.containment_ratio_spinbox.setRange(0.5, 1.0)
-        self.containment_ratio_spinbox.setSingleStep(0.1)
-        self.containment_ratio_spinbox.setDecimals(2)
-        self.containment_ratio_spinbox.setFixedWidth(80)
-        containment_ratio_tooltip = "How much of a text block must be inside a UI element to be associated."
-        recognition_layout.addWidget(QLabel("Containment Ratio:"), 2, 0)
-        recognition_layout.addWidget(self._create_help_label(containment_ratio_tooltip), 2, 1, Qt.AlignLeft)
-        recognition_layout.addWidget(self.containment_ratio_spinbox, 2, 3)
-        self.ocr_language_widget = OCRLanguageWidget(self.settings_manager, self.controller.theme_manager)
-        self.ocr_language_widget.setFixedHeight(150)
-        ocr_tooltip = "Select languages for text recognition (OCR)."
-        label_ocr = QLabel("OCR Languages:")
-        recognition_layout.addWidget(label_ocr, 3, 0)
-        recognition_layout.addWidget(self._create_help_label(ocr_tooltip), 3, 1)
-        recognition_layout.addWidget(self.ocr_language_widget, 4, 0, 1, 4)
-        form_layout.addWidget(recognition_group)
-
-        self.omniparser_stack.addWidget(group)
-
-        return self.omniparser_stack
+        return group
