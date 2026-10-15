@@ -1,0 +1,6 @@
+### Mission ###
+- Original User Request: {original_request}
+
+### Last Action Analysis ###
+- Action Performed: {last_action}
+- Reason for Failure: {reason}

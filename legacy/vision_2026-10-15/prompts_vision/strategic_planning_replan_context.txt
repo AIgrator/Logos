@@ -1,0 +1,9 @@
+### RE-PLANNING CONTEXT ###
+Note: This is a re-planning request due to a critical failure that made the previous plan obsolete.
+
+- Original Goal: {user_request}
+- Status of Previous Plan:
+{plan_status}
+- Reason for Failure: {failure_context}
+
+Your mission is to create a new, complete, and robust plan starting from the current screen to achieve the original goal.
