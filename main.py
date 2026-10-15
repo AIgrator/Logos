@@ -20,12 +20,17 @@ def main():
 
     # Print an immediate startup message so the user knows the app is loading
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Application starting, please wait for modules to load...")
+    _start_t = time.perf_counter()
+
+    def _phase(name):
+        print(f"[+{time.perf_counter() - _start_t:.1f}s] {name}", flush=True)
 
     # Now perform the heavy imports
     # import shutil
     # import threading
     from PySide6.QtWidgets import QApplication
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
+    _phase("Qt imports done")
 
     # Add the 'src' directory to the Python path
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
@@ -36,6 +41,7 @@ def main():
     # This ensures that all parts of the app see the same, up-to-date model list.
     ModelConfigManager.initialize()
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] ModelConfigManager.initialized")
+    _phase("ModelConfigManager.initialize done")
     import logging_config
     from controller import AppController
     from settings_manager import SettingsManager
@@ -45,6 +51,7 @@ def main():
     # --- Main Execution ---
     settings_manager = SettingsManager()
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] settings_manager initialized")
+    _phase("SettingsManager done")
 
     # --- Setup-only mode ---
     if '--run-setup' in sys.argv:
@@ -87,6 +94,7 @@ def main():
     # --- End AppUserModelID ---
 
     app = QApplication(sys.argv)
+    _phase("QApplication created")
 
     local_server = None
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] app initialized")
@@ -134,18 +142,21 @@ def main():
         from computer.tool_registry import ToolRegistry
         # ToolRegistry now gets its paths from the settings_manager
         ToolRegistry(settings_manager=settings_manager).generate_all()
+        _phase("ToolRegistry.generate_all done")
     except Exception:
         logging.debug("ToolRegistry.generate_all() failed during main startup", exc_info=True)
 
     thread_pool = ThreadPool()
     app.aboutToQuit.connect(thread_pool.cleanup)
     controller = AppController(app, settings_manager, thread_pool, local_server, working_directory)
+    _phase("AppController created")
 
     # Apply the theme using the new manager
     saved_theme = controller.settings_manager.get("theme", "dark")
     controller.theme_manager.apply_theme(saved_theme)
 
     controller.run()
+    _phase("controller.run done (window should be visible)")
 
     sys.exit(app.exec())
 
