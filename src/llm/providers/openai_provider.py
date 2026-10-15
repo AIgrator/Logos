@@ -92,6 +92,10 @@ class OpenAIProvider(BaseLLMProvider):
         `computer` tool — NOT the code-execution path: we execute actions with
         our own deterministic tools, never model-written code).
 
+        When the model judges an action risky it attaches
+        `pending_safety_checks` to the computer_call — our handler shows the
+        approval dialog and waits (the model calls, we display, it waits).
+
         Returns {"actions", "call_id", "response_id",
                  "pending_safety_checks", "done_text"} per BaseLLMProvider.
         """
@@ -152,7 +156,6 @@ class OpenAIProvider(BaseLLMProvider):
                         c if isinstance(c, dict) else c.to_dict()
                         for c in raw_checks
                     ]
-
             done_text = None
             try:
                 done_text = response.output_text or None

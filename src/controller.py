@@ -733,25 +733,6 @@ class AppController(QObject):
             logging.error(f"Safety approval dialog failed: {e}")
             return False
 
-    def ask_user_yes_no(self, title: str, question: str):
-        """Modal Да/Нет question (Vision confirmation doctrine).
-
-        Returns True/False, or None if dismissed. GUI thread only.
-        """
-        from PySide6.QtWidgets import QMessageBox
-        try:
-            answer = QMessageBox.question(
-                self.ui,
-                title,
-                question,
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
-            )
-            return answer == QMessageBox.Yes
-        except Exception as e:
-            logging.error(f"Question dialog failed: {e}")
-            return None
-
     def _handle_retry_request(self):
         """Re-send the last LLM request (Retry button on transient-error cards)."""
         self._resend_last_request(
