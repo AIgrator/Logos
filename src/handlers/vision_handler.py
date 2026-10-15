@@ -109,6 +109,23 @@ def describe_action(action: dict) -> str:
     return kind
 
 
+def comm_log_static(direction: str, payload: dict):
+    """Task-level entries into llm_communication.log (no worker needed)."""
+    import json
+    from datetime import datetime
+    try:
+        logger = logging.getLogger("llm_communication")
+        entry = {
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "direction": direction,
+            "mode": "Vision-CUA",
+        }
+        entry.update(payload)
+        logger.info(json.dumps(entry, ensure_ascii=False))
+    except Exception:
+        pass
+
+
 def scale_point(x: float, y: float, scale: float) -> tuple:
     """
     Maps model coordinates onto real screen pixels.
@@ -217,21 +234,62 @@ class CuaTurnWorker(QThread):
             time.sleep(0.4)
         return not self._stop and h.state != VisionState.IDLE
 
+    def _comm_log(self, direction: str, payload: dict):
+        """One JSON line into llm_communication.log (never base64 blobs)."""
+        import json
+        from datetime import datetime
+        try:
+            logger = logging.getLogger("llm_communication")
+            entry = {
+                "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "direction": direction,
+                "mode": "Vision-CUA",
+                "provider": "openai",
+                "model": getattr(self._provider, "model", "?"),
+            }
+            entry.update(payload)
+            logger.info(json.dumps(entry, ensure_ascii=False))
+        except Exception:
+            pass
+
     def run(self):
         outcome: dict
+        # Split BEFORE try: except-block references these, so they must exist
+        # even if the first line inside try raises.
+        protocol = dict(self._request)
+        tag = protocol.pop("tag", "cua")
+        turn_no = protocol.pop("turn_no", 0)
+        flags = protocol.pop("debug_flags", None) or {}
         try:
-            # Split: protocol kwargs go to the provider; debug meta stays local.
-            # (Passing tag/turn_no/debug_flags into computer_use_turn crashes.)
-            protocol = dict(self._request)
-            tag = protocol.pop("tag", "cua")
-            turn_no = protocol.pop("turn_no", 0)
-            flags = protocol.pop("debug_flags", None) or {}
             if not self._paused_spin("before provider turn"):
                 outcome = {"aborted": True}
                 self.turn_done.emit(outcome)
                 return
             self.progress.emit("Thinking (computer-use turn)…")
+            first = protocol.get("previous_response_id") is None
+            self._comm_log("REQUEST", {
+                "turn": turn_no,
+                "task": protocol.get("task"),
+                "instructions_chars": len(protocol.get("instructions") or ""),
+                "instructions": protocol.get("instructions") if first else "<chain continues>",
+                "previous_response_id": protocol.get("previous_response_id"),
+                "screenshot_sent": bool(protocol.get("screenshot_b64")),
+                "screenshot_bytes": len(protocol.get("screenshot_b64") or ""),
+                "screenshot_sent_file": protocol.get("prev_shot_file"),
+                "acknowledged_safety_checks": protocol.get("acknowledged_safety_checks"),
+            })
+            t0 = time.perf_counter()
             turn = self._provider.computer_use_turn(**protocol)
+            took = round(time.perf_counter() - t0, 1)
+            self._comm_log("RESPONSE", {
+                "turn": turn_no,
+                "took_seconds": took,
+                "response_id": turn.get("response_id"),
+                "call_id": turn.get("call_id"),
+                "actions": turn.get("actions"),
+                "pending_safety_checks": turn.get("pending_safety_checks"),
+                "done_text": turn.get("done_text"),
+            })
 
             checks = turn.get("pending_safety_checks") or []
             if checks and not self._stop:
@@ -252,7 +310,25 @@ class CuaTurnWorker(QThread):
                         "message": c.get("message")} for c in checks]
                 follow = dict(protocol)
                 follow["acknowledged_safety_checks"] = ack
+                self._comm_log("REQUEST", {
+                    "turn": turn_no,
+                    "replay_with_ack": True,
+                    "acknowledged_safety_checks": ack,
+                    "screenshot_sent": bool(follow.get("screenshot_b64")),
+                })
+                t0 = time.perf_counter()
                 turn = self._provider.computer_use_turn(**follow)
+                took = round(time.perf_counter() - t0, 1)
+                self._comm_log("RESPONSE", {
+                    "turn": turn_no,
+                    "replay_with_ack": True,
+                    "took_seconds": took,
+                    "response_id": turn.get("response_id"),
+                    "call_id": turn.get("call_id"),
+                    "actions": turn.get("actions"),
+                    "pending_safety_checks": turn.get("pending_safety_checks"),
+                    "done_text": turn.get("done_text"),
+                })
 
             if not self._paused_spin("before execution"):
                 outcome = {"aborted": True}
@@ -276,6 +352,11 @@ class CuaTurnWorker(QThread):
                     "response_id": turn.get("response_id"),
                 }
                 self._handler.trace_turn(tag, turn_no, [], False, None)
+                self._comm_log("CONSUMED", {
+                    "turn": turn_no,
+                    "status": "done",
+                    "done_text": done_text,
+                })
                 self.turn_done.emit(outcome)
                 return
 
@@ -303,6 +384,12 @@ class CuaTurnWorker(QThread):
                         "call_id": turn.get("call_id"),
                     }
                     self._handler.trace_turn(tag, turn_no, executed_raw, False, None)
+                    self._comm_log("CONSUMED", {
+                        "turn": turn_no,
+                        "status": "action_error",
+                        "executed": executed,
+                        "error": outcome["action_error"],
+                    })
                     self.turn_done.emit(outcome)
                     return
 
@@ -318,15 +405,25 @@ class CuaTurnWorker(QThread):
             self._handler.trace_turn(
                 tag, turn_no, executed_raw,
                 bool(turn.get("pending_safety_checks")), shot_file)
+            self._comm_log("CONSUMED", {
+                "turn": turn_no,
+                "executed": executed,
+                "post_screenshot_file": shot_file,
+            })
             outcome = {
                 "executed": executed,
                 "response_id": turn.get("response_id"),
                 "call_id": turn.get("call_id"),
                 "screenshot_b64": shot_b64,
+                "shot_file": shot_file,
             }
             self.turn_done.emit(outcome)
         except Exception as e:
             logging.error(f"CUA turn failed: {e}", exc_info=True)
+            self._comm_log("ERROR", {
+                "turn": turn_no,
+                "error": f"{type(e).__name__}: {e}",
+            })
             try:
                 self.turn_done.emit({"fatal": f"**Error:** computer-use turn failed: {e}"})
             except Exception:
@@ -367,6 +464,24 @@ class VisionHandler(BaseAgent):
         self._cua_call_id = None
         self._cua_turns = 0
         self._cua_tag = time.strftime("%H%M%S")
+        self._last_shot_file = None
+        try:
+            import mss
+            with mss.mss() as sct:
+                mon = sct.monitors[1]
+                display = f"{mon['width']}x{mon['height']}"
+        except Exception:
+            display = "?"
+        try:
+            model = self._provider().model
+        except Exception:
+            model = "?"
+        comm_log_static("TASK", {
+            "tag": self._cua_tag,
+            "task": user_text,
+            "model": model,
+            "display": display,
+        })
         super().start_task(user_text)
 
     def resume_with_guidance(self, user_text: str, attachments=None):
@@ -460,6 +575,7 @@ class VisionHandler(BaseAgent):
                 "call_id": self._cua_call_id,
                 "screenshot_b64": self._last_screenshot_b64,
                 "previous_response_id": self._cua_response_id,
+                "prev_shot_file": getattr(self, "_last_shot_file", None),
             }
         request.update({
             "tag": getattr(self, "_cua_tag", "cua"),
@@ -521,6 +637,7 @@ class VisionHandler(BaseAgent):
         self._cua_response_id = outcome.get("response_id")
         self._cua_call_id = outcome.get("call_id")
         self._last_screenshot_b64 = outcome.get("screenshot_b64")
+        self._last_shot_file = outcome.get("shot_file")
         self._cua_turns += 1
         line = f"turn {self._cua_turns}: " + (
             ", ".join(executed) if executed else "screenshot")
@@ -609,13 +726,15 @@ class VisionHandler(BaseAgent):
             "trace_path": cfg.get("trace_log_path", "logs/parser_trace.json"),
         }
 
-    def _shots_dir(self) -> str:
+    def _shots_dir(self, tag: str | None = None) -> str:
+        """Per-task folder: screenshots/cua_<tag>/ (survives startup wipe)."""
         try:
-            d = self.settings.get("APP_SCREENSHOTS_DIR", "screenshots")
+            base = self.settings.get("APP_SCREENSHOTS_DIR", "screenshots")
         except Exception:
-            d = "screenshots"
+            base = "screenshots"
+        import os
+        d = os.path.join(base, f"cua_{tag or 'manual'}")
         try:
-            import os
             os.makedirs(d, exist_ok=True)
         except Exception:
             pass
@@ -634,7 +753,7 @@ class VisionHandler(BaseAgent):
             except Exception as e:
                 logging.warning(f"annotation failed: {e}")
         path = os.path.join(
-            self._shots_dir(), f"cua_{tag}_turn{turn_no:02d}_{when}.png")
+            self._shots_dir(tag), f"turn{turn_no:02d}_{when}.png")
         img.save(path)
         logging.info(f"CUA debug shot saved: {path}")
         return path

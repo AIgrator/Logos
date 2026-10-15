@@ -228,14 +228,30 @@ class SettingsManager(QObject):
         cleanup_thread.start()
 
     def _cleanup_screenshots_task(self):
-        """Clears and recreates the screenshot log directory."""
+        """Clears the screenshot log directory, preserving per-task CUA
+        folders (cua_<tag>/) younger than 7 days for post-hoc analysis."""
+        import time as _time
         screenshots_dir = self.get('APP_SCREENSHOTS_DIR')
         if not screenshots_dir:
             return
         try:
+            keep_seconds = 7 * 24 * 3600
+            now = _time.time()
             if os.path.exists(screenshots_dir):
-                shutil.rmtree(screenshots_dir)
-            os.makedirs(screenshots_dir)
+                for entry in os.listdir(screenshots_dir):
+                    full = os.path.join(screenshots_dir, entry)
+                    if (entry.startswith("cua_")
+                            and os.path.isdir(full)
+                            and now - os.path.getmtime(full) < keep_seconds):
+                        continue
+                    if os.path.isdir(full):
+                        shutil.rmtree(full, ignore_errors=True)
+                    else:
+                        try:
+                            os.remove(full)
+                        except Exception:
+                            pass
+            os.makedirs(screenshots_dir, exist_ok=True)
             logger.info(f"Screenshot log directory '{screenshots_dir}' is cleaned and ready.")
         except Exception as e:
             logger.error(f"Failed to setup screenshot log directory: {e}", exc_info=True)
