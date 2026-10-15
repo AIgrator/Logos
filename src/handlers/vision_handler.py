@@ -380,6 +380,22 @@ class VisionHandler(BaseAgent):
 
     # -- agent loop (BaseAgent discipline, CUA tail) --------------------
 
+    def _cua_system_prompt(self) -> str:
+        if getattr(self, "_cua_system_cache", None) is None:
+            text = ""
+            try:
+                import os
+                base = self.settings.get(
+                    "APP_PROMPTS_DIR",
+                    os.path.join("prompts"))
+                with open(os.path.join(base, "vision", "cua_system.txt"),
+                          encoding="utf-8") as f:
+                    text = f.read().strip()
+            except Exception as e:
+                logging.warning(f"CUA system prompt missing: {e}")
+            self._cua_system_cache = text
+        return self._cua_system_cache or ""
+
     def _continue_loop(self, last_command_output=None):
         # Counting + escalation: same doctrine as Terminal/Browser (one
         # counter, model-agnostic markers). Deviation: no self-assessment
@@ -434,7 +450,8 @@ class VisionHandler(BaseAgent):
         self._start_thinking_timer("Thinking (computer use)…")
         debug_flags = self._debug_flags()
         if self._cua_response_id is None:
-            request = {"task": self.original_user_request}
+            request = {"task": self.original_user_request,
+                       "instructions": self._cua_system_prompt()}
         else:
             request = {
                 "call_id": self._cua_call_id,
@@ -479,6 +496,14 @@ class VisionHandler(BaseAgent):
         if outcome.get("done"):
             self._stop_thinking_timer()
             text = outcome.get("done_text") or "Done."
+            # Confirmation doctrine: a turn finished with ONLY a question
+            # means the model asks before a consequential action. Pause with
+            # the question — the user's reply restarts the chain (guidance).
+            if text.strip().endswith("?"):
+                self.command_history.append(f"Model asks: {text[:300]}")
+                self.ui.add_text(text, prefix_html="<b>Vision:</b> ")
+                self._set_state(VisionState.PAUSED_ON_ERROR)
+                return
             self.command_history.append(f"Computer-use finished: {text[:300]}")
             self.ui.add_text(text, prefix_html="<b>Vision:</b> ")
             self._consecutive_errors = 0

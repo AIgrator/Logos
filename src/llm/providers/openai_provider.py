@@ -84,7 +84,8 @@ class OpenAIProvider(BaseLLMProvider):
         call_id: str | None = None,
         screenshot_b64: str | None = None,
         previous_response_id: str | None = None,
-        acknowledged_safety_checks: list | None = None
+        acknowledged_safety_checks: list | None = None,
+        instructions: str | None = None
     ) -> dict:
         """
         One turn of the OpenAI computer-use loop (Responses API, structured
@@ -127,6 +128,8 @@ class OpenAIProvider(BaseLLMProvider):
             }
             if previous_response_id is not None:
                 kwargs["previous_response_id"] = previous_response_id
+            if instructions:
+                kwargs["instructions"] = instructions
 
             response = self.client.responses.create(**kwargs)
 

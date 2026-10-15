@@ -89,7 +89,8 @@ class BaseLLMProvider(ABC):
         call_id: str | None = None,
         screenshot_b64: str | None = None,
         previous_response_id: str | None = None,
-        acknowledged_safety_checks: list[dict[str, Any]] | None = None
+        acknowledged_safety_checks: list[dict[str, Any]] | None = None,
+        instructions: str | None = None
     ) -> dict[str, Any]:
         """
         Executes one computer-use turn.
