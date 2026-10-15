@@ -30,18 +30,5 @@ openai
 anthropic
 xai_sdk
 
-# --- Vision & ML (from OmniParser) ---
-torch
-torchvision
-easyocr
-transformers==4.46.1
-ultralytics==8.3.70
-supervision==0.18.0
+# --- Shared numeric lib (kept: zero startup cost, used by screenshots later) ---
 numpy==1.26.4
-opencv-python-headless
-accelerate
-timm
-einops==0.8.0
-matplotlib
-pandas
-scikit-learn
