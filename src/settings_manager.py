@@ -18,6 +18,21 @@ logger = logging.getLogger(__name__)
 # Define a unique service name for the application to store credentials
 KEYRING_SERVICE_NAME = "Logos-ai-assistant"
 
+_SENSITIVE_KEYS = ("api_key", "password", "secret", "token")
+
+
+def _redact_secrets(value):
+    """Recursively masks secret fields so they never end up in logs."""
+    if isinstance(value, dict):
+        return {
+            k: ("********" if any(s in k.lower() for s in _SENSITIVE_KEYS)
+                else _redact_secrets(v))
+            for k, v in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_redact_secrets(v) for v in value]
+    return value
+
 
 class SettingsManager(QObject):
     # Language data categorized by model type for UI logic. This structure is crucial
@@ -347,9 +362,9 @@ class SettingsManager(QObject):
         """
         self._settings.update(settings_dict)
         for key, value in settings_dict.items():
-            # Avoid logging sensitive values like API keys
-            log_value = '********' if 'api_key' in key or 'password' in key else value
-            logger.info(f"[SettingsManager] Setting '{key}' to '{log_value}' (part of batch, save={save}).")
+            # Avoid logging sensitive values like API keys — including nested
+            # ones (e.g. llm_providers.*.api_key). Secrets must never hit logs.
+            logger.info(f"[SettingsManager] Setting '{key}' to '{_redact_secrets(value)}' (part of batch, save={save}).")
         if not save:
             return
         logger.info("[SettingsManager] Emitting single settings_changed signal for batch update.")
