@@ -964,7 +964,7 @@ class UIManager(QWidget):
         self.update_pause_button()
 
     def update_pause_button(self):
-        """Shows Pause/Resume only for a live terminal/browser task."""
+        """Shows Pause/Resume only for a live terminal/browser/vision task."""
         mode = getattr(self, "_active_mode_key", "chat")
         handler = None
         try:
@@ -972,6 +972,8 @@ class UIManager(QWidget):
                 handler = self.controller.terminal_handler
             elif mode == "browser":
                 handler = self.controller.browser_handler
+            elif mode == "vision":
+                handler = self.controller.vision_handler
         except Exception:
             handler = None
         active = False

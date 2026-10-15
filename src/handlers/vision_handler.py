@@ -223,6 +223,7 @@ class CuaTurnWorker(QThread):
 
     turn_done = Signal(dict)      # outcome payload (see _finish)
     safety_needed = Signal(list)  # pending_safety_checks -> GUI approval
+    ensure_visible = Signal(float, float)  # point must not hide under us
     progress = Signal(str)
 
     def __init__(self, handler, provider, turn_request: dict, parent=None):
@@ -233,6 +234,8 @@ class CuaTurnWorker(QThread):
         self._stop = False
         self._safety_event = threading.Event()
         self._safety_approved = False
+        self._visible_event = threading.Event()
+        self._visible_moved = False
 
     def stop(self):
         self._stop = True
@@ -478,10 +481,83 @@ class VisionHandler(BaseAgent):
         self._cua_call_id = None
         self._cua_turns = 0
         self._worker = None
+        self._compact_owned = False
+        self._visible_box = {}
+        self._visible_event = threading.Event()
         # Deprecated plan-era surface (controller/UI still reference it).
         self.action_plan = []
 
     # -- task entry ----------------------------------------------------
+
+    def _enter_compact(self):
+        """Shrinks to the compact strip for the task (progress stays visible,
+        the strip barely covers anything). Only tracks self-initiated state."""
+        try:
+            if not getattr(self.ui, "is_compact", False):
+                self.ui.switchToCompactMode()
+                self._compact_owned = True
+        except Exception as e:
+            logging.warning(f"compact enter failed: {e}")
+
+    def _exit_compact(self):
+        """Restores full window if WE compacted it (never fights the user)."""
+        try:
+            if getattr(self, "_compact_owned", False):
+                self._compact_owned = False
+                if getattr(self.ui, "is_compact", False):
+                    self.ui.switchToFullMode()
+        except Exception as e:
+            logging.warning(f"compact exit failed: {e}")
+
+    def pause_or_resume(self):
+        super().pause_or_resume()
+        try:
+            if self.state == VisionState.PAUSED and getattr(
+                    self, "_compact_owned", False):
+                self._exit_compact()
+            elif (self.state == VisionState.EXECUTING
+                    and self.original_user_request
+                    and not getattr(self.ui, "is_compact", False)):
+                self._enter_compact()
+        except Exception:
+            pass
+
+    def ensure_point_visible(self, x: float, y: float) -> bool:
+        """Called from the worker thread before acting at a screen point.
+
+        If our compact strip covers the target, it is relocated (GUI side)
+        and the worker should let the compositor settle. Returns True when
+        the window moved.
+        """
+        worker = self._worker
+        if worker is None:
+            return self._ensure_visible_do(x, y)
+        self._visible_box = {}
+        self._visible_event = threading.Event()
+        worker.ensure_visible.emit(x, y)
+        self._visible_event.wait(timeout=5.0)
+        return bool(self._visible_box.get("moved"))
+
+    def _ensure_visible_do(self, x: float, y: float) -> bool:
+        try:
+            ui = self.ui
+            if getattr(ui, "is_compact", False) and ui.is_click_colliding(
+                    int(x), int(y)):
+                ui.relocate_compact_window()
+                return True
+        except Exception as e:
+            logging.warning(f"visibility check failed: {e}")
+        return False
+
+    def _on_ensure_visible(self, x: float, y: float):
+        try:
+            self._visible_box = {"moved": self._ensure_visible_do(x, y)}
+        except Exception:
+            self._visible_box = {"moved": False}
+        try:
+            self._visible_event.set()
+        except Exception:
+            pass
 
     def start_task(self, user_text: str, attachments=None):
         if attachments:
@@ -594,6 +670,7 @@ class VisionHandler(BaseAgent):
             self.ui.add_message(
                 f"<i>Stopped after {self.MAX_CUA_TURNS} computer-use turns "
                 f"without finishing. Tell me how to proceed.</i>")
+            self._exit_compact()
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()
             return
@@ -609,6 +686,7 @@ class VisionHandler(BaseAgent):
                 f"Tell me how to proceed and I'll continue when you reply.",
                 prefix_html="<b>Vision:</b> ",
             )
+            self._exit_compact()
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()
             return
@@ -637,9 +715,11 @@ class VisionHandler(BaseAgent):
             "turn_no": self._cua_turns + 1,
             "debug_flags": debug_flags,
         })
+        self._enter_compact()
         self._worker = CuaTurnWorker(self, self._provider(), request)
         self._worker.turn_done.connect(self._on_turn_done)
         self._worker.safety_needed.connect(self._on_safety_needed)
+        self._worker.ensure_visible.connect(self._on_ensure_visible)
         self._worker.progress.connect(
             lambda msg: self.ui.add_message(f"<i>{msg}</i>"))
         self._worker.start()
@@ -660,6 +740,7 @@ class VisionHandler(BaseAgent):
                 f"not approved. Tell me how to proceed.",
                 prefix_html="<b>Vision:</b> ",
             )
+            self._exit_compact()
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()
             return
@@ -682,6 +763,7 @@ class VisionHandler(BaseAgent):
             self.ui.add_text(text, prefix_html="<b>Vision:</b> ")
             self._consecutive_errors = 0
             self._assessment_sent = False
+            self._exit_compact()
             self._set_state(VisionState.IDLE)
             return
         if outcome.get("action_error"):
@@ -873,6 +955,8 @@ class VisionHandler(BaseAgent):
 
         if kind in ("click", "double_click", "move"):
             x, y = scale_point(float(action["x"]), float(action["y"]), scale)
+            if self.ensure_point_visible(x, y):
+                time.sleep(0.6)  # compositor settle after relocate
             keys = action.get("keys") or []
             held = []
             try:
@@ -900,6 +984,8 @@ class VisionHandler(BaseAgent):
             if len(path) < 2:
                 raise ValueError(f"drag needs >= 2 path points: {action!r}")
             pts = [scale_point(float(p["x"]), float(p["y"]), scale) for p in path]
+            if any(self.ensure_point_visible(px, py) for px, py in pts):
+                time.sleep(0.6)  # compositor settle after relocate
             pg.moveTo(*pts[0])
             pg.mouseDown()
             try:
@@ -911,6 +997,8 @@ class VisionHandler(BaseAgent):
 
         if kind == "scroll":
             x, y = scale_point(float(action.get("x", 0)), float(action.get("y", 0)), scale)
+            if self.ensure_point_visible(x, y):
+                time.sleep(0.6)  # compositor settle after relocate
             pg.moveTo(x, y)
             # Pixel deltas -> wheel clicks (WHEEL_DELTA=120). Sign: assumed
             # screen-space (positive down/right); verify on the live test.
@@ -1001,6 +1089,7 @@ class VisionHandler(BaseAgent):
                 worker.wait(3000)
             except Exception:
                 pass
+        self._exit_compact()
         self._cua_response_id = None
         self._cua_call_id = None
 
