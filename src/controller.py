@@ -741,15 +741,18 @@ class AppController(QObject):
         GUI thread only.
         """
         from PySide6.QtWidgets import QInputDialog
+        from PySide6.QtGui import QIcon
         try:
-            answer, ok = QInputDialog.getText(
-                self.ui,
-                "Vision asks",
-                question,
-            )
-            if not ok:
-                return None
-            return answer
+            dlg = QInputDialog(self.ui)
+            dlg.setWindowTitle("Vision asks")
+            dlg.setLabelText(question)
+            try:
+                dlg.setWindowIcon(QIcon("assets/ico.ico"))
+            except Exception:
+                pass
+            if dlg.exec():
+                return dlg.textValue()
+            return None
         except Exception as e:
             logging.error(f"ask dialog failed: {e}")
             return None
