@@ -524,13 +524,46 @@ class VisionHandler(BaseAgent):
             raise RuntimeError("No LLM provider available for Computer Use.")
         return provider
 
+    def _set_own_window_visible(self, visible: bool) -> bool:
+        """Hides/shows our main window thread-safely. Returns True if WE hid it
+        (so only then we re-show — a minimized window stays minimized)."""
+        try:
+            window = getattr(self.ui, "main_window", None)
+            if window is None:
+                return False
+            from PySide6.QtCore import QMetaObject, Qt, QThread
+            if not visible:
+                if not window.isVisible() or window.isMinimized():
+                    return False
+            if QThread.currentThread() == window.thread():
+                window.setVisible(visible)
+            else:
+                method = "show" if visible else "hide"
+                QMetaObject.invokeMethod(
+                    window, method, Qt.BlockingQueuedConnection)
+            return not visible
+        except Exception as e:
+            logging.warning(f"own-window visibility failed: {e}")
+            return False
+
     def capture_screenshot_b64(self):
-        """Full-screen capture -> (base64 png, width, height)."""
+        """Full-screen capture WITHOUT our window -> (base64 png, w, h).
+
+        Restores the legacy get_clean_screenshot behavior: the Logos window
+        must not cover screen elements on the shot the model decides from.
+        """
         import mss
         from PIL import Image
-        with mss.mss() as sct:
-            raw = sct.grab(sct.monitors[1])
-            img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+        we_hid = self._set_own_window_visible(False)
+        try:
+            if we_hid:
+                time.sleep(0.3)  # let the compositor redraw without us
+            with mss.mss() as sct:
+                raw = sct.grab(sct.monitors[1])
+                img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
+        finally:
+            if we_hid:
+                self._set_own_window_visible(True)
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode("ascii"), img.size[0], img.size[1]
