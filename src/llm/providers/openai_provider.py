@@ -134,7 +134,10 @@ class OpenAIProvider(BaseLLMProvider):
             if previous_response_id is None:
                 if not task:
                     raise ValueError("First computer-use turn requires a task.")
-                input_items: list = [task] if isinstance(task, str) else task
+                # NOTE: a bare string is valid input; wrapping it into a
+                # one-element list breaks the call (array items must be
+                # input objects, not strings).
+                input_items = task
             else:
                 if not outputs:
                     raise ValueError("Follow-up turn requires outputs.")
