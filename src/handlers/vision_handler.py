@@ -519,9 +519,13 @@ class VisionHandler(BaseAgent):
     def pause_or_resume(self):
         super().pause_or_resume()
         try:
-            if self.state == VisionState.PAUSED and getattr(
-                    self, "_compact_owned", False):
-                self._exit_compact()
+            if self.state == VisionState.PAUSED:
+                # Pausing must hand the keyboard back: the thinking UI
+                # locks the input in Vision mode, and a paused user wants
+                # to type guidance. The next turn re-shows thinking.
+                self._stop_thinking_timer()
+                if getattr(self, "_compact_owned", False):
+                    self._exit_compact()
             elif (self.state == VisionState.EXECUTING
                     and self.original_user_request
                     and not getattr(self.ui, "is_compact", False)):
