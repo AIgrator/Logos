@@ -22,12 +22,21 @@ def main():
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Application starting, please wait for modules to load...")
     _start_t = time.perf_counter()
 
+    def _native_splash_pid_file():
+        import tempfile
+        return os.path.join(tempfile.gettempdir(), "logos_splash.pid")
+
     def _close_native_splash():
-        """Kills the transparent pre-splash started by bin/logos.bat (if any)."""
+        """Kills the transparent pre-splash started by bin/logos.bat (if any).
+
+        Windows-only by construction (the launcher is a .bat); on other
+        systems this is a no-op so startup stays cross-platform.
+        """
+        if sys.platform != "win32":
+            return
         try:
             import subprocess
-            import tempfile
-            pid_file = os.path.join(tempfile.gettempdir(), "logos_splash.pid")
+            pid_file = _native_splash_pid_file()
             if not os.path.exists(pid_file):
                 return
             with open(pid_file) as f:
@@ -48,8 +57,27 @@ def main():
         except Exception:
             pass
 
+    qt_splash = None
+
     def _phase(name):
         print(f"[+{time.perf_counter() - _start_t:.1f}s] {name}", flush=True)
+        if qt_splash is not None:
+            try:
+                from PySide6.QtCore import Qt
+                qt_splash.showMessage(name, Qt.AlignBottom | Qt.AlignHCenter)
+            except Exception:
+                pass
+
+    def _close_splashes():
+        """Closes whichever splash is up (native pre-splash and/or Qt fallback)."""
+        nonlocal qt_splash
+        _close_native_splash()
+        if qt_splash is not None:
+            try:
+                qt_splash.close()
+            except Exception:
+                pass
+            qt_splash = None
 
     # Now perform the heavy imports
     # import shutil
@@ -149,9 +177,24 @@ def main():
             local_server.listen(server_name)
     # --- End Single Instance Check ---
 
-    # The transparent pre-splash from bin/logos.bat stays up for the whole
-    # startup (a Qt splash would only duplicate it — and appear later).
-    # It is closed once the main window is shown, see below.
+    # Splash policy: exactly one. On Windows the transparent pre-splash from
+    # bin/logos.bat is already up (it appears before the interpreter) and
+    # stays for the whole startup. Everywhere else — Linux/macOS, or a direct
+    # `python main.py` run — show the Qt fallback instead.
+    if not os.path.exists(_native_splash_pid_file()):
+        try:
+            from PySide6.QtWidgets import QSplashScreen
+            from PySide6.QtGui import QPixmap
+            from PySide6.QtCore import Qt
+            pix = QPixmap("assets/ico.png").scaled(
+                256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            qt_splash = QSplashScreen(pix)
+            qt_splash.show()
+            qt_splash.showMessage("Starting Logos…", Qt.AlignBottom | Qt.AlignHCenter)
+            app.processEvents()
+        except Exception as e:
+            print(f"qt splash failed: {e}", flush=True)
+            qt_splash = None
 
     # --- First Run Setup ---
     # Check if settings exist. If not, this is the first run.
@@ -168,8 +211,8 @@ def main():
             settings_manager.set("theme", "dark")
 
         # 2. Run the setup wizard to get API keys, etc.
-        # The native pre-splash is TopMost — close it so it doesn't cover the wizard.
-        _close_native_splash()
+        # Splashes are TopMost — close them so they don't cover the wizard.
+        _close_splashes()
         if not run_setup_wizard(settings_manager):
             sys.exit(0) # User cancelled setup
     # --- End First Run Setup ---
@@ -194,9 +237,17 @@ def main():
     controller.run()
     _phase("controller.run done (window should be visible)")
 
-    # The transparent pre-splash from bin/logos.bat has done its job.
-    # (Later replaced by an animated GIF for the EXE build.)
-    _close_native_splash()
+    # Splashes have done their job (the EXE build will use an animated GIF).
+    if qt_splash is not None:
+        try:
+            main_window = getattr(getattr(controller, "ui", None), "main_window", None)
+            if main_window is not None:
+                qt_splash.finish(main_window)
+            else:
+                qt_splash.close()
+        except Exception:
+            pass
+    _close_splashes()
 
     sys.exit(app.exec())
 
