@@ -130,6 +130,9 @@ class OpenAIProvider(BaseLLMProvider):
                 kwargs["previous_response_id"] = previous_response_id
             if instructions:
                 kwargs["instructions"] = instructions
+                logging.info(
+                    f"CUA first turn: instructions attached "
+                    f"({len(instructions)} chars).")
 
             response = self.client.responses.create(**kwargs)
 
