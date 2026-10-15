@@ -136,6 +136,7 @@ class SettingsWindow(QDialog):
             "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
             "browser": ("fa5s.globe", "Browser"),
             "terminal": ("fa5s.terminal", "Terminal"),
+            "vision": ("fa5s.robot", "Vision"),
             "context": ("fa5s.file-alt", "Context"),
             "debug": ("fa5s.bug", "Debug")
         }
@@ -185,6 +186,7 @@ class SettingsWindow(QDialog):
             "compact": self._create_compact_mode_section(),
             "browser": self._create_browser_section(),
             "terminal": self._create_terminal_section(),
+            "vision": self._create_vision_section(),
             "context": self._create_context_section(),
             "debug": self._create_debug_section()
         }
@@ -289,6 +291,10 @@ class SettingsWindow(QDialog):
         self.shell_timeout_spinbox.setValue(int(terminal_settings.get("shell_timeout_seconds", 60) or 60))
         self.shell_detach_spinbox.setValue(int(terminal_settings.get("shell_detach_seconds", 25) or 25))
 
+        # Vision (agent loop; default OFF)
+        vision_cfg = self.settings_manager.get("vision", {})
+        self.allow_shell_commands_checkbox.setChecked(bool(vision_cfg.get("allow_shell_commands", False)))
+
         # Debug (keys persist under "omniparser" for now; the recognizer
         # service will adopt them later)
         omniparser_settings = self.settings_manager.get("omniparser", {})
@@ -391,10 +397,12 @@ class SettingsWindow(QDialog):
         except Exception:
             pass
 
-        # No Vision widgets remain (plan-era section removed; the unified
-        # agent loop is governed by the Agent tab). Preserve stored keys so
-        # saving never silently drops them.
-        vision_settings = {}
+        # Vision agent loop: single checkbox; the unified error policy
+        # lives on the Agent tab. Preserve other stored keys so saving
+        # never silently drops them.
+        vision_settings = {
+            "allow_shell_commands": self.allow_shell_commands_checkbox.isChecked(),
+        }
         try:
             existing_vision = self.settings_manager.get("vision", {}) or {}
             for key, value in existing_vision.items():
@@ -690,6 +698,24 @@ class SettingsWindow(QDialog):
         position_layout.addWidget(self._create_help_label(position_tooltip), 0, 1, Qt.AlignTop)
         position_layout.addWidget(position_grid_widget, 0, 2)
         tab_layout.addWidget(position_group)
+
+        return group
+
+    def _create_vision_section(self):
+        """Creates the Vision Mode settings section (agent loop tunables)."""
+        group = QGroupBox("Vision Mode (agent loop)")
+        vision_layout = QGridLayout(group)
+        vision_layout.setColumnStretch(2, 1)
+
+        self.allow_shell_commands_checkbox = QCheckBox(
+            "Allow terminal commands in Vision mode")
+        shell_tooltip = ("Lets the agent open a terminal itself (Win+R) for "
+                         "quick checks (sizes, counts) or operations faster "
+                         "through shell than GUI. Read-only checks are fine; "
+                         "modifying commands still need your approval. "
+                         "Off by default.")
+        self.allow_shell_commands_checkbox.setToolTip(shell_tooltip)
+        vision_layout.addWidget(self.allow_shell_commands_checkbox, 0, 0, 1, 4)
 
         return group
 

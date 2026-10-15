@@ -523,6 +523,14 @@ class VisionHandler(BaseAgent):
 
     # -- agent loop (BaseAgent discipline, CUA tail) --------------------
 
+    def _cua_shell_allowed(self) -> bool:
+        """Live read of the Vision settings checkbox (default OFF)."""
+        try:
+            cfg = self.settings.get("vision", {}) or {}
+            return bool(cfg.get("allow_shell_commands", False))
+        except Exception:
+            return False
+
     def _cua_system_prompt(self) -> str:
         if getattr(self, "_cua_system_cache", None) is None:
             text = ""
@@ -537,7 +545,21 @@ class VisionHandler(BaseAgent):
             except Exception as e:
                 logging.warning(f"CUA system prompt missing: {e}")
             self._cua_system_cache = text
-        return self._cua_system_cache or ""
+        base_text = self._cua_system_cache or ""
+        if self._cua_shell_allowed():
+            return base_text + (
+                "\n- Ground-truth verification: when a task needs facts the "
+                "screenshots can't prove (folder sizes, file counts, disk "
+                "state), you may open a terminal yourself (Win+R, type "
+                "powershell, Enter), type the checking command, and read "
+                "its output from the next screenshot. Prefer read-only "
+                "commands. Anything modifying or deleting falls under the "
+                "destruction rule above and requires user approval first."
+            )
+        return base_text + (
+            "\n- Work through the graphical interface only. Do not open "
+            "terminal or console windows and do not type shell commands."
+        )
 
     def _continue_loop(self, last_command_output=None):
         # Counting + escalation: same doctrine as Terminal/Browser (one
