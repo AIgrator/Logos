@@ -1227,6 +1227,7 @@ class UIManager(QWidget):
             self.switchToCompactMode()
 
     def switchToCompactMode(self):
+        logging.info("switchToCompactMode: enter")
         self.is_compact = True
         self.compact_position = self.settings_manager.get("compact_mode", {}).get("position", "bottom_center")
         self.attachment_scroll_area.setVisible(False)
@@ -1241,6 +1242,7 @@ class UIManager(QWidget):
         self.animate_geometry(self.compact_mode_geometry)
         self.tooltip_manager.install(self.toggle_button, "Maximize")
         self.toggle_button_hover_filter.set_icon_names('fa5s.expand')
+        logging.info("switchToCompactMode: done")
 
     def is_click_colliding(self, x: int, y: int) -> bool:
         if not self.is_compact:
@@ -1286,6 +1288,7 @@ class UIManager(QWidget):
         self.main_window.setGeometry(QRect(x, y, width, height))
 
     def switchToFullMode(self):
+        logging.info("switchToFullMode: enter")
         self.is_compact = False
         self.custom_title_bar.setVisible(False)
         self.main_window.size_grip.setVisible(False)
@@ -1302,6 +1305,7 @@ class UIManager(QWidget):
         self.animate_geometry(self.full_mode_geometry, self.chat_widget.scroll_to_last_user_message)
         self.tooltip_manager.install(self.toggle_button, "Minimize")
         self.toggle_button_hover_filter.set_icon_names('fa5s.compress')
+        logging.info("switchToFullMode: done")
 
     def animate_geometry(self, target_geometry, on_finished=None):
         self.animation = QPropertyAnimation(self.main_window, b"geometry")

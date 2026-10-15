@@ -624,10 +624,22 @@ class VisionHandler(BaseAgent):
         self.start_task(combined)
 
     def _answer_question(self, answer: str):
-        """Feeds a pending confirmation answer by restarting the chain."""
+        """Feeds a pending confirmation answer by restarting the chain.
+
+        A refusal ABORTS the task outright — restarting with "continue
+        accordingly" lets a small model reinterpret 'no' as permission
+        (observed live with the recycle bin).
+        """
         question = getattr(self, "_pending_question", None)
         self._pending_question = None
         if not question:
+            return
+        refusal = (answer or "").strip().lower()
+        if refusal in ("нет", "no", "не", "не надо", "не нужно", "не делай",
+                       "stop", "стоп", "отмена", "отменить", "нельзя"):
+            self.command_history.append(f"User answered: {answer} (abort)")
+            self.ui.add_message("<i>Остановлено пользователем.</i>")
+            self.stop()
             return
         base = self.original_user_request or ""
         combined = (f"{base}\n\nYou asked the user for confirmation: "
@@ -803,14 +815,23 @@ class VisionHandler(BaseAgent):
                 if verdict is True:
                     self._answer_question("да")
                 elif verdict is False:
-                    self._answer_question("нет")
+                    # "No" to a confirmation question ABORTS the task —
+                    # never "continue accordingly" (a small model may
+                    # reinterpret that as permission; observed live).
+                    self._pending_question = None
+                    self.command_history.append("User answered: нет (abort)")
+                    self.ui.add_message(
+                        "<i>Остановлено пользователем.</i>")
+                    self.stop()
                 # None (dismissed): stay paused, the user can type the answer.
                 return
             self.command_history.append(f"Computer-use finished: {text[:300]}")
             self.ui.add_text(text, prefix_html="<b>Vision:</b> ")
             self._consecutive_errors = 0
             self._assessment_sent = False
+            logging.info("task-done: restoring full mode")
             self._exit_compact()
+            logging.info("task-done: full mode restored, going IDLE")
             self._set_state(VisionState.IDLE)
             return
         if outcome.get("action_error"):
