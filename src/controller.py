@@ -733,6 +733,27 @@ class AppController(QObject):
             logging.error(f"Safety approval dialog failed: {e}")
             return False
 
+    def ask_user_text(self, question: str):
+        """Modal question with a free-text answer (Vision ask_user tool).
+
+        Returns the typed answer, "" on empty OK, or None if dismissed
+        (the task then pauses and the user can steer via chat).
+        GUI thread only.
+        """
+        from PySide6.QtWidgets import QInputDialog
+        try:
+            answer, ok = QInputDialog.getText(
+                self.ui,
+                "Vision asks",
+                question,
+            )
+            if not ok:
+                return None
+            return answer
+        except Exception as e:
+            logging.error(f"ask dialog failed: {e}")
+            return None
+
     def _handle_retry_request(self):
         """Re-send the last LLM request (Retry button on transient-error cards)."""
         self._resend_last_request(

@@ -45,11 +45,10 @@ MAX_CUA_TURNS = 20
 NETWORK_HINT = "cua-turn"
 
 # The only kwargs computer_use_turn() accepts. The worker request dict may
-# carry extra local meta (tag, turn_no, debug_flags, prev_shot_file, ...);
-# the allowlist keeps them from leaking into the provider call (TypeError).
+# carry extra local meta (tag, turn_no, debug_flags, ...); the allowlist
+# keeps them from leaking into the provider call (TypeError).
 _PROVIDER_KWARGS = frozenset({
-    "task", "call_id", "screenshot_b64", "previous_response_id",
-    "acknowledged_safety_checks", "instructions",
+    "task", "outputs", "previous_response_id", "instructions",
 })
 
 KEY_ALIASES = {
@@ -223,6 +222,7 @@ class CuaTurnWorker(QThread):
 
     turn_done = Signal(dict)      # outcome payload (see _finish)
     safety_needed = Signal(list)  # pending_safety_checks -> GUI approval
+    ask_needed = Signal(list)     # ask_user calls -> GUI question dialogs
     ensure_visible = Signal(float, float)  # point must not hide under us
     progress = Signal(str)
 
@@ -234,8 +234,15 @@ class CuaTurnWorker(QThread):
         self._stop = False
         self._safety_event = threading.Event()
         self._safety_approved = False
+        self._ask_event = threading.Event()
+        self._ask_answers = None  # None = cancelled
         self._visible_event = threading.Event()
         self._visible_moved = False
+
+    def resolve_ask(self, answers):
+        """answers: list of {"call_id":..., "answer": str|None} or None."""
+        self._ask_answers = answers
+        self._ask_event.set()
 
     def stop(self):
         self._stop = True
@@ -303,16 +310,21 @@ class CuaTurnWorker(QThread):
                 return
             self.progress.emit("Thinking (computer-use turn)…")
             first = protocol.get("previous_response_id") is None
+            outs = protocol.get("outputs") or []
             self._comm_log("REQUEST", {
                 "turn": turn_no,
                 "task": protocol.get("task"),
                 "instructions_chars": len(protocol.get("instructions") or ""),
                 "instructions": protocol.get("instructions") if first else "<chain continues>",
                 "previous_response_id": protocol.get("previous_response_id"),
-                "screenshot_sent": bool(protocol.get("screenshot_b64")),
-                "screenshot_bytes": len(protocol.get("screenshot_b64") or ""),
+                "outputs": [
+                    {"kind": o.get("kind"), "call_id": o.get("call_id"),
+                     "screenshot_bytes": len(o.get("screenshot_b64") or ""),
+                     "output_text": (o.get("output_text") or "")[:300],
+                     "ack": bool(o.get("acknowledged_safety_checks"))}
+                    for o in outs
+                ],
                 "screenshot_sent_file": prev_shot_file,
-                "acknowledged_safety_checks": protocol.get("acknowledged_safety_checks"),
             })
             t0 = time.perf_counter()
             turn = self._provider.computer_use_turn(**protocol)
@@ -324,6 +336,7 @@ class CuaTurnWorker(QThread):
                 "call_id": turn.get("call_id"),
                 "actions": turn.get("actions"),
                 "pending_safety_checks": turn.get("pending_safety_checks"),
+                "ask": turn.get("ask"),
                 "done_text": turn.get("done_text"),
             })
 
@@ -345,12 +358,15 @@ class CuaTurnWorker(QThread):
                 ack = [{"id": c.get("id"), "code": c.get("code"),
                         "message": c.get("message")} for c in checks]
                 follow = dict(protocol)
-                follow["acknowledged_safety_checks"] = ack
+                follow["outputs"] = [
+                    dict(o, acknowledged_safety_checks=ack)
+                    if o.get("kind") == "computer" else dict(o)
+                    for o in (follow.get("outputs") or [])
+                ]
                 self._comm_log("REQUEST", {
                     "turn": turn_no,
                     "replay_with_ack": True,
                     "acknowledged_safety_checks": ack,
-                    "screenshot_sent": bool(follow.get("screenshot_b64")),
                 })
                 t0 = time.perf_counter()
                 turn = self._provider.computer_use_turn(**follow)
@@ -363,6 +379,7 @@ class CuaTurnWorker(QThread):
                     "call_id": turn.get("call_id"),
                     "actions": turn.get("actions"),
                     "pending_safety_checks": turn.get("pending_safety_checks"),
+                    "ask": turn.get("ask"),
                     "done_text": turn.get("done_text"),
                 })
 
@@ -374,6 +391,49 @@ class CuaTurnWorker(QThread):
             actions = turn.get("actions") or []
             done_text = turn.get("done_text")
 
+            # Explicit ask_user calls: the model itself decided by meaning
+            # that a human answer is needed. Resolve via GUI dialogs first;
+            # answers ride the NEXT turn as function outputs (same chain).
+            asks = turn.get("ask") or []
+            function_outs: list = []
+            asked_log: list = []
+            if asks and not self._stop:
+                self.progress.emit("Waiting for your answer…")
+                self.ask_needed.emit(asks)
+                self._ask_event.wait()
+                if self._stop:
+                    outcome = {"aborted": True}
+                    self.turn_done.emit(outcome)
+                    return
+                if self._ask_answers is None:
+                    outcome = {
+                        "ask_cancelled": True,
+                        "asks": asks,
+                        "response_id": turn.get("response_id"),
+                    }
+                    self._comm_log("CONSUMED", {
+                        "turn": turn_no,
+                        "status": "ask_cancelled",
+                    })
+                    self.turn_done.emit(outcome)
+                    return
+                by_id = {a.get("call_id"): a.get("question", "")
+                         for a in asks}
+                for ans in self._ask_answers:
+                    function_outs.append({
+                        "kind": "function",
+                        "call_id": ans.get("call_id"),
+                        "output_text": ans.get("answer", ""),
+                    })
+                    asked_log.append({
+                        "question": by_id.get(ans.get("call_id"), ""),
+                        "answer": ans.get("answer", ""),
+                    })
+                self._comm_log("CONSUMED", {
+                    "turn": turn_no,
+                    "asked": asked_log,
+                })
+
             if flags.get("save_pre"):
                 try:
                     pre_b64, _, _ = self._handler.capture_screenshot_b64()
@@ -381,15 +441,15 @@ class CuaTurnWorker(QThread):
                 except Exception as e:
                     logging.warning(f"pre-action shot failed: {e}")
 
-            if not actions and not (done_text or "").strip():
-                # Empty turn (no actions, no text): the model stalled instead
-                # of acting. Must NOT count as done — route to escalation.
+            if not actions and not (done_text or "").strip() and not function_outs:
+                # Empty turn (no actions, no text, no questions): the model
+                # stalled instead of acting. Must NOT count as done.
                 outcome = {
                     "action_error": "**Error:** model returned an empty turn "
                                     "(no actions, no text) — stuck, not done.",
                     "executed": [],
                     "response_id": turn.get("response_id"),
-                    "call_id": turn.get("call_id"),
+                    "next_outputs": [],
                 }
                 self._handler.trace_turn(tag, turn_no, [], False, None)
                 self._comm_log("CONSUMED", {
@@ -399,7 +459,7 @@ class CuaTurnWorker(QThread):
                 self.turn_done.emit(outcome)
                 return
 
-            if not actions:
+            if not actions and not function_outs:
                 outcome = {
                     "done": True,
                     "done_text": done_text or "",
@@ -431,17 +491,29 @@ class CuaTurnWorker(QThread):
                     executed_raw.append(action)
                 except Exception as e:
                     logging.warning(f"CUA action failed: {action} -> {e}")
+                    err_b64, _, _ = self._handler.capture_screenshot_b64()
+                    err_outs = list(function_outs)
+                    if turn.get("call_id"):
+                        err_outs.append({
+                            "kind": "computer",
+                            "call_id": turn.get("call_id"),
+                            "screenshot_b64": err_b64,
+                        })
                     outcome = {
                         "action_error": f"**Error:** {describe_action(action)} failed: {e}",
                         "executed": executed,
                         "response_id": turn.get("response_id"),
-                        "call_id": turn.get("call_id"),
+                        "next_outputs": err_outs,
+                        "asked": asked_log,
                     }
-                    self._handler.trace_turn(tag, turn_no, executed_raw, False, None)
+                    self._handler.trace_turn(
+                        tag, turn_no, executed_raw, False, None,
+                        asked=asked_log)
                     self._comm_log("CONSUMED", {
                         "turn": turn_no,
                         "status": "action_error",
                         "executed": executed,
+                        "asked": asked_log,
                         "error": outcome["action_error"],
                     })
                     self.turn_done.emit(outcome)
@@ -456,20 +528,29 @@ class CuaTurnWorker(QThread):
                         annotate_with=executed_raw)
                 except Exception as e:
                     logging.warning(f"post-action shot failed: {e}")
+            next_outputs = list(function_outs)
+            if turn.get("call_id"):
+                next_outputs.append({
+                    "kind": "computer",
+                    "call_id": turn.get("call_id"),
+                    "screenshot_b64": shot_b64,
+                })
             self._handler.trace_turn(
                 tag, turn_no, executed_raw,
-                bool(turn.get("pending_safety_checks")), shot_file)
+                bool(turn.get("pending_safety_checks")), shot_file,
+                asked=asked_log)
             self._comm_log("CONSUMED", {
                 "turn": turn_no,
                 "executed": executed,
+                "asked": asked_log,
                 "post_screenshot_file": shot_file,
             })
             outcome = {
                 "executed": executed,
                 "response_id": turn.get("response_id"),
-                "call_id": turn.get("call_id"),
-                "screenshot_b64": shot_b64,
+                "asked": asked_log,
                 "shot_file": shot_file,
+                "next_outputs": next_outputs,
             }
             self.turn_done.emit(outcome)
         except Exception as e:
@@ -503,7 +584,7 @@ class VisionHandler(BaseAgent):
         )
         # Chain state for the server-side conversation (previous_response_id).
         self._cua_response_id = None
-        self._cua_call_id = None
+        self._cua_outbox = []  # outputs answered into the next turn
         self._cua_turns = 0
         self._worker = None
         self._compact_owned = False
@@ -651,7 +732,7 @@ class VisionHandler(BaseAgent):
             self._steer_with_text(user_text.strip())
             return
         self._cua_response_id = None
-        self._cua_call_id = None
+        self._cua_outbox = []
         self._cua_turns = 0
         self._cua_tag = time.strftime("%H%M%S")
         self._last_shot_file = None
@@ -789,15 +870,19 @@ class VisionHandler(BaseAgent):
         self._start_thinking_timer("Thinking (computer use)…")
         debug_flags = self._debug_flags()
         if self._cua_response_id is None:
+            # First turn, or error retry before any response arrived.
             request = {"task": self.original_user_request,
                        "instructions": self._cua_system_prompt()}
         else:
             request = {
-                "call_id": self._cua_call_id,
-                "screenshot_b64": self._last_screenshot_b64,
                 "previous_response_id": self._cua_response_id,
+                "outputs": list(getattr(self, "_cua_outbox", None) or []),
                 "prev_shot_file": getattr(self, "_last_shot_file", None),
             }
+        if not request.get("task") and not request.get("outputs"):
+            self._continue_loop(
+                "**Error:** nothing to send (no task, no outputs).")
+            return
         request.update({
             "tag": getattr(self, "_cua_tag", "cua"),
             "turn_no": self._cua_turns + 1,
@@ -807,6 +892,7 @@ class VisionHandler(BaseAgent):
         self._worker = CuaTurnWorker(self, self._provider(), request)
         self._worker.turn_done.connect(self._on_turn_done)
         self._worker.safety_needed.connect(self._on_safety_needed)
+        self._worker.ask_needed.connect(self._on_ask_needed)
         self._worker.ensure_visible.connect(self._on_ensure_visible)
         self._worker.progress.connect(
             lambda msg: self.ui.add_message(f"<i>{msg}</i>"))
@@ -836,12 +922,20 @@ class VisionHandler(BaseAgent):
             self._stop_thinking_timer()
             self._continue_loop(outcome["fatal"])
             return
+        if outcome.get("ask_cancelled"):
+            self.ui.add_message(
+                "<i>Question dismissed — paused. Type guidance to steer, "
+                "or Resume to continue.</i>")
+            self._exit_compact()
+            self._set_state(VisionState.PAUSED_ON_ERROR)
+            self._stop_thinking_timer()
+            return
         if outcome.get("done"):
             self._stop_thinking_timer()
             text = outcome.get("done_text") or "Done."
             # Done text is a report, nothing more. Questions to the human
-            # go through pending_safety_checks (the protocol's own channel),
-            # never through punctuation matching.
+            # go through the ask_user tool (explicit call) or safety flags
+            # (native channel) — never through text matching.
             self.command_history.append(f"Computer-use finished: {text[:300]}")
             self.ui.add_text(text, prefix_html="<b>Vision:</b> ")
             self._consecutive_errors = 0
@@ -856,13 +950,16 @@ class VisionHandler(BaseAgent):
             self._continue_loop(outcome["action_error"])
             return
         executed = outcome.get("executed") or []
+        asked = outcome.get("asked") or []
         self._cua_response_id = outcome.get("response_id")
-        self._cua_call_id = outcome.get("call_id")
-        self._last_screenshot_b64 = outcome.get("screenshot_b64")
+        self._cua_outbox = outcome.get("next_outputs") or []
         self._last_shot_file = outcome.get("shot_file")
         self._cua_turns += 1
+        parts = list(executed)
+        parts += [f"asked: {a.get('question', '')[:80]}"
+                  for a in asked]
         line = f"turn {self._cua_turns}: " + (
-            ", ".join(executed) if executed else "screenshot")
+            ", ".join(parts) if parts else "screenshot")
         self.ui.add_message(f"<i>👁 {line}</i>")
         self._continue_loop(line)
 
@@ -875,6 +972,27 @@ class VisionHandler(BaseAgent):
             approved = False
         if worker is not None:
             worker.resolve_safety(approved)
+
+    def _on_ask_needed(self, asks: list):
+        """One input dialog per question (GUI thread). Cancel pauses."""
+        worker = self._worker
+        answers: list | None = []
+        try:
+            for item in asks or []:
+                question = item.get("question", "")
+                self.ui.add_text(
+                    question, prefix_html="<b>Vision asks:</b> ")
+                answer = self.controller.ask_user_text(question)
+                if answer is None:
+                    answers = None
+                    break
+                answers.append({"call_id": item.get("call_id"),
+                                "answer": answer})
+        except Exception as e:
+            logging.error(f"ask dialog failed: {e}")
+            answers = None
+        if worker is not None:
+            worker.resolve_ask(answers)
 
     # -- provider / capture / performers ---------------------------------
 
@@ -998,7 +1116,8 @@ class VisionHandler(BaseAgent):
         return path
 
     def trace_turn(self, tag: str, turn_no: int, actions: list,
-                   had_safety: bool, shot_file: str | None) -> None:
+                   had_safety: bool, shot_file: str | None,
+                   asked: list | None = None) -> None:
         """One JSON line per turn into the single app timeline
         (respects save_trace_log). Lands in app.log via the llm_communication
         logger — no separate trace file anymore."""
@@ -1015,6 +1134,7 @@ class VisionHandler(BaseAgent):
             "actions": [describe_action(a) for a in (actions or [])],
             "raw_actions": actions or [],
             "safety": had_safety,
+            "asked": asked or [],
             "screenshot": shot_file,
         }
         try:
@@ -1175,7 +1295,7 @@ class VisionHandler(BaseAgent):
                 pass
         self._exit_compact()
         self._cua_response_id = None
-        self._cua_call_id = None
+        self._cua_outbox = []
 
     def cancel_job_wait(self):
         pass

@@ -239,8 +239,14 @@ class BaseLLMProvider(ABC):
         Executes one computer-use turn.
 
         First turn: pass `task` (and optionally an opening screenshot).
-        Following turns: pass `call_id` + fresh `screenshot_b64` +
-        `previous_response_id` from the previous turn.
+        Following turns: pass `previous_response_id` + `outputs` answered
+        from the previous turn (computer and/or function outputs).
+
+        Every computer-use provider implements BOTH approval paths:
+        native safety flags where the vendor supports them, and the
+        explicit `ask_user`-style function tool as the universal fallback
+        (the model calls it by meaning; the handler shows the dialog and
+        waits, then resumes the same chain with the answer).
 
         Returns a dict:
         {
@@ -248,6 +254,7 @@ class BaseLLMProvider(ABC):
             "call_id": str | None,
             "response_id": str | None,
             "pending_safety_checks": [ {"id":..., "code":..., "message":...} ],
+            "ask": [ {"call_id":..., "question":...} ],
             "done_text": str | None   # final answer when the model stops calling
         }
         """

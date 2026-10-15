@@ -78,13 +78,33 @@ class OpenAIProvider(BaseLLMProvider):
     def supports_computer_use(self) -> bool:
         return True
 
+    ASK_USER_TOOL = {
+        "type": "function",
+        "name": "ask_user",
+        "description": (
+            "Show the human a modal dialog with your question and wait "
+            "for their answer. Use it before any destructive, "
+            "irreversible, or transmitting action, and whenever the task "
+            "cannot proceed safely without clarification. The human's "
+            "answer returns as this call's result; then continue."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The exact question to show the human.",
+                }
+            },
+            "required": ["question"],
+        },
+    }
+
     def computer_use_turn(
         self,
         task: str | None = None,
-        call_id: str | None = None,
-        screenshot_b64: str | None = None,
+        outputs: list | None = None,
         previous_response_id: str | None = None,
-        acknowledged_safety_checks: list | None = None,
         instructions: str | None = None
     ) -> dict:
         """
@@ -92,12 +112,19 @@ class OpenAIProvider(BaseLLMProvider):
         `computer` tool — NOT the code-execution path: we execute actions with
         our own deterministic tools, never model-written code).
 
-        When the model judges an action risky it attaches
-        `pending_safety_checks` to the computer_call — our handler shows the
-        approval dialog and waits (the model calls, we display, it waits).
+        Tools sent: `computer` + the `ask_user` function tool, so the model
+        itself decides by meaning when a human answer is needed. The loop
+        blocks on our dialog and resumes with the answer in the same chain
+        (no restarts, no punctuation heuristics).
+
+        `outputs` (follow-up turns) is a list of:
+          {"kind": "computer", "call_id":..., "screenshot_b64":...,
+           "acknowledged_safety_checks": [...] or None}
+          {"kind": "function", "call_id":..., "output_text":...}
 
         Returns {"actions", "call_id", "response_id",
-                 "pending_safety_checks", "done_text"} per BaseLLMProvider.
+                 "pending_safety_checks", "done_text",
+                 "ask": [{"call_id":..., "question":...}]}.
         """
         from openai import (
             AuthenticationError, RateLimitError,
@@ -107,26 +134,37 @@ class OpenAIProvider(BaseLLMProvider):
             if previous_response_id is None:
                 if not task:
                     raise ValueError("First computer-use turn requires a task.")
-                input_items = task
+                input_items: list = [task] if isinstance(task, str) else task
             else:
-                if not call_id or not screenshot_b64:
-                    raise ValueError("Follow-up turn requires call_id + screenshot_b64.")
-                output: dict = {
-                    "type": "computer_screenshot",
-                    "image_url": f"data:image/png;base64,{screenshot_b64}",
-                }
-                call_output: dict = {
-                    "type": "computer_call_output",
-                    "call_id": call_id,
-                    "output": output,
-                }
-                if acknowledged_safety_checks:
-                    call_output["acknowledged_safety_checks"] = acknowledged_safety_checks
-                input_items = [call_output]
+                if not outputs:
+                    raise ValueError("Follow-up turn requires outputs.")
+                input_items = []
+                for out in outputs:
+                    if out.get("kind") == "computer":
+                        shot = {
+                            "type": "computer_screenshot",
+                            "image_url": (f"data:image/png;base64,"
+                                          f"{out['screenshot_b64']}"),
+                        }
+                        item: dict = {
+                            "type": "computer_call_output",
+                            "call_id": out["call_id"],
+                            "output": shot,
+                        }
+                        if out.get("acknowledged_safety_checks"):
+                            item["acknowledged_safety_checks"] = \
+                                out["acknowledged_safety_checks"]
+                        input_items.append(item)
+                    else:
+                        input_items.append({
+                            "type": "function_call_output",
+                            "call_id": out["call_id"],
+                            "output": out.get("output_text", ""),
+                        })
 
             kwargs: dict = {
                 "model": self.model,
-                "tools": [{"type": "computer"}],
+                "tools": [{"type": "computer"}, self.ASK_USER_TOOL],
                 "input": input_items,
                 "timeout": 90,
             }
@@ -143,6 +181,7 @@ class OpenAIProvider(BaseLLMProvider):
             actions: list = []
             out_call_id = None
             safety: list = []
+            asks: list = []
             for item in (response.output or []):
                 if getattr(item, "type", "") == "computer_call":
                     out_call_id = getattr(item, "call_id", None)
@@ -156,6 +195,18 @@ class OpenAIProvider(BaseLLMProvider):
                         c if isinstance(c, dict) else c.to_dict()
                         for c in raw_checks
                     ]
+                elif getattr(item, "type", "") == "function_call":
+                    try:
+                        import json as _json
+                        args = _json.loads(getattr(item, "arguments", "") or "{}")
+                    except Exception:
+                        args = {}
+                    if getattr(item, "name", "") == "ask_user":
+                        asks.append({
+                            "call_id": getattr(item, "call_id", None),
+                            "question": args.get("question", ""),
+                        })
+
             done_text = None
             try:
                 done_text = response.output_text or None
@@ -168,6 +219,7 @@ class OpenAIProvider(BaseLLMProvider):
                 "response_id": getattr(response, "id", None),
                 "pending_safety_checks": safety,
                 "done_text": done_text,
+                "ask": asks,
             }
 
         except (AuthenticationError, RateLimitError) as e:
