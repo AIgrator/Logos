@@ -24,6 +24,32 @@ def main():
 
     splash = None
 
+    def _close_native_splash():
+        """Kills the transparent pre-splash started by bin/logos.bat (if any)."""
+        try:
+            import subprocess
+            import tempfile
+            pid_file = os.path.join(tempfile.gettempdir(), "logos_splash.pid")
+            if not os.path.exists(pid_file):
+                return
+            with open(pid_file) as f:
+                pid = int(f.read().strip())
+            out = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.lower()
+            if "powershell" in out or "pwsh" in out:
+                subprocess.run(
+                    ["taskkill", "/PID", str(pid), "/F"],
+                    capture_output=True, timeout=10,
+                )
+            try:
+                os.remove(pid_file)
+            except Exception:
+                pass
+        except Exception:
+            pass
+
     def _phase(name):
         print(f"[+{time.perf_counter() - _start_t:.1f}s] {name}", flush=True)
         if splash is not None:
@@ -81,6 +107,7 @@ def main():
     if '--run-setup' in sys.argv:
         # The setup wizard now handles its own theme application
         # (app instance already exists — created early for the splash path)
+        _close_native_splash()
         setup_successful = run_setup_wizard(settings_manager)
         sys.exit(0 if setup_successful else 1)
     # --- End Setup-only mode ---
@@ -142,6 +169,7 @@ def main():
         splash.show()
         splash.showMessage("Starting Logos…", Qt.AlignBottom | Qt.AlignHCenter)
         app.processEvents()
+        _close_native_splash()  # Qt splash takes over from here
         _phase("splash shown")
     except Exception as e:
         print(f"splash failed: {e}", flush=True)
