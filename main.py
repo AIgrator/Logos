@@ -22,15 +22,39 @@ def main():
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Application starting, please wait for modules to load...")
     _start_t = time.perf_counter()
 
+    splash = None
+
     def _phase(name):
         print(f"[+{time.perf_counter() - _start_t:.1f}s] {name}", flush=True)
+        if splash is not None:
+            try:
+                from PySide6.QtCore import Qt
+                splash.showMessage(name, Qt.AlignBottom | Qt.AlignHCenter)
+                app.processEvents()
+            except Exception:
+                pass
 
     # Now perform the heavy imports
     # import shutil
     # import threading
-    from PySide6.QtWidgets import QApplication
+    from PySide6.QtWidgets import QApplication, QSplashScreen
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     _phase("Qt imports done")
+
+    # --- Set AppUserModelID for Windows Taskbar Icon ---
+    # This must be done BEFORE the QApplication is instantiated to ensure Windows
+    # associates the correct icon with the process from the very beginning.
+    if sys.platform == "win32":
+        import ctypes
+        myappid = 'Aigrator.Logos.Assistant.1' # arbitrary unique string
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
+    # --- End AppUserModelID ---
+
+    # Create the application EARLY so a splash screen covers the rest of
+    # startup (settings, controller). Without it the user stares at nothing
+    # for seconds — and EXE builds have no console at all.
+    app = QApplication.instance() or QApplication(sys.argv)
+    _phase("QApplication created")
 
     # Add the 'src' directory to the Python path
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
@@ -55,8 +79,8 @@ def main():
 
     # --- Setup-only mode ---
     if '--run-setup' in sys.argv:
-        app = QApplication(sys.argv)
         # The setup wizard now handles its own theme application
+        # (app instance already exists — created early for the splash path)
         setup_successful = run_setup_wizard(settings_manager)
         sys.exit(0 if setup_successful else 1)
     # --- End Setup-only mode ---
@@ -84,18 +108,6 @@ def main():
     working_directory = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else original_cwd
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Effective working directory: {working_directory}")
 
-    # --- Set AppUserModelID for Windows Taskbar Icon ---
-    # This must be done BEFORE the QApplication is instantiated to ensure Windows
-    # associates the correct icon with the process from the very beginning.
-    if sys.platform == "win32":
-        import ctypes
-        myappid = 'Aigrator.Logos.Assistant.1' # arbitrary unique string
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-    # --- End AppUserModelID ---
-
-    app = QApplication(sys.argv)
-    _phase("QApplication created")
-
     local_server = None
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] app initialized")
     # --- Single Instance Check ---
@@ -119,6 +131,22 @@ def main():
             local_server.listen(server_name)
     # --- End Single Instance Check ---
 
+    # Splash covers the remaining startup (first paint ~0.2s after launch,
+    # so the user never stares at nothing — EXE builds have no console).
+    try:
+        from PySide6.QtGui import QPixmap
+        from PySide6.QtCore import Qt
+        pix = QPixmap("assets/ico.png").scaled(
+            256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        splash = QSplashScreen(pix, Qt.WindowStaysOnTopHint)
+        splash.show()
+        splash.showMessage("Starting Logos…", Qt.AlignBottom | Qt.AlignHCenter)
+        app.processEvents()
+        _phase("splash shown")
+    except Exception as e:
+        print(f"splash failed: {e}", flush=True)
+        splash = None
+
     # --- First Run Setup ---
     # Check if settings exist. If not, this is the first run.
     if not os.path.exists(settings_manager.SETTINGS_FILE):
@@ -134,6 +162,12 @@ def main():
             settings_manager.set("theme", "dark")
 
         # 2. Run the setup wizard to get API keys, etc.
+        if splash is not None:
+            try:
+                splash.close()
+            except Exception:
+                pass
+            splash = None
         if not run_setup_wizard(settings_manager):
             sys.exit(0) # User cancelled setup
     # --- End First Run Setup ---
@@ -157,6 +191,16 @@ def main():
 
     controller.run()
     _phase("controller.run done (window should be visible)")
+
+    if splash is not None:
+        try:
+            main_window = getattr(getattr(controller, "ui", None), "main_window", None)
+            if main_window is not None:
+                splash.finish(main_window)
+            else:
+                splash.close()
+        except Exception:
+            pass
 
     sys.exit(app.exec())
 
