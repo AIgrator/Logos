@@ -44,6 +44,14 @@ from src.handlers.base_agent import (
 MAX_CUA_TURNS = 20
 NETWORK_HINT = "cua-turn"
 
+# The only kwargs computer_use_turn() accepts. The worker request dict may
+# carry extra local meta (tag, turn_no, debug_flags, prev_shot_file, ...);
+# the allowlist keeps them from leaking into the provider call (TypeError).
+_PROVIDER_KWARGS = frozenset({
+    "task", "call_id", "screenshot_b64", "previous_response_id",
+    "acknowledged_safety_checks", "instructions",
+})
+
 KEY_ALIASES = {
     "return": "enter",
     "escape": "esc",
@@ -254,12 +262,17 @@ class CuaTurnWorker(QThread):
 
     def run(self):
         outcome: dict
-        # Split BEFORE try: except-block references these, so they must exist
-        # even if the first line inside try raises.
-        protocol = dict(self._request)
-        tag = protocol.pop("tag", "cua")
-        turn_no = protocol.pop("turn_no", 0)
-        flags = protocol.pop("debug_flags", None) or {}
+        # Only these keys may reach the provider. Everything else in the
+        # request dict is local meta (tag/turn/debug/refs) — newly added
+        # meta fields can never leak into computer_use_turn again.
+        # Split BEFORE try: except-block references these, so they must
+        # exist even if the first line inside try raises.
+        protocol = {k: v for k, v in self._request.items()
+                    if k in _PROVIDER_KWARGS}
+        tag = self._request.get("tag", "cua")
+        turn_no = self._request.get("turn_no", 0)
+        flags = self._request.get("debug_flags") or {}
+        prev_shot_file = self._request.get("prev_shot_file")
         try:
             from src.llm.base_provider import set_log_ctx
             set_log_ctx(f"Vision-{tag}", turn_no)
@@ -280,7 +293,7 @@ class CuaTurnWorker(QThread):
                 "previous_response_id": protocol.get("previous_response_id"),
                 "screenshot_sent": bool(protocol.get("screenshot_b64")),
                 "screenshot_bytes": len(protocol.get("screenshot_b64") or ""),
-                "screenshot_sent_file": protocol.get("prev_shot_file"),
+                "screenshot_sent_file": prev_shot_file,
                 "acknowledged_safety_checks": protocol.get("acknowledged_safety_checks"),
             })
             t0 = time.perf_counter()
