@@ -220,12 +220,18 @@ class CuaTurnWorker(QThread):
     def run(self):
         outcome: dict
         try:
+            # Split: protocol kwargs go to the provider; debug meta stays local.
+            # (Passing tag/turn_no/debug_flags into computer_use_turn crashes.)
+            protocol = dict(self._request)
+            tag = protocol.pop("tag", "cua")
+            turn_no = protocol.pop("turn_no", 0)
+            flags = protocol.pop("debug_flags", None) or {}
             if not self._paused_spin("before provider turn"):
                 outcome = {"aborted": True}
                 self.turn_done.emit(outcome)
                 return
             self.progress.emit("Thinking (computer-use turn)…")
-            turn = self._provider.computer_use_turn(**self._request)
+            turn = self._provider.computer_use_turn(**protocol)
 
             checks = turn.get("pending_safety_checks") or []
             if checks and not self._stop:
@@ -244,7 +250,7 @@ class CuaTurnWorker(QThread):
                 self.progress.emit("Safety approved — replaying turn…")
                 ack = [{"id": c.get("id"), "code": c.get("code"),
                         "message": c.get("message")} for c in checks]
-                follow = dict(self._request)
+                follow = dict(protocol)
                 follow["acknowledged_safety_checks"] = ack
                 turn = self._provider.computer_use_turn(**follow)
 
@@ -255,9 +261,6 @@ class CuaTurnWorker(QThread):
 
             actions = turn.get("actions") or []
             done_text = turn.get("done_text")
-            tag = self._request.get("tag", "cua")
-            turn_no = self._request.get("turn_no", 0)
-            flags = self._request.get("debug_flags") or {}
 
             if flags.get("save_pre"):
                 try:
