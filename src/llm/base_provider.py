@@ -72,6 +72,45 @@ class BaseLLMProvider(ABC):
 
         return response_dict
 
+    # --- Computer Use contract (optional; only providers with native support) ---
+
+    def supports_computer_use(self) -> bool:
+        """
+        Whether this provider can drive a computer-use loop (native grounding +
+        structured actions, e.g. OpenAI `computer` tool, Anthropic computer toolset).
+        The agent loop itself lives in the handler (screenshots, action execution,
+        safety approvals); the provider only implements one protocol turn.
+        """
+        return False
+
+    def computer_use_turn(
+        self,
+        task: str | None = None,
+        call_id: str | None = None,
+        screenshot_b64: str | None = None,
+        previous_response_id: str | None = None,
+        acknowledged_safety_checks: list[dict[str, Any]] | None = None
+    ) -> dict[str, Any]:
+        """
+        Executes one computer-use turn.
+
+        First turn: pass `task` (and optionally an opening screenshot).
+        Following turns: pass `call_id` + fresh `screenshot_b64` +
+        `previous_response_id` from the previous turn.
+
+        Returns a dict:
+        {
+            "actions": [ ...structured actions, possibly [{"type": "screenshot"}...] ],
+            "call_id": str | None,
+            "response_id": str | None,
+            "pending_safety_checks": [ {"id":..., "code":..., "message":...} ],
+            "done_text": str | None   # final answer when the model stops calling
+        }
+        """
+        raise NotImplementedError(
+            f"{type(self).__name__} does not implement computer use."
+        )
+
     def web_search(self, query: str) -> str | None:
         """
         Performs a web search if the provider supports it natively.

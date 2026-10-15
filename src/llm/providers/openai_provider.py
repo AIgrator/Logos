@@ -75,6 +75,101 @@ class OpenAIProvider(BaseLLMProvider):
             "supports_streaming_tools": True
         }
 
+    def supports_computer_use(self) -> bool:
+        return True
+
+    def computer_use_turn(
+        self,
+        task: str | None = None,
+        call_id: str | None = None,
+        screenshot_b64: str | None = None,
+        previous_response_id: str | None = None,
+        acknowledged_safety_checks: list | None = None
+    ) -> dict:
+        """
+        One turn of the OpenAI computer-use loop (Responses API, structured
+        `computer` tool — NOT the code-execution path: we execute actions with
+        our own deterministic tools, never model-written code).
+
+        Returns {"actions", "call_id", "response_id",
+                 "pending_safety_checks", "done_text"} per BaseLLMProvider.
+        """
+        from openai import (
+            AuthenticationError, RateLimitError,
+            APIConnectionError, APITimeoutError, APIError
+        )
+        try:
+            if previous_response_id is None:
+                if not task:
+                    raise ValueError("First computer-use turn requires a task.")
+                input_items = task
+            else:
+                if not call_id or not screenshot_b64:
+                    raise ValueError("Follow-up turn requires call_id + screenshot_b64.")
+                output: dict = {
+                    "type": "computer_screenshot",
+                    "image_url": f"data:image/png;base64,{screenshot_b64}",
+                }
+                call_output: dict = {
+                    "type": "computer_call_output",
+                    "call_id": call_id,
+                    "output": output,
+                }
+                if acknowledged_safety_checks:
+                    call_output["acknowledged_safety_checks"] = acknowledged_safety_checks
+                input_items = [call_output]
+
+            kwargs: dict = {
+                "model": self.model,
+                "tools": [{"type": "computer"}],
+                "input": input_items,
+            }
+            if previous_response_id is not None:
+                kwargs["previous_response_id"] = previous_response_id
+
+            response = self.client.responses.create(**kwargs)
+
+            actions: list = []
+            out_call_id = None
+            safety: list = []
+            for item in (response.output or []):
+                if getattr(item, "type", "") == "computer_call":
+                    out_call_id = getattr(item, "call_id", None)
+                    raw_actions = getattr(item, "actions", None) or []
+                    actions = [
+                        a if isinstance(a, dict) else a.to_dict()
+                        for a in raw_actions
+                    ]
+                    raw_checks = getattr(item, "pending_safety_checks", None) or []
+                    safety = [
+                        c if isinstance(c, dict) else c.to_dict()
+                        for c in raw_checks
+                    ]
+
+            done_text = None
+            try:
+                done_text = response.output_text or None
+            except Exception:
+                done_text = None
+
+            return {
+                "actions": actions,
+                "call_id": out_call_id,
+                "response_id": getattr(response, "id", None),
+                "pending_safety_checks": safety,
+                "done_text": done_text,
+            }
+
+        except (AuthenticationError, RateLimitError) as e:
+            raise FatalError(f"OpenAI computer-use auth/quota error: {e}") from e
+        except (APIConnectionError, APITimeoutError) as e:
+            raise RetryableError(f"OpenAI computer-use transient error: {e}") from e
+        except APIError as e:
+            status = getattr(e, "status_code", None)
+            if status is not None and 500 <= status < 600:
+                raise RetryableError(f"OpenAI computer-use server error ({status}): {e}") from e
+            raise FatalError(f"OpenAI computer-use error ({status}): {e}") from e
+
     def __init__(self, provider_config: dict):
         super().__init__(provider_config)
         api_url = self.provider_config.get("api_url")
