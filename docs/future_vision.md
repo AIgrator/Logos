@@ -22,9 +22,13 @@ Two structural limitations follow from this:
    `native` + `code` modes) assume a single agent loop with both.
    Our mode manifests forbid it.
 2. **Native provider toolsets don't fit the plan-approval loop.**
-   `computer_call` (OpenAI), `computer_toolset` (Anthropic) and
-   `computer_use` (Google Gemini 3.x) stream actions without an
-   upfront user-approved plan, which conflicts with the conductor concept.
+    `computer_call` (OpenAI), `computer_toolset` (Anthropic) and
+    `computer_use` (Google Gemini 3.x) stream actions without an
+    upfront user-approved plan, which conflicts with the conductor concept.
+    DECIDED (Oct 2026): the plan-approval loop is dropped entirely — Vision
+    moves to the agent loop (observe → act → assess) like Terminal/Browser,
+    so this limitation dissolves; escalation replaces plan approval as the
+    safety valve.
 
 ## Principle 1: separate grounding from execution
 
@@ -38,13 +42,17 @@ with three implementations:
 - `dom` — Playwright accessibility tree for web pages (precise
   selectors for forms, free of charge, no pixels involved).
 
-`VisionHandler` keeps its Planning → Execution → Evaluation → Correction
-loop untouched; only the coordinate source changes. Native providers
+`VisionHandler` is rebuilt on the `BaseAgent` loop (same as Terminal/Browser):
+no strategic plan, no `strategic_plan`/`evaluation` schemas, no plan-review UI.
+Only the coordinate source changes. DECIDED order (Oct 2026): **first native
+Computer Use, then the recognizer service** — i.e. `native` backend first,
+`local` extracted into a sidecar service second (with a stable element schema
+and a conformance test so any recognizer plugs in). Native providers
 currently capable: **OpenAI, Anthropic, Google** (Gemini 3.x has a
 built-in `computer_use` tool with desktop/browser/mobile environments,
 normalized 0–999 coordinates, safety decisions and prompt-injection
 detection). xAI, OpenRouter (a proxy) and Chinese API providers expose
-no equivalent tool — for them `local` remains.
+no equivalent tool — for them `local`/service remains.
 
 ## Principle 2: modes differ by toolset, not by universe
 
