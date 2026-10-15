@@ -500,6 +500,13 @@ class VisionHandler(BaseAgent):
             "model": model,
             "display": display,
         })
+        try:
+            self.ui.add_message(
+                "<i>👁 Computer use started — please don't touch the mouse or "
+                "keyboard until it finishes (any movement breaks clicks). "
+                "Stop button aborts.</i>")
+        except Exception:
+            pass
         super().start_task(user_text)
 
     def resume_with_guidance(self, user_text: str, attachments=None):
