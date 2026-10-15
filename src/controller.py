@@ -69,6 +69,9 @@ class AppController(QObject):
         self.vision = None  # Will be initialized in a background thread
         self.is_vision_module_initialized = False
         self.indexer = Indexer('.')
+        # File index lives for Terminal mode only (user choice): auto-rebuilds
+        # anywhere else are skipped; entering Terminal forces a fresh build.
+        self.indexer.is_active_cb = lambda: self.state == ControllerState.TERMINAL
         self.last_search_query = None
         self.indexer.index_updated.connect(self._on_index_updated)
 
@@ -986,6 +989,7 @@ class AppController(QObject):
         self._cleanup_and_switch_handler(self.terminal_handler, ControllerState.TERMINAL)
         self.ui.set_active_mode('terminal')
         self.ui.add_message("<i>Terminal mode enabled. I will now use terminal commands to accomplish tasks.</i>", force_scroll=True)
+        self.indexer.schedule_reindex(force=True)
 
     def _activate_browser_mode(self):
         self._cleanup_and_switch_handler(self.browser_handler, ControllerState.BROWSER)

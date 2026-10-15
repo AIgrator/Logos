@@ -44,7 +44,13 @@ class Indexer(QObject):
         self._lock = threading.Lock()
         self._reindex_timer = None
 
-        self.hardcoded_ignore_dirs: set[str] = {'.git', '.venv', 'venv', 'node_modules', '__pycache__'}
+        self.hardcoded_ignore_dirs: set[str] = {'.git', '.venv', 'venv', 'node_modules', '__pycache__',
+                                                # Machine-generated, high-churn dirs: screenshots
+                                                # (CUA debug shots every turn), logs, model cache.
+                                                'screenshots', 'logs', 'cache'}
+        # Optional gate: when set, auto-rebuilds run only while it returns
+        # True (the controller wires it to Terminal mode).
+        self.is_active_cb = None
 
         self.observer = Observer()
         self.event_handler = IndexerEventHandler(self)
@@ -73,11 +79,20 @@ class Indexer(QObject):
         if self._reindex_timer:
             self._reindex_timer.cancel()
 
-    def schedule_reindex(self):
+    def schedule_reindex(self, force: bool = False):
         """
         Schedules a re-index to occur after a short delay (debounce).
         This prevents rapid-fire re-indexing from multiple quick events.
+        Skipped while the activity gate says the index isn't needed
+        (Terminal-only by user choice) unless force=True.
         """
+        if not force and self.is_active_cb is not None:
+            try:
+                if not self.is_active_cb():
+                    logging.debug("Indexer: reindex skipped (not in Terminal mode).")
+                    return
+            except Exception:
+                pass
         with self._lock:
             if self._reindex_timer:
                 self._reindex_timer.cancel()
