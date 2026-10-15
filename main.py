@@ -22,8 +22,6 @@ def main():
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Application starting, please wait for modules to load...")
     _start_t = time.perf_counter()
 
-    splash = None
-
     def _close_native_splash():
         """Kills the transparent pre-splash started by bin/logos.bat (if any)."""
         try:
@@ -52,18 +50,11 @@ def main():
 
     def _phase(name):
         print(f"[+{time.perf_counter() - _start_t:.1f}s] {name}", flush=True)
-        if splash is not None:
-            try:
-                from PySide6.QtCore import Qt
-                splash.showMessage(name, Qt.AlignBottom | Qt.AlignHCenter)
-                app.processEvents()
-            except Exception:
-                pass
 
     # Now perform the heavy imports
     # import shutil
     # import threading
-    from PySide6.QtWidgets import QApplication, QSplashScreen
+    from PySide6.QtWidgets import QApplication
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     _phase("Qt imports done")
 
@@ -158,22 +149,9 @@ def main():
             local_server.listen(server_name)
     # --- End Single Instance Check ---
 
-    # Splash covers the remaining startup (first paint ~0.2s after launch,
-    # so the user never stares at nothing — EXE builds have no console).
-    try:
-        from PySide6.QtGui import QPixmap
-        from PySide6.QtCore import Qt
-        pix = QPixmap("assets/ico.png").scaled(
-            256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-        splash = QSplashScreen(pix, Qt.WindowStaysOnTopHint)
-        splash.show()
-        splash.showMessage("Starting Logos…", Qt.AlignBottom | Qt.AlignHCenter)
-        app.processEvents()
-        _close_native_splash()  # Qt splash takes over from here
-        _phase("splash shown")
-    except Exception as e:
-        print(f"splash failed: {e}", flush=True)
-        splash = None
+    # The transparent pre-splash from bin/logos.bat stays up for the whole
+    # startup (a Qt splash would only duplicate it — and appear later).
+    # It is closed once the main window is shown, see below.
 
     # --- First Run Setup ---
     # Check if settings exist. If not, this is the first run.
@@ -190,12 +168,8 @@ def main():
             settings_manager.set("theme", "dark")
 
         # 2. Run the setup wizard to get API keys, etc.
-        if splash is not None:
-            try:
-                splash.close()
-            except Exception:
-                pass
-            splash = None
+        # The native pre-splash is TopMost — close it so it doesn't cover the wizard.
+        _close_native_splash()
         if not run_setup_wizard(settings_manager):
             sys.exit(0) # User cancelled setup
     # --- End First Run Setup ---
@@ -220,15 +194,9 @@ def main():
     controller.run()
     _phase("controller.run done (window should be visible)")
 
-    if splash is not None:
-        try:
-            main_window = getattr(getattr(controller, "ui", None), "main_window", None)
-            if main_window is not None:
-                splash.finish(main_window)
-            else:
-                splash.close()
-        except Exception:
-            pass
+    # The transparent pre-splash from bin/logos.bat has done its job.
+    # (Later replaced by an animated GIF for the EXE build.)
+    _close_native_splash()
 
     sys.exit(app.exec())
 
