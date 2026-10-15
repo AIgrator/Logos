@@ -491,6 +491,7 @@ class VisionHandler(BaseAgent):
         self._compact_owned = False
         self._visible_box = {}
         self._visible_event = threading.Event()
+        self._pause_hist_mark = 0
         # Deprecated plan-era surface (controller/UI still reference it).
         self.action_plan = []
 
@@ -517,12 +518,46 @@ class VisionHandler(BaseAgent):
             logging.warning(f"compact exit failed: {e}")
 
     def pause_or_resume(self):
+        if self.state == VisionState.PAUSED:
+            # Resume with notes: plain base resume would continue the old
+            # chain WITHOUT the typed notes reaching the model (no text
+            # injection in CUA). Restart with notes embedded instead.
+            mark = getattr(self, "_pause_hist_mark", 0)
+            notes = [h for h in self.command_history[mark:]
+                     if "**User note" in h]
+            try:
+                draft = self.ui.user_input.toPlainText().strip()
+            except Exception:
+                draft = ""
+            texts = notes + ([f"**User note (paused):** {draft}"] if draft else [])
+            if texts:
+                if draft:
+                    self.ui.add_message(f"<b>You:</b> {draft}")
+                    self.command_history.append(
+                        f"**User note (paused):** {draft}")
+                    try:
+                        self.ui.user_input.clear()
+                    except Exception:
+                        pass
+                base = self.original_user_request or ""
+                combined = (f"{base}\n\nUser notes written while paused "
+                            f"(take into account and continue):\n"
+                            + "\n".join(texts)).strip()
+                self._set_state(VisionState.EXECUTING)
+                self.controller._reenter_agent_mode(self)
+                self.ui.add_message("<i>Execution resumed with your notes.</i>")
+                self.ui.set_paused(False)
+                logging.info("Vision CUA resuming with paused notes embedded.")
+                self.stop()
+                self.start_task(combined)
+                return
         super().pause_or_resume()
         try:
             if self.state == VisionState.PAUSED:
                 # Pausing must hand the keyboard back: the thinking UI
                 # locks the input in Vision mode, and a paused user wants
                 # to type guidance. The next turn re-shows thinking.
+                self._pause_hist_mark = len(self.command_history)
                 self._stop_thinking_timer()
                 if getattr(self, "_compact_owned", False):
                     self._exit_compact()
@@ -570,6 +605,21 @@ class VisionHandler(BaseAgent):
         except Exception:
             pass
 
+    def _steer_with_text(self, user_text: str):
+        """Restarts the chain with user text embedded in the task.
+
+        The CUA protocol has no free-text injection: continuing the old
+        chain would leave the text invisible to the model (local history
+        only). So every steering message becomes a restarted chain.
+        """
+        base = self.original_user_request or ""
+        combined = (f"{base}\n\nUser message during the task "
+                    f"(take it into account and continue): "
+                    f"{user_text}".strip())
+        logging.info("Vision CUA restarting chain with user text.")
+        self.stop()
+        self.start_task(combined)
+
     def start_task(self, user_text: str, attachments=None):
         if attachments:
             logging.info(f"Vision CUA ignoring {len(attachments)} attachment(s) (v1).")
@@ -578,6 +628,15 @@ class VisionHandler(BaseAgent):
                 and (user_text or "").strip()):
             # Typed answer to a pending confirmation question.
             self._answer_question(user_text.strip())
+            return
+        if self.state == VisionState.PAUSED_ON_ERROR and (user_text or "").strip():
+            # Steering after an error pause: plain _continue_loop would
+            # continue the old chain WITHOUT the text reaching the model.
+            self._steer_with_text(user_text.strip())
+            return
+        if self.state == VisionState.EXECUTING and (user_text or "").strip():
+            # Mid-flight hint: same invisibility problem — restart with it.
+            self._steer_with_text(user_text.strip())
             return
         self._pending_question = None
         self._cua_response_id = None
@@ -626,20 +685,14 @@ class VisionHandler(BaseAgent):
     def _answer_question(self, answer: str):
         """Feeds a pending confirmation answer by restarting the chain.
 
-        A refusal ABORTS the task outright — restarting with "continue
-        accordingly" lets a small model reinterpret 'no' as permission
-        (observed live with the recycle bin).
+        The answer is delivered VERBATIM — the code never parses user
+        text (no keyword lists in any language). The model asked the
+        question, so it interprets the answer and decides: stop, adjust,
+        continue.
         """
         question = getattr(self, "_pending_question", None)
         self._pending_question = None
         if not question:
-            return
-        refusal = (answer or "").strip().lower()
-        if refusal in ("нет", "no", "не", "не надо", "не нужно", "не делай",
-                       "stop", "стоп", "отмена", "отменить", "нельзя"):
-            self.command_history.append(f"User answered: {answer} (abort)")
-            self.ui.add_message("<i>Остановлено пользователем.</i>")
-            self.stop()
             return
         base = self.original_user_request or ""
         combined = (f"{base}\n\nYou asked the user for confirmation: "
