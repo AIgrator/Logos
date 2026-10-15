@@ -153,7 +153,17 @@ class GenericProvider(BaseLLMProvider):
 
 ```
 
-### 5. That's it!
+### 5. Logging: write nothing.
+
+Do NOT add logger lines to your provider file. Every call is journaled
+automatically by `BaseLLMProvider.__init__` (start / duration / exception /
+stream stats, with task tag + turn number) into the single `app.log`
+timeline. Raise `FatalError` / `RetryableError` as above — the worker logs
+the semantic content (prompts, responses, repairs). If you add logging
+anyway, keep it to `logger = logging.getLogger(__name__)` diagnostics;
+never open log files from a provider.
+
+### 6. That's it!
 
 No more steps are needed. On the next launch of the application:
 - The mechanism in `src/llm/__init__.py` will automatically detect your `GroqProvider`.

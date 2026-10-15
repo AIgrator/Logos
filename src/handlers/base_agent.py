@@ -229,6 +229,8 @@ class BaseAgentHandler:
         self._last_action_sig = None  # (name, args) of the last launched action
         self._consecutive_errors = 0  # unsuccessful turns in a row (escalate at MAX_*)
         self._assessment_sent = False  # her-verdict turn already spent this streak
+        self._task_tag = "notask"  # correlation tag for the single-log timeline
+        self._turn_seq = 0  # LLM-bound turn counter (same convention as CUA)
         # NOTE: there is deliberately NO timeout counter. Timeouts count as
         # ordinary failures; significance is the model's call (assessment
         # turn). Do not reintroduce a second fuse.
@@ -287,6 +289,9 @@ class BaseAgentHandler:
             return
 
         logging.info(f"{type(self).__name__} starting task: {user_text}")
+        import time as _time
+        self._task_tag = f"{type(self).__name__}_{_time.strftime('%H%M%S')}"
+        self._turn_seq = 0
         self.original_user_request = user_text
         # Do not wipe history if already populated (e.g. attachments).
         if not self.command_history:
@@ -502,12 +507,15 @@ class BaseAgentHandler:
             self.stop()
             return
 
+        self._turn_seq += 1
         self.controller._send_llm_request(
             user_prompt,
             self._request_attachments(),
             system_prompt,
             [],
             self.SCHEMA_NAME,
+            self._task_tag,
+            self._turn_seq,
         )
 
     def _request_attachments(self) -> list:

@@ -11,6 +11,7 @@ class ChatHandler:
         self.llm_worker = controller.llm_worker
         self.settings = controller.settings
         self.conversation_history = controller.conversation_history
+        self._chat_seq = 0  # per-message counter for log correlation
 
     def start_chat(self, user_text: str, attachments: list):
         """Starts a new chat interaction."""
@@ -28,12 +29,15 @@ class ChatHandler:
         self.controller.thinking_time = 0
         self.controller.thinking_timer.start(1000)
 
+        self._chat_seq += 1
         self.controller._send_llm_request(
             user_text,
             attachments,
             None,  # No system prompt in chat mode
             self.conversation_history,
-            None  # No schema for chat mode
+            None,  # No schema for chat mode
+            "chat",
+            self._chat_seq
         )
 
     def handle_response_chunk(self, chunk: str):

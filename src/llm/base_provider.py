@@ -1,18 +1,159 @@
 # src/llm/base_provider.py
 
+import json
+import logging
+import time
 from abc import ABC, abstractmethod
+from contextvars import ContextVar
 from typing import Any
+
+# Correlation context for the single-log timeline. Set by whoever drives the
+# call (llm_worker, CUA worker); read by the automatic base wrapper below.
+# ContextVar = thread/task-local, so worker threads don't clash, and provider
+# files stay untouched (no signature changes, no logger lines required).
+log_ctx: ContextVar = ContextVar(
+    "llm_log_ctx", default={"tag": "untagged", "turn": 0})
+
+
+def set_log_ctx(tag: str, turn: int = 0) -> None:
+    log_ctx.set({"tag": tag, "turn": turn})
+
 
 class BaseLLMProvider(ABC):
     """
     Abstract base class for all LLM providers.
     Defines the essential contract for interacting with different LLM APIs.
+
+    Logging rule: provider files contain NO logger lines. Every provider
+    call is journaled automatically by the wrapper installed in __init__
+    (start / duration / exception) into the single app timeline. Authors
+    of new providers get this for free — nothing to remember.
     """
     def __init__(self, provider_config: dict):
         self.provider_config = provider_config
         self.api_key = self.provider_config.get("api_key")
         self.model = self.provider_config.get("model")
         self.require_json_output = self.provider_config.get("require_json_output", False)
+        self._install_auto_logging()
+
+    def _install_auto_logging(self):
+        """Wraps both call paths with timing + error journaling.
+
+        Runs once per instance; subclasses never touch it. The worker keeps
+        logging semantic content (prompts/responses); this layer adds the
+        mechanical envelope: who, how long, what blew up.
+        """
+        comm = logging.getLogger("llm_communication")
+        me = type(self).__name__
+
+        def _ctx():
+            try:
+                return dict(log_ctx.get())
+            except Exception:
+                return {"tag": "untagged", "turn": 0}
+
+        orig_call = self._execute_get_response
+
+        def logged_call(*args, **kwargs):
+            ctx = _ctx()
+            t0 = time.perf_counter()
+            schema = kwargs.get(
+                "schema_name", args[4] if len(args) > 4 else None)
+            try:
+                result = orig_call(*args, **kwargs)
+                comm.info(json.dumps({
+                    "direction": "PROVIDER-CALL",
+                    "tag": ctx.get("tag"), "turn": ctx.get("turn"),
+                    "provider": me, "model": self.model,
+                    "mode": "structured",
+                    "schema": schema,
+                    "took_seconds": round(time.perf_counter() - t0, 2),
+                    "ok": True,
+                }, ensure_ascii=False))
+                return result
+            except Exception as e:
+                comm.info(json.dumps({
+                    "direction": "PROVIDER-CALL",
+                    "tag": ctx.get("tag"), "turn": ctx.get("turn"),
+                    "provider": me, "model": self.model,
+                    "mode": "structured",
+                    "schema": schema,
+                    "took_seconds": round(time.perf_counter() - t0, 2),
+                    "ok": False,
+                    "error": f"{type(e).__name__}: {e}"[:500],
+                }, ensure_ascii=False))
+                raise
+
+        orig_stream = self.stream_response
+
+        def logged_stream(*args, **kwargs):
+            ctx = _ctx()
+            t0 = time.perf_counter()
+            chunks = 0
+            chars = 0
+            try:
+                for chunk in orig_stream(*args, **kwargs):
+                    chunks += 1
+                    try:
+                        chars += len(str(chunk.get("content", chunk)
+                                         if isinstance(chunk, dict) else chunk))
+                    except Exception:
+                        pass
+                    yield chunk
+                comm.info(json.dumps({
+                    "direction": "PROVIDER-CALL",
+                    "tag": ctx.get("tag"), "turn": ctx.get("turn"),
+                    "provider": me, "model": self.model,
+                    "mode": "streaming",
+                    "took_seconds": round(time.perf_counter() - t0, 2),
+                    "ok": True, "chunks": chunks, "chars": chars,
+                }, ensure_ascii=False))
+            except Exception as e:
+                comm.info(json.dumps({
+                    "direction": "PROVIDER-CALL",
+                    "tag": ctx.get("tag"), "turn": ctx.get("turn"),
+                    "provider": me, "model": self.model,
+                    "mode": "streaming",
+                    "took_seconds": round(time.perf_counter() - t0, 2),
+                    "ok": False, "chunks": chunks,
+                    "error": f"{type(e).__name__}: {e}"[:500],
+                }, ensure_ascii=False))
+                raise
+
+        self._execute_get_response = logged_call
+        self.stream_response = logged_stream
+
+        orig_cua = self.computer_use_turn
+
+        def logged_cua(*args, **kwargs):
+            ctx = _ctx()
+            t0 = time.perf_counter()
+            try:
+                result = orig_cua(*args, **kwargs)
+                comm.info(json.dumps({
+                    "direction": "PROVIDER-CALL",
+                    "tag": ctx.get("tag"), "turn": ctx.get("turn"),
+                    "provider": me, "model": self.model,
+                    "mode": "computer-use",
+                    "took_seconds": round(time.perf_counter() - t0, 2),
+                    "ok": True,
+                    "actions": (result.get("actions")
+                                if isinstance(result, dict) else None),
+                }, ensure_ascii=False))
+                return result
+            except Exception as e:
+                comm.info(json.dumps({
+                    "direction": "PROVIDER-CALL",
+                    "tag": ctx.get("tag"), "turn": ctx.get("turn"),
+                    "provider": me, "model": self.model,
+                    "mode": "computer-use",
+                    "took_seconds": round(time.perf_counter() - t0, 2),
+                    "ok": False,
+                    "error": f"{type(e).__name__}: {e}"[:500],
+                }, ensure_ascii=False))
+                raise
+
+        self.computer_use_turn = logged_cua
 
     # These methods are optional for providers to implement if they use
     # the default stream_response method.

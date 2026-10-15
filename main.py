@@ -60,7 +60,12 @@ def main():
     qt_splash = None
 
     def _phase(name):
-        print(f"[+{time.perf_counter() - _start_t:.1f}s] {name}", flush=True)
+        line = f"[+{time.perf_counter() - _start_t:.1f}s] {name}"
+        print(line, flush=True)
+        try:
+            logging.info(f"startup {line}")
+        except Exception:
+            pass
         if qt_splash is not None:
             try:
                 from PySide6.QtCore import Qt

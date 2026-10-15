@@ -156,7 +156,8 @@ class LLMWorker(QObject):
             logging.error(f"Error calling cancel_stream for provider '{provider_id}': {e}", exc_info=True)
 
     def _log_llm_error(self, llm_logger, raw_llm_logger, *, error, attempt,
-                       max_retries, mode, schema_name, retry_after=None, reaction=""):
+                         max_retries, mode, schema_name, retry_after=None, reaction="",
+                         tag="untagged", turn=0):
         """Writes every failed LLM response to both log files.
 
         Successes are already logged as RESPONSE entries; without this,
@@ -174,9 +175,15 @@ class LLMWorker(QObject):
             model = "unknown"
         error_type = type(error).__name__
         message = str(error)
+        if tag == "untagged":
+            # Callers inside execute_request rely on the in-flight context.
+            tag = getattr(self, "_cur_log_tag", "untagged")
+            turn = getattr(self, "_cur_log_turn", 0)
         comm_payload = {
             "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "direction": "ERROR",
+            "tag": tag,
+            "turn": turn,
             "provider": provider,
             "model": model,
             "mode": mode,
@@ -190,6 +197,8 @@ class LLMWorker(QObject):
         raw_payload = {
             "type": "error",
             "timestamp": comm_payload["timestamp"],
+            "tag": tag,
+            "turn": turn,
             "provider": provider,
             "model": model,
             "attempt": comm_payload["attempt"],
@@ -199,11 +208,11 @@ class LLMWorker(QObject):
             "reaction": reaction,
         }
         try:
-            llm_logger.info(json.dumps(comm_payload, ensure_ascii=False, indent=2))
+            llm_logger.info(json.dumps(comm_payload, ensure_ascii=False))
         except Exception:
             pass
         try:
-            raw_llm_logger.info(json.dumps(raw_payload, ensure_ascii=False, indent=2))
+            raw_llm_logger.info(json.dumps(raw_payload, ensure_ascii=False))
         except Exception:
             pass
 
@@ -220,7 +229,7 @@ class LLMWorker(QObject):
             "tool_name": tool_name,
             "content": response_text
         }
-        llm_logger.info(json.dumps(comm_log_payload, ensure_ascii=False, indent=2))
+        llm_logger.info(json.dumps(comm_log_payload, ensure_ascii=False))
 
         # Log for llm_raw_response.log
         raw_log_payload = {
@@ -228,7 +237,7 @@ class LLMWorker(QObject):
             "tool_name": tool_name,
             "response": response_text
         }
-        raw_llm_logger.info(json.dumps(raw_log_payload, indent=2))
+        raw_llm_logger.info(json.dumps(raw_log_payload))
 
     # Total budget for one provider call. Providers enforce only per-gap
     # timeouts (120s between bytes here), so a dribbling chunked response
@@ -275,8 +284,9 @@ class LLMWorker(QObject):
             raise RetryableError("LLM provider call ended with no result.")
         return box["res"]
 
-    @Slot(str, list, str, list, str)
-    def execute_request(self, prompt, attachments, system_prompt, history, schema_name=None):
+    @Slot(str, list, str, list, str, str, int)
+    def execute_request(self, prompt, attachments, system_prompt, history, schema_name=None,
+                        tag="untagged", turn=0):
         """
         Executes the LLM request. If a schema_name is provided, it attempts
         to parse and validate the response according to that schema.
@@ -298,6 +308,15 @@ class LLMWorker(QObject):
             return
 
         self.is_cancelled = False
+        # In-flight correlation context for _log_llm_error call sites below
+        # and for the automatic base-provider wrapper (thread-local).
+        self._cur_log_tag = tag
+        self._cur_log_turn = turn
+        try:
+            from llm.base_provider import set_log_ctx
+            set_log_ctx(tag, turn)
+        except Exception:
+            pass
         llm_logger = logging.getLogger('llm_communication')
         raw_llm_logger = logging.getLogger('llm_raw_response')
 
@@ -305,6 +324,8 @@ class LLMWorker(QObject):
         log_payload = {
             "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
             "direction": "REQUEST",
+            "tag": tag,
+            "turn": turn,
             "mode": 'Structured' if schema_name else 'Streaming',
             "provider": self.provider.__class__.__name__,
             "model": self.provider.model,
@@ -335,7 +356,7 @@ class LLMWorker(QObject):
                       f"stream_closed={[getattr(getattr(h, 'stream', None), 'closed', None) for h in llm_logger.handlers]}; "
                       f"live_jobs_note={'Live background jobs' in str(log_payload.get('prompt', ''))}")
         try:
-            llm_logger.info(json.dumps(log_payload, ensure_ascii=False, indent=2))
+            llm_logger.info(json.dumps(log_payload, ensure_ascii=False))
         except Exception as e:
             # The emit path failing silently (no console) once hid all LLM
             # traffic: breadcrumb proved arrival with an empty file.
@@ -359,7 +380,7 @@ class LLMWorker(QObject):
                         # Cancelled while waiting (abandoned in-flight call).
                         return
 
-                    raw_llm_logger.info(json.dumps(response_dict, indent=2))
+                    raw_llm_logger.info(json.dumps(response_dict))
                     if self.is_cancelled:
                         return
 
@@ -445,7 +466,7 @@ class LLMWorker(QObject):
                         if correction_response_dict is None:
                             # Cancelled while waiting (abandoned in-flight call).
                             return
-                        raw_llm_logger.info(json.dumps({"self_correction_response": correction_response_dict}, indent=2))
+                        raw_llm_logger.info(json.dumps({"self_correction_response": correction_response_dict}))
 
                         corr_tool_calls = correction_response_dict.get("tool_calls", {})
                         corr_raw_text = correction_response_dict.get("text", "")
@@ -474,10 +495,12 @@ class LLMWorker(QObject):
                     log_payload = {
                         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         "direction": "RESPONSE",
+                        "tag": tag,
+                        "turn": turn,
                         "streamed": False,
                         "content": validated_payload
                     }
-                    llm_logger.info(json.dumps(log_payload, ensure_ascii=False, indent=2))
+                    llm_logger.info(json.dumps(log_payload, ensure_ascii=False))
 
                     payload = validated_payload.get('payload', {}) if final_schema_name in ('terminal_tool_code', 'browser_tool_code') else validated_payload
                     reasoning = payload.get('payload', {}).get('evaluation', {}).get('reason', '') if final_schema_name == 'evaluation' else ""
@@ -563,11 +586,13 @@ class LLMWorker(QObject):
                     log_payload = {
                         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                         "direction": "RESPONSE",
+                        "tag": tag,
+                        "turn": turn,
                         "streamed": True,
                         "content": log_content
                     }
-                    llm_logger.info(json.dumps(log_payload, ensure_ascii=False, indent=2))
-                    raw_llm_logger.info(json.dumps(log_content, indent=2))
+                    llm_logger.info(json.dumps(log_payload, ensure_ascii=False))
+                    raw_llm_logger.info(json.dumps(log_content))
 
                     self.response_finished.emit(full_response_text)
                     return

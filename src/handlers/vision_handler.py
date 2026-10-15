@@ -261,6 +261,11 @@ class CuaTurnWorker(QThread):
         turn_no = protocol.pop("turn_no", 0)
         flags = protocol.pop("debug_flags", None) or {}
         try:
+            from src.llm.base_provider import set_log_ctx
+            set_log_ctx(f"Vision-{tag}", turn_no)
+        except Exception:
+            pass
+        try:
             if not self._paused_spin("before provider turn"):
                 outcome = {"aborted": True}
                 self.turn_done.emit(outcome)
@@ -760,14 +765,17 @@ class VisionHandler(BaseAgent):
 
     def trace_turn(self, tag: str, turn_no: int, actions: list,
                    had_safety: bool, shot_file: str | None) -> None:
-        """Appends one JSON line per turn (respects save_trace_log)."""
+        """One JSON line per turn into the single app timeline
+        (respects save_trace_log). Lands in app.log via the llm_communication
+        logger — no separate trace file anymore."""
         if not self._debug_flags().get("save_trace"):
             return
         import json
-        import os
-        flags = self._debug_flags()
+        from datetime import datetime
         record = {
-            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "direction": "TRACE",
+            "mode": "Vision-CUA",
             "tag": tag,
             "turn": turn_no,
             "actions": [describe_action(a) for a in (actions or [])],
@@ -776,12 +784,8 @@ class VisionHandler(BaseAgent):
             "screenshot": shot_file,
         }
         try:
-            path = flags["trace_path"]
-            parent = os.path.dirname(path)
-            if parent:
-                os.makedirs(parent, exist_ok=True)
-            with open(path, "a", encoding="utf-8") as f:
-                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+            logging.getLogger("llm_communication").info(
+                json.dumps(record, ensure_ascii=False))
         except Exception as e:
             logging.warning(f"trace write failed: {e}")
 

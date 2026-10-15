@@ -29,7 +29,7 @@ from src.utils.ignore_patterns import DEFAULT_GLOBAL_IGNORE_PATTERNS
 # from vision.worker import VisionWorker
 
 class AppController(QObject):
-    llm_request_sent = Signal(str, list, str, list, str)
+    llm_request_sent = Signal(str, list, str, list, str, str, int)
     # Signals to proxy worker results safely to the main thread
     analysis_finished = Signal(object, object, object)
     analysis_failed = Signal(str)
@@ -232,7 +232,7 @@ class AppController(QObject):
         self.llm_worker.error_occurred.connect(on_error)
 
         # Emit the request
-        self.llm_request_sent.emit(user_prompt, [], system_prompt, [], schema_name)
+        self.llm_request_sent.emit(user_prompt, [], system_prompt, [], schema_name, "sync", 0)
 
         # Wait for the response_event to be set by one of the slots
         response_event.wait(timeout=120) # 120-second timeout
@@ -654,11 +654,16 @@ class AppController(QObject):
             if self.state not in (ControllerState.TERMINAL, ControllerState.BROWSER, ControllerState.VISION):
                 self._set_state(ControllerState.IDLE)
 
-    def _send_llm_request(self, user_prompt, attachments, system_prompt, history, schema_name):
-        """Store the request for the Retry button, then emit it to the worker."""
-        self._last_llm_request = (user_prompt, attachments, system_prompt, history, schema_name)
+    def _send_llm_request(self, user_prompt, attachments, system_prompt, history, schema_name,
+                            tag="untagged", turn=0):
+        """Store the request for the Retry button, then emit it to the worker.
+
+        tag/turn correlate log entries across the single app.log timeline
+        (task tag + turn number, same convention as the CUA journal).
+        """
+        self._last_llm_request = (user_prompt, attachments, system_prompt, history, schema_name, tag, turn)
         self._last_llm_error = False
-        self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name)
+        self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name, tag, turn)
 
     def _resend_last_request(self, log_line: str, notice_html: str, thinking_msg: str) -> bool:
         """Re-sends the stored last LLM request (Retry / Continue links)."""
@@ -671,11 +676,11 @@ class AppController(QObject):
         logging.info(log_line)
         self.ui.add_message(notice_html, force_scroll=True)
         self.ui.show_thinking_ui(True, message=thinking_msg)
-        user_prompt, attachments, system_prompt, history, schema_name = self._last_llm_request
+        user_prompt, attachments, system_prompt, history, schema_name, tag, turn = self._last_llm_request
         if schema_name in ("terminal_tool_code", "browser_tool_code"):
             self._reenter_agent_mode(self.terminal_handler if schema_name == "terminal_tool_code"
                                      else self.browser_handler)
-        self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name)
+        self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name, tag, turn)
         return True
 
     def _reenter_agent_mode(self, handler):
