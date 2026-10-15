@@ -735,6 +735,31 @@ class AppController(QObject):
         self.current_handler = handler
         self.ui.set_active_mode('terminal' if target == ControllerState.TERMINAL else 'browser')
 
+    def ask_safety_approval(self, checks: list) -> bool:
+        """Modal approval for computer-use safety checks (Vision CUA loop).
+
+        Called on the GUI thread while the worker waits. Deny (or dialog
+        failure) is the safe default: the turn is abandoned.
+        """
+        from PySide6.QtWidgets import QMessageBox
+        try:
+            lines = "\n".join(
+                f"• [{c.get('code', '?')}] {c.get('message', '')}"
+                for c in (checks or [])
+            )
+            answer = QMessageBox.question(
+                self.ui,
+                "Computer Use — safety check",
+                "The model requested an action flagged by a safety check:\n\n"
+                f"{lines}\n\nAllow once and continue?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            return answer == QMessageBox.Yes
+        except Exception as e:
+            logging.error(f"Safety approval dialog failed: {e}")
+            return False
+
     def _handle_retry_request(self):
         """Re-send the last LLM request (Retry button on transient-error cards)."""
         self._resend_last_request(

@@ -123,6 +123,7 @@ class OpenAIProvider(BaseLLMProvider):
                 "model": self.model,
                 "tools": [{"type": "computer"}],
                 "input": input_items,
+                "timeout": 90,
             }
             if previous_response_id is not None:
                 kwargs["previous_response_id"] = previous_response_id
