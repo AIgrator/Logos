@@ -138,10 +138,10 @@
   "APP_SCREENSHOTS_DIR": "C:\\Users\\vipTe\\Project\\python\\logos\\screenshots",
   "APP_MODELS_DIR": "C:\\Users\\vipTe\\Project\\python\\logos\\models",
   "vision": {
+    "allow_shell_commands": false,
     "wait_check_interval_ms": 5000,
     "post_action_delay_ms": 1000,
     "max_correction_attempts": 3,
-    "allow_shell_commands": true,
     "grounding_backend": "local"
   },
   "browser": {

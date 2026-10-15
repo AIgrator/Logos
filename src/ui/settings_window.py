@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QButtonGroup,
+    QStackedWidget,
     QScrollArea,
     QToolButton,
     QFrame,
@@ -69,9 +70,9 @@ class SettingsWindow(QDialog):
         line.setFrameShadow(QFrame.Sunken)
         content_layout.addWidget(line)
 
-        # Scroll area for settings on the right
-        self.scroll_area, self.sections = self._create_content_area()
-        content_layout.addWidget(self.scroll_area)
+        # Section pages on the right (one visible at a time)
+        _, self.sections = self._create_content_area()
+        content_layout.addWidget(self.section_stack)
 
         self.layout.addLayout(content_layout)
 
@@ -80,8 +81,6 @@ class SettingsWindow(QDialog):
         self.button_box.accepted.connect(self.save_and_accept)
         self.button_box.rejected.connect(self.hide)
         self.layout.addWidget(self.button_box)
-
-        self._is_programmatic_scroll = False # Flag to prevent scroll handler during programmatic scroll
 
         # Defer height adjustment to ensure all widgets are initialized
         QTimer.singleShot(0, self._adjust_window_height)
@@ -164,19 +163,13 @@ class SettingsWindow(QDialog):
         return nav_widget
 
     def _create_content_area(self):
-        """Creates the right-side scroll area containing all setting sections."""
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(True)
-        scroll_area.setFrameShape(QFrame.NoFrame)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
-        scroll_area.setMinimumWidth(400)
+        """Creates the right-side area: one independent page per section.
 
-        scroll_content = QWidget()
-        content_layout = QVBoxLayout(scroll_content)
-        content_layout.setContentsMargins(15, 15, 15, 15)
-        content_layout.setSpacing(20)
-        content_layout.setAlignment(Qt.AlignTop)
-
+        Each nav button shows ONLY its section (QStackedWidget). Every page
+        is wrapped in its own scroll area whose vertical bar appears only
+        when that section doesn't fit the height (AsNeeded) — no shared
+        scrollbar anymore.
+        """
         sections = {
             "general": self._create_general_section(),
             "common": self._create_common_section(),
@@ -191,54 +184,32 @@ class SettingsWindow(QDialog):
             "debug": self._create_debug_section()
         }
 
+        self.section_stack = QStackedWidget()
+        self.section_order = []
         for key in self.nav_sections:
-            content_layout.addWidget(sections[key])
+            page = QScrollArea()
+            page.setWidgetResizable(True)
+            page.setFrameShape(QFrame.NoFrame)
+            page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+            page.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            holder = QWidget()
+            holder_layout = QVBoxLayout(holder)
+            holder_layout.setContentsMargins(15, 15, 15, 15)
+            holder_layout.setAlignment(Qt.AlignTop)
+            holder_layout.addWidget(sections[key])
+            page.setWidget(holder)
+            self.section_stack.addWidget(page)
+            self.section_order.append(key)
 
-        scroll_area.setWidget(scroll_content)
-        scroll_area.verticalScrollBar().valueChanged.connect(self._on_scroll_changed)
-        return scroll_area, sections
+        self.section_stack.setMinimumWidth(400)
+        return self.section_stack, sections
 
     def _on_nav_button_clicked(self, button):
-        """Scrolls to the corresponding section when a nav button is clicked."""
+        """Shows only the selected section's page."""
         section_key = button.property("section_key")
-        if section_key in self.sections:
-            self._is_programmatic_scroll = True
-            self.scroll_area.ensureWidgetVisible(self.sections[section_key], 100, 100)
-            # Reset the flag after the animation has had time to finish
-            QTimer.singleShot(300, self._reset_programmatic_scroll_flag)
-
-        self._update_all_nav_button_icons()
-
-    def _reset_programmatic_scroll_flag(self):
-        """Resets the flag that prevents the scroll handler from running."""
-        self._is_programmatic_scroll = False
-
-    def _on_scroll_changed(self, value):
-        """Updates the checked navigation button based on the scroll position."""
-        if self._is_programmatic_scroll:
-            return
-
-        # Add a small offset so the button switches when the title is fully visible
-        scroll_position = value + 10
-        current_section_key = None
-
-        # Find the last section that is scrolled past the top of the viewport
-        for key, widget in self.sections.items():
-            if widget.y() <= scroll_position:
-                current_section_key = key
-            else:
-                # Since widgets are ordered from top to bottom, we can stop early.
-                break
-
-        if current_section_key:
-            for button in self.nav_button_group.buttons():
-                if button.property("section_key") == current_section_key:
-                    if not button.isChecked():
-                        # Block signals to prevent the button click from re-triggering a scroll
-                        self.nav_button_group.blockSignals(True)
-                        button.setChecked(True)
-                        self.nav_button_group.blockSignals(False)
-                    break
+        if section_key in self.section_order:
+            self.section_stack.setCurrentIndex(
+                self.section_order.index(section_key))
 
         self._update_all_nav_button_icons()
 
@@ -716,6 +687,19 @@ class SettingsWindow(QDialog):
                          "Off by default.")
         self.allow_shell_commands_checkbox.setToolTip(shell_tooltip)
         vision_layout.addWidget(self.allow_shell_commands_checkbox, 0, 0, 1, 4)
+
+        self.save_trace_log_checkbox = QCheckBox("Save detailed trace log")
+        trace_log_tooltip = "Appends one JSON line per computer-use turn (actions, safety, screenshot path) to the app timeline."
+        vision_layout.addWidget(self.save_trace_log_checkbox, 1, 0)
+        vision_layout.addWidget(self._create_help_label(trace_log_tooltip), 1, 1)
+        self.save_pre_intent_checkbox = QCheckBox("Save pre-action screenshot")
+        pre_intent_tooltip = "Saves a screenshot before each turn's actions (screenshots/cua_<time>/)."
+        vision_layout.addWidget(self.save_pre_intent_checkbox, 2, 0)
+        vision_layout.addWidget(self._create_help_label(pre_intent_tooltip), 2, 1)
+        self.save_post_checkbox = QCheckBox("Save post-action screenshot")
+        post_action_tooltip = "Saves an annotated screenshot after each turn (red marks: clicks, drags)."
+        vision_layout.addWidget(self.save_post_checkbox, 3, 0)
+        vision_layout.addWidget(self._create_help_label(post_action_tooltip), 3, 1)
 
         return group
 
