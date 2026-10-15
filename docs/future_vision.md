@@ -188,7 +188,10 @@ until the execution core is ready. Voice will dock onto the same
 - **Per-task folders + cross-mode handoff.** A task ("check the news")
   gets its own folder accumulating all context (chat transcript, turn
   screenshots, traces, downloaded artifacts); later modes reuse it
-  (browser finds info → terminal/vision consume it). Seeds exist
+  (browser finds info → terminal/vision consume it). Handoff need not
+  be end-to-end automation: manual carry (user grabs browser findings
+  into the folder, vision/terminal pick them up) covers most cases and
+  is simpler than cross-mode orchestration. Seeds exist
   (per-task `cua_<tag>/` shots, command_history, trace lines) but no
   folder lifecycle, no handoff protocol, no UI. After the project
   concept lands.
