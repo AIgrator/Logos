@@ -179,6 +179,13 @@ until the execution core is ready. Voice will dock onto the same
   back into the conversation, flip `supports_streaming_tools`. HF additionally blocked
   by billing (402 on accounts without credits).
 
+- **Project / working-directory concept (opencode-style).** No project picker
+  tab, no per-project working folder yet: the terminal inherits the launch
+  CWD, the file indexer still points at the app root. Needed before the
+  indexer retarget: a picker (per-project terminal CWD + chat @-files +
+  index root), startup default, and persistence. Design first, then move
+  `Indexer('.')`.
+
 ## Non-goals (explicitly deferred)
 
 - Adding ~20 new direct LLM providers: other models stay reachable
