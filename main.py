@@ -153,6 +153,27 @@ def main():
     except Exception as e:
         logging.warning(f"Could not enable faulthandler: {e}")
 
+    # Last-resort net for silent deaths: any uncaught main-thread exception
+    # (including ones Qt would otherwise swallow) lands in app.log with a
+    # traceback instead of vanishing with the process.
+    def _log_uncaught(exc_type, exc_value, exc_tb):
+        try:
+            logging.critical("UNCAUGHT EXCEPTION — process may die",
+                             exc_info=(exc_type, exc_value, exc_tb))
+        except Exception:
+            pass
+        try:
+            _orig_excepthook(exc_type, exc_value, exc_tb)
+        except Exception:
+            pass
+
+    try:
+        import sys as _sys
+        _orig_excepthook = _sys.excepthook
+        _sys.excepthook = _log_uncaught
+    except Exception:
+        pass
+
     # Determine the effective working directory for the terminal mode.
     # If a path is passed as a non-empty argument, use it; otherwise, use the original CWD.
     # This handles the case where `logos.bat` passes `""` as an argument.

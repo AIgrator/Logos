@@ -75,7 +75,13 @@ class MainWindow(QMainWindow):
 
     @Slot(bool)
     def set_visibility_for_screenshot(self, visible: bool):
-        """A dedicated slot to control window opacity for thread-safe screenshotting."""
+        """A dedicated slot to control window opacity for thread-safe screenshotting.
+
+        Opacity (not hide/show): the window stays mapped, so there is no
+        taskbar flicker, no focus loss, and no native-window recreation —
+        DWM simply composites nothing for fully transparent pixels.
+        """
+        logging.info(f"screenshot opacity -> {'visible' if visible else 'hidden'}")
         self.setWindowOpacity(1.0 if visible else 0.0)
 
 class ExpandingTextEdit(QTextEdit):
