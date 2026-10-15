@@ -436,54 +436,22 @@ class AppController(QObject):
         self.files_found_signal.emit(results)
 
     def _start_vision_initialization(self):
-        """Imports and initializes the vision module in a background thread."""
-        self.ui.set_vision_mode_loading(True)
+        """Marks Vision ready immediately (agent-loop rebuild).
 
-        try:
-            from vision.worker import VisionWorker
-        except ImportError as e:
-            logging.error(f"Failed to import VisionWorker: {e}", exc_info=True)
-            self._on_vision_init_error(f"Could not import VisionWorker: {e}")
-            return
-
-        self.vision_thread = QThread()
-        self.vision_worker = VisionWorker(self.settings)
-        self.vision_worker.moveToThread(self.vision_thread)
-
-        self.vision_worker.vision_ready.connect(self._on_vision_instance_ready)
-        self.vision_worker.finished.connect(self._on_vision_init_finished)
-        self.vision_worker.error.connect(self._on_vision_init_error)
-
-        self.vision_thread.started.connect(self.vision_worker.run)
-        self.vision_thread.finished.connect(self.vision_thread.quit)
-        self.vision_thread.finished.connect(self.vision_worker.deleteLater)
-        self.vision_thread.finished.connect(self.vision_thread.deleteLater)
-
-        self.app.aboutToQuit.connect(self.vision_thread.quit)
-
-        self.vision_thread.start()
-        logging.info("Started background initialization for Vision module.")
-
-    def _on_vision_instance_ready(self, vision_instance):
-        """Receives the fully initialized VisionManager instance from the worker."""
-        logging.info("VisionManager instance received from background thread.")
-        self.vision = vision_instance
-        self.vision_handler.computer.set_vision_manager(vision_instance)
-
-    def _on_vision_init_finished(self):
-        """Callback for when the vision module is ready."""
-        logging.info("Vision module initialization finished successfully.")
-        # Stop the animation first, then update the button to its final state
-        if self.ui and hasattr(self.ui, 'spinner_animation'):
-            self.ui.spinner_animation.stop()
-        self.ui.set_vision_mode_loading(False)
+        The legacy local grounding backend (YOLO/OCR/Florence) was extracted:
+        there is nothing to initialize in a background thread anymore. Vision
+        grounds through the active provider's native Computer Use (or, later,
+        the recognizer service), both created on demand per task.
+        """
         self.is_vision_module_initialized = True
+        try:
+            if self.ui and hasattr(self.ui, "spinner_animation"):
+                self.ui.spinner_animation.stop()
+            self.ui.set_vision_mode_loading(False)
+        except Exception:
+            pass
         self.vision_module_ready.emit()
-
-    def _on_vision_init_error(self, error_message):
-        logging.error(f"Vision initialization failed: {error_message}")
-        self.is_vision_module_initialized = False
-        self.ui.add_message(f"<b>Critical Error:</b> {error_message}", force_scroll=True)
+        logging.info("Vision marked ready (no local backend to initialize).")
 
     def _set_state(self, new_state: ControllerState):
         logging.info(f"AppController state changed from {self.state.name} to {new_state.name}")

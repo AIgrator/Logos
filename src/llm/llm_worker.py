@@ -10,7 +10,6 @@ from .llm_parsing import repair_json_string, validate_object, universal_fallback
 from .exceptions import FatalError, RetryableError, MAX_AUTO_WAIT_SECONDS, extract_retry_after, format_wait, is_quota_error, is_transient_throttle
 from .error_formatter import format_llm_error, format_quota_wall
 from time import perf_counter
-from llm import import_real_provider_classes
 
 class LLMWorker(QObject):
     """
@@ -90,19 +89,15 @@ class LLMWorker(QObject):
     @Slot()
     def prepare_provider(self):
         """
-        Create the provider inside the worker thread. This is connected to the QThread.started signal.
-        It first triggers the eager import of all real provider classes before creating
-        the specific instance required.
+        Create the provider inside the worker thread. Only the ACTIVE
+        provider's module is imported (via get_provider_class lazy proxy);
+        the rest load on first switch. Importing all six SDKs here cost
+        ~3.6s of background time for no benefit.
         """
         if self.provider:
             return
         start = perf_counter()
         try:
-            # Phase 2 of provider loading: Import all real provider classes.
-            # This is done here in the background thread to avoid blocking the UI
-            # and to ensure all modules are available before instantiation.
-            import_real_provider_classes()
-
             self.provider = self._create_llm_provider(self.settings)
             self.provider_ready = self.provider is not None
             duration = perf_counter() - start
