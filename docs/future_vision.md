@@ -185,6 +185,13 @@ until the execution core is ready. Voice will dock onto the same
   indexer retarget: a picker (per-project terminal CWD + chat @-files +
   index root), startup default, and persistence. Design first, then move
   `Indexer('.')`.
+- **Per-task folders + cross-mode handoff.** A task ("check the news")
+  gets its own folder accumulating all context (chat transcript, turn
+  screenshots, traces, downloaded artifacts); later modes reuse it
+  (browser finds info → terminal/vision consume it). Seeds exist
+  (per-task `cua_<tag>/` shots, command_history, trace lines) but no
+  folder lifecycle, no handoff protocol, no UI. After the project
+  concept lands.
 
 ## Non-goals (explicitly deferred)
 
