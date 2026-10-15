@@ -381,6 +381,24 @@ class CuaTurnWorker(QThread):
                 except Exception as e:
                     logging.warning(f"pre-action shot failed: {e}")
 
+            if not actions and not (done_text or "").strip():
+                # Empty turn (no actions, no text): the model stalled instead
+                # of acting. Must NOT count as done — route to escalation.
+                outcome = {
+                    "action_error": "**Error:** model returned an empty turn "
+                                    "(no actions, no text) — stuck, not done.",
+                    "executed": [],
+                    "response_id": turn.get("response_id"),
+                    "call_id": turn.get("call_id"),
+                }
+                self._handler.trace_turn(tag, turn_no, [], False, None)
+                self._comm_log("CONSUMED", {
+                    "turn": turn_no,
+                    "status": "empty_turn",
+                })
+                self.turn_done.emit(outcome)
+                return
+
             if not actions:
                 outcome = {
                     "done": True,
