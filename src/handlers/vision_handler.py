@@ -146,10 +146,15 @@ def scale_point(x: float, y: float, scale: float) -> tuple:
     return (x * scale, y * scale)
 
 
-def _annotation_font(size: int = 22):
-    """Best-effort truetype font; falls back to PIL's bitmap default."""
+def _annotation_font(font_path: str | None = None, size: int = 22):
+    """Settings font first (FontComboBox path), then system fallbacks,
+    then PIL's bitmap default. 'cv2_default' means: skip to fallbacks."""
     from PIL import ImageFont
-    for candidate in ("arial.ttf", "DejaVuSans.ttf"):
+    candidates = []
+    if font_path and font_path != "cv2_default":
+        candidates.append(font_path)
+    candidates += ["arial.ttf", "DejaVuSans.ttf"]
+    for candidate in candidates:
         try:
             return ImageFont.truetype(candidate, size)
         except Exception:
@@ -157,7 +162,9 @@ def _annotation_font(size: int = 22):
     return ImageFont.load_default()
 
 
-def annotate_screenshot(img, actions: list, scale: float = 1.0):
+def annotate_screenshot(img, actions: list, scale: float = 1.0,
+                        font_path: str | None = None, font_size: int = 22,
+                        padding: int = 6):
     """
     Draws what the model did onto a COPY of the screenshot (PIL only):
     red circles + labels for clicks, polylines for drags, corner stamp
@@ -166,7 +173,7 @@ def annotate_screenshot(img, actions: list, scale: float = 1.0):
     from PIL import ImageDraw
     canvas = img.copy()
     draw = ImageDraw.Draw(canvas)
-    font = _annotation_font()
+    font = _annotation_font(font_path, font_size)
     red = (255, 0, 0)
 
     def dot(x, y, r=14, label=None):
@@ -174,7 +181,8 @@ def annotate_screenshot(img, actions: list, scale: float = 1.0):
         draw.ellipse([x - r, y - r, x + r, y + r], outline=red, width=4)
         draw.ellipse([x - 3, y - 3, x + 3, y + 3], fill=red)
         if label:
-            draw.text((x + r + 6, y - r - 6), label, fill=red, font=font)
+            draw.text((x + r + padding, y - r - padding),
+                      label, fill=red, font=font)
 
     corner_notes = []
     for action in actions or []:
@@ -787,6 +795,23 @@ class VisionHandler(BaseAgent):
             pass
         return d
 
+    def _annotation_style(self) -> dict:
+        """Font/size/padding from Vision settings (Annotation Settings)."""
+        try:
+            cfg = self.settings.get("omniparser", {}) or {}
+        except Exception:
+            cfg = {}
+        try:
+            size = int(cfg.get("font_size", 22) or 22)
+        except Exception:
+            size = 22
+        try:
+            padding = int(cfg.get("text_padding", 6) or 6)
+        except Exception:
+            padding = 6
+        return {"font_path": cfg.get("font_path"),
+                "font_size": size, "padding": padding}
+
     def save_debug_shot(self, tag: str, turn_no: int, shot_b64: str,
                         when: str, annotate_with: list | None = None) -> str:
         """Saves a turn screenshot (post shots annotated, PIL red marks)."""
@@ -796,7 +821,8 @@ class VisionHandler(BaseAgent):
         img = Image.open(io.BytesIO(raw))
         if annotate_with:
             try:
-                img = annotate_screenshot(img, annotate_with)
+                style = self._annotation_style()
+                img = annotate_screenshot(img, annotate_with, **style)
             except Exception as e:
                 logging.warning(f"annotation failed: {e}")
         path = os.path.join(

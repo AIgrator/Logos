@@ -136,8 +136,7 @@ class SettingsWindow(QDialog):
             "browser": ("fa5s.globe", "Browser"),
             "terminal": ("fa5s.terminal", "Terminal"),
             "vision": ("fa5s.robot", "Vision"),
-            "context": ("fa5s.file-alt", "Context"),
-            "debug": ("fa5s.bug", "Debug")
+            "context": ("fa5s.file-alt", "Context")
         }
 
         for key, (icon_name, tooltip) in self.nav_sections.items():
@@ -181,7 +180,6 @@ class SettingsWindow(QDialog):
             "terminal": self._create_terminal_section(),
             "vision": self._create_vision_section(),
             "context": self._create_context_section(),
-            "debug": self._create_debug_section()
         }
 
         self.section_stack = QStackedWidget()
@@ -701,6 +699,39 @@ class SettingsWindow(QDialog):
         vision_layout.addWidget(self.save_post_checkbox, 3, 0)
         vision_layout.addWidget(self._create_help_label(post_action_tooltip), 3, 1)
 
+        annotation_group = QGroupBox("Annotation Settings")
+        annotation_layout = QGridLayout(annotation_group)
+        annotation_layout.setColumnStretch(2, 1)
+        self.font_combo = FontComboBox()
+        font_tooltip = "Font used for text on the annotated screenshots."
+        reset_button = QPushButton("Reset to Default")
+        reset_button.clicked.connect(lambda: self.font_combo.setCurrentIndex(0))
+        font_widget = QWidget()
+        font_layout = QHBoxLayout(font_widget)
+        font_layout.setContentsMargins(0,0,0,0)
+        font_layout.addWidget(self.font_combo, 1)
+        font_layout.addWidget(reset_button)
+        annotation_layout.addWidget(QLabel("Font:"), 0, 0)
+        annotation_layout.addWidget(self._create_help_label(font_tooltip), 0, 1, Qt.AlignLeft)
+        annotation_layout.addWidget(font_widget, 0, 2, 1, 2)
+        self.font_size_spinbox = QSpinBox()
+        self.font_size_spinbox.setRange(10, 28)
+        self.font_size_spinbox.setSuffix(" px")
+        self.font_size_spinbox.setFixedWidth(80)
+        font_size_tooltip = "Font size for text labels on annotated screenshots."
+        annotation_layout.addWidget(QLabel("Font Size:"), 1, 0)
+        annotation_layout.addWidget(self._create_help_label(font_size_tooltip), 1, 1, Qt.AlignLeft)
+        annotation_layout.addWidget(self.font_size_spinbox, 1, 3)
+        self.text_padding_spinbox = QSpinBox()
+        self.text_padding_spinbox.setRange(0, 12)
+        self.text_padding_spinbox.setSuffix(" px")
+        self.text_padding_spinbox.setFixedWidth(80)
+        padding_tooltip = "Padding around text labels on annotated screenshots."
+        annotation_layout.addWidget(QLabel("Padding:"), 2, 0)
+        annotation_layout.addWidget(self._create_help_label(padding_tooltip), 2, 1, Qt.AlignLeft)
+        annotation_layout.addWidget(self.text_padding_spinbox, 2, 3)
+        vision_layout.addWidget(annotation_group, 4, 0, 1, 4)
+
         return group
 
     def _create_context_section(self):
@@ -872,61 +903,4 @@ class SettingsWindow(QDialog):
 
         return grid_widget
 
-    def _create_debug_section(self):
-        """Creates the Debug settings section."""
-        group = QGroupBox("Debug")
-        form_layout = QVBoxLayout(group)
-        form_layout.setContentsMargins(10, 20, 10, 10)
-        form_layout.setSpacing(15)
 
-        debug_group = QGroupBox("Debugging")
-        debug_layout = QGridLayout(debug_group)
-        debug_layout.setColumnStretch(2, 1)
-        self.save_trace_log_checkbox = QCheckBox("Save detailed trace log")
-        trace_log_tooltip = "Saves a JSON file of all detected UI elements after each screen analysis."
-        debug_layout.addWidget(self.save_trace_log_checkbox, 0, 0)
-        debug_layout.addWidget(self._create_help_label(trace_log_tooltip), 0, 1)
-        self.save_pre_intent_checkbox = QCheckBox("Save pre-action screenshot")
-        pre_intent_tooltip = "Saves a screenshot before each action, showing what the assistant intends to do."
-        debug_layout.addWidget(self.save_pre_intent_checkbox, 1, 0)
-        debug_layout.addWidget(self._create_help_label(pre_intent_tooltip), 1, 1)
-        self.save_post_checkbox = QCheckBox("Save post-action screenshot")
-        post_action_tooltip = "Saves a screenshot after each action for evaluation."
-        debug_layout.addWidget(self.save_post_checkbox, 2, 0)
-        debug_layout.addWidget(self._create_help_label(post_action_tooltip), 2, 1)
-        form_layout.addWidget(debug_group)
-
-        annotation_group = QGroupBox("Annotation Settings")
-        annotation_layout = QGridLayout(annotation_group)
-        annotation_layout.setColumnStretch(2, 1)
-        self.font_combo = FontComboBox()
-        font_tooltip = "Font used for text on the debug screenshots."
-        reset_button = QPushButton("Reset to Default")
-        reset_button.clicked.connect(lambda: self.font_combo.setCurrentIndex(0))
-        font_widget = QWidget()
-        font_layout = QHBoxLayout(font_widget)
-        font_layout.setContentsMargins(0,0,0,0)
-        font_layout.addWidget(self.font_combo, 1)
-        font_layout.addWidget(reset_button)
-        annotation_layout.addWidget(QLabel("Font:"), 0, 0)
-        annotation_layout.addWidget(self._create_help_label(font_tooltip), 0, 1, Qt.AlignLeft)
-        annotation_layout.addWidget(font_widget, 0, 2, 1, 2)
-        self.font_size_spinbox = QSpinBox()
-        self.font_size_spinbox.setRange(10, 20)
-        self.font_size_spinbox.setSuffix(" px")
-        self.font_size_spinbox.setFixedWidth(80)
-        font_size_tooltip = "Font size for text labels on debug screenshots."
-        annotation_layout.addWidget(QLabel("Font Size:"), 1, 0)
-        annotation_layout.addWidget(self._create_help_label(font_size_tooltip), 1, 1, Qt.AlignLeft)
-        annotation_layout.addWidget(self.font_size_spinbox, 1, 3)
-        self.text_padding_spinbox = QSpinBox()
-        self.text_padding_spinbox.setRange(0, 5)
-        self.text_padding_spinbox.setSuffix(" px")
-        self.text_padding_spinbox.setFixedWidth(80)
-        padding_tooltip = "Padding around text labels on debug screenshots."
-        annotation_layout.addWidget(QLabel("Padding:"), 2, 0)
-        annotation_layout.addWidget(self._create_help_label(padding_tooltip), 2, 1, Qt.AlignLeft)
-        annotation_layout.addWidget(self.text_padding_spinbox, 2, 3)
-        form_layout.addWidget(annotation_group)
-
-        return group
