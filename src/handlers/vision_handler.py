@@ -573,6 +573,13 @@ class VisionHandler(BaseAgent):
     def start_task(self, user_text: str, attachments=None):
         if attachments:
             logging.info(f"Vision CUA ignoring {len(attachments)} attachment(s) (v1).")
+        if (self.state == VisionState.PAUSED_ON_ERROR
+                and getattr(self, "_pending_question", None)
+                and (user_text or "").strip()):
+            # Typed answer to a pending confirmation question.
+            self._answer_question(user_text.strip())
+            return
+        self._pending_question = None
         self._cua_response_id = None
         self._cua_call_id = None
         self._cua_turns = 0
@@ -613,6 +620,21 @@ class VisionHandler(BaseAgent):
         base = self.original_user_request or ""
         combined = f"{base}\n\nAdditional user guidance: {user_text}".strip()
         logging.info("Vision CUA restarting chain with user guidance.")
+        self.stop()
+        self.start_task(combined)
+
+    def _answer_question(self, answer: str):
+        """Feeds a pending confirmation answer by restarting the chain."""
+        question = getattr(self, "_pending_question", None)
+        self._pending_question = None
+        if not question:
+            return
+        base = self.original_user_request or ""
+        combined = (f"{base}\n\nYou asked the user for confirmation: "
+                    f"'{question.strip()}' The user answered: "
+                    f"'{answer}'. Continue the task accordingly.").strip()
+        self.command_history.append(f"User answered: {answer}")
+        logging.info("Vision CUA restarting chain with confirmation answer.")
         self.stop()
         self.start_task(combined)
 
@@ -763,12 +785,26 @@ class VisionHandler(BaseAgent):
             self._stop_thinking_timer()
             text = outcome.get("done_text") or "Done."
             # Confirmation doctrine: a turn finished with ONLY a question
-            # means the model asks before a consequential action. Pause with
-            # the question — the user's reply restarts the chain (guidance).
+            # means the model asks before a consequential action. The CUA
+            # protocol has no text-injection channel, so the answer is fed
+            # by RESTARTING the chain with question+answer embedded.
             if text.strip().endswith("?"):
                 self.command_history.append(f"Model asks: {text[:300]}")
                 self.ui.add_text(text, prefix_html="<b>Vision:</b> ")
+                self._exit_compact()
                 self._set_state(VisionState.PAUSED_ON_ERROR)
+                self._pending_question = text
+                try:
+                    verdict = self.controller.ask_user_yes_no(
+                        "Vision — confirmation", text)
+                except Exception as e:
+                    logging.error(f"question dialog failed: {e}")
+                    verdict = None
+                if verdict is True:
+                    self._answer_question("да")
+                elif verdict is False:
+                    self._answer_question("нет")
+                # None (dismissed): stay paused, the user can type the answer.
                 return
             self.command_history.append(f"Computer-use finished: {text[:300]}")
             self.ui.add_text(text, prefix_html="<b>Vision:</b> ")
