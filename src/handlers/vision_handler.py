@@ -539,11 +539,11 @@ class CuaTurnWorker(QThread):
                 [turn.get("call_id")] if turn.get("call_id") else [])
             for i, cid in enumerate(ok_ids):
                 comp_out = {"kind": "computer", "call_id": cid}
-                # Single-action turns may carry their own result (cursor
-                # text, zoom/member image) — prefer it over the post shot.
-                if len(ok_ids) == 1 and len(executed_raw) == 1 and isinstance(
-                        executed_raw[0], dict):
-                    res = executed_raw[0].get("_result") or {}
+                # Per-call own results (cursor text, zoom/member image)
+                # win over the post shot; matched by position.
+                if i < len(executed_raw) and isinstance(
+                        executed_raw[i], dict):
+                    res = executed_raw[i].get("_result") or {}
                     if res.get("text"):
                         comp_out["result_text"] = res["text"]
                     if res.get("image_b64"):
@@ -590,7 +590,16 @@ class VisionHandler(BaseAgent):
     """Vision mode on the shared agent loop, grounded by Computer Use."""
 
     SCHEMA_NAME = None
-    MAX_CUA_TURNS = MAX_CUA_TURNS
+    MAX_CUA_TURNS = MAX_CUA_TURNS  # fallback; live value from settings
+
+    def _max_turns(self) -> int:
+        """Turn cap, read live from Vision settings (default 20)."""
+        try:
+            value = int((self.settings.get("vision", {}) or {}).get(
+                "max_turns_per_task", MAX_CUA_TURNS))
+            return max(1, value)
+        except Exception:
+            return MAX_CUA_TURNS
 
     def __init__(self, controller):
         super().__init__(controller)
@@ -852,9 +861,10 @@ class VisionHandler(BaseAgent):
         if self.state in (VisionState.IDLE, VisionState.PAUSED):
             return
 
-        if self._cua_turns >= self.MAX_CUA_TURNS:
+        turn_cap = self._max_turns()
+        if self._cua_turns >= turn_cap:
             self.ui.add_message(
-                f"<i>Stopped after {self.MAX_CUA_TURNS} computer-use turns "
+                f"<i>Stopped after {turn_cap} computer-use turns "
                 f"without finishing. Tell me how to proceed.</i>")
             self._exit_compact()
             self._set_state(VisionState.PAUSED_ON_ERROR)

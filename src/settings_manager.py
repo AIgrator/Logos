@@ -160,7 +160,8 @@ class SettingsManager(QObject):
             "post_action_delay_ms": 1000,
             "max_correction_attempts": 3,
             "allow_shell_commands": False,
-            "grounding_backend": "local"
+            "grounding_backend": "local",
+            "max_turns_per_task": 20
         },
         "browser": {
             "headless": False,

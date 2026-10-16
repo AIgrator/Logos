@@ -174,7 +174,9 @@ class AnthropicProvider(BaseLLMProvider):
             except (ValueError, TypeError):
                 max_tokens = 4096
             tools = [dict(self.COMPUTER_TOOLSET), dict(self.ASK_USER_TOOL)]
-            tool_choice = {"type": "auto", "disable_parallel_tool_use": True}
+            # Batches allowed (like OpenAI): the worker answers every
+            # block id, so multi-action turns stay chain-valid.
+            tool_choice = {"type": "auto"}
 
             if previous_response_id is None:
                 if not task:
@@ -292,11 +294,6 @@ class AnthropicProvider(BaseLLMProvider):
                 # Unknown third-party blocks are ignored (never crash a turn).
 
             done_text = "".join(done_parts).strip() or None
-            if len(all_ids) > 1:
-                logging.warning(
-                    f"Anthropic returned {len(all_ids)} tool blocks despite "
-                    f"disable_parallel_tool_use; answering all to keep the "
-                    f"chain valid.")
             return {
                 "actions": actions,
                 "call_id": out_call_id,
