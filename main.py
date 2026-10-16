@@ -100,6 +100,24 @@ def main():
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     # --- End AppUserModelID ---
 
+    # --- DPI awareness (MUST precede QApplication) ---
+    # Without this the process gets a virtualized 1536x864 screen at 125%
+    # scaling while screenshots are physical 1920x1080: every click beyond
+    # the virtual region is silently clamped elsewhere. Per-Monitor V2 makes
+    # coordinates physical everywhere (screenshots == clicks == cursor).
+    if sys.platform == "win32":
+        try:
+            import ctypes as _ct
+            try:
+                _ct.windll.shcore.SetProcessDpiAwareness(2)
+                print("DPI awareness: Per-Monitor V2", flush=True)
+            except Exception:
+                _ct.windll.user32.SetProcessDPIAware()
+                print("DPI awareness: System (fallback)", flush=True)
+        except Exception as e:
+            print(f"DPI awareness setup failed: {e}", flush=True)
+    # --- End DPI awareness ---
+
     # Create the application EARLY so a splash screen covers the rest of
     # startup (settings, controller). Without it the user stares at nothing
     # for seconds — and EXE builds have no console at all.
