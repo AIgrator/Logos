@@ -387,7 +387,20 @@ class ChatWidget(QAbstractScrollArea):
         self._update_scroll_bar()
 
         is_user_message = isinstance(data, str) and "<b>You:</b>" in data
-        if force_scroll:
+        try:
+            compact = bool(self.is_compact_fn()) if getattr(
+                self, "is_compact_fn", None) else False
+        except Exception:
+            compact = False
+        try:
+            mode = self.mode_fn() if getattr(
+                self, "mode_fn", None) else "chat"
+        except Exception:
+            mode = "chat"
+        if force_scroll or compact or mode != "chat":
+            # Everywhere except plain chat (and always in the compact
+            # strip): stick to the bottom so the latest agent turn is
+            # visible; older lines scroll up. Chat keeps follow-if-at-top.
             self.scroll_to_bottom()
         elif is_user_message:
             QTimer.singleShot(0, lambda: self._execute_scroll(height_before_new_message))

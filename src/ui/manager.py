@@ -313,6 +313,9 @@ class UIManager(QWidget):
         self.layout.addWidget(self.custom_title_bar)
 
         self.chat_widget = ChatWidget(self.controller.theme_manager)
+        self.chat_widget.is_compact_fn = lambda: self.is_compact
+        self.chat_widget.mode_fn = lambda: getattr(
+            self, "_active_mode_key", "chat")
         self.chat_widget.retry_requested.connect(self.retry_requested.emit)
         self.chat_widget.continue_requested.connect(self.continue_requested.emit)
         self.layout.addWidget(self.chat_widget, 1)
