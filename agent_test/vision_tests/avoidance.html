@@ -12,9 +12,11 @@
   .hint { text-align: center; color: #aaa; font-size: 15px; margin-bottom: 10px; }
   #zone { position: relative; height: 520px; margin: 0 40px; background: #262626;
           border: 2px dashed #555; border-radius: 12px; }
-  #target { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+  #target { position: absolute; left: 50%; transform: translateX(-50%);
             padding: 26px 54px; font-size: 24px; background: #b25e09; color: #fff;
             border: 0; border-radius: 12px; cursor: pointer; }
+  #target.bottom { bottom: 30px; }
+  #target.top { top: 30px; }
   #result { text-align: center; font-size: 22px; min-height: 36px; margin-top: 12px; }
   #next { display: block; width: 220px; margin: 14px auto; padding: 12px;
           font-size: 18px; background: #0d6efd; color: #fff; border: 0;
@@ -29,17 +31,27 @@
   <a href="scroll.html">#scroll</a>
   <a href="widgets.html">#widgets</a>
 </nav>
-<h1>ЗАДАЧА: нажми оранжевую кнопку в центре (человек: надвинь окно Logos прямо на неё перед стартом)</h1>
-<p class="hint">Правильное поведение: полоска Logos сама уезжает в сторону — и только потом клик. Если клик попал по окну Logos вместо кнопки — тест провален.</p>
-<div id="zone"><button id="target">НАЖМИ МЕНЯ</button></div>
+<h1>ЗАДАЧА: нажми оранжевую кнопку ДВАЖДЫ — сначала внизу, потом вверху (человек: надвинь окно Logos прямо на неё перед стартом)</h1>
+<p class="hint">Правильное поведение: полоска Logos сама уезжает в сторону — и только потом клик. После первого клика кнопка переедет вверх: если окно чата окажется на ней — оно должно уехать снова. Если клик попал по окну Logos вместо кнопки — тест провален.</p>
+<div id="zone"><button id="target" class="bottom">НАЖМИ МЕНЯ (1/2)</button></div>
 <div id="result"></div>
 <button id="next" onclick="location.href='scroll.html'">Далее →</button>
 <script>
 let n = 0;
-document.getElementById('target').addEventListener('click', () => {
+const btn = document.getElementById('target');
+const res = document.getElementById('result');
+btn.addEventListener('click', () => {
   n++;
-  document.getElementById('result').textContent = `✅ Кнопка нажата ${n} раз(а) — ТЕСТ ПРОЙДЕН`;
-  document.getElementById('result').style.color = '#39d353';
+  if (n === 1) {
+    btn.classList.remove('bottom');
+    btn.classList.add('top');
+    btn.textContent = 'НАЖМИ МЕНЯ (2/2)';
+    res.textContent = 'Клик 1/2 засчитан — кнопка уехала ВВЕРХ по центру';
+    res.style.color = '#ffd75e';
+  } else {
+    res.textContent = '✅ Оба клика засчитаны — ТЕСТ ПРОЙДЕН';
+    res.style.color = '#39d353';
+  }
 });
 </script>
 </body>
