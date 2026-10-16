@@ -90,6 +90,309 @@ class AnthropicProvider(BaseLLMProvider):
             api_key=self.api_key,
             base_url=self.provider_config.get("api_url")
         )
+        # Server-side conversation chains (Anthropic has no response chaining:
+        # the full message history travels with every call). Keyed by the
+        # chain id we hand out as response_id. Bounded; oldest dropped.
+        self._cua_chains: dict = {}
+
+    COMPUTER_TOOLSET = {"type": "computer_toolset_20260801"}
+    ASK_USER_TOOL = {
+        "name": "ask_user",
+        "description": (
+            "Show the human a modal dialog with your question and wait "
+            "for their answer. Use it before any destructive, "
+            "irreversible, or transmitting action, and whenever the task "
+            "cannot proceed safely without clarification. The human's "
+            "answer returns as this call's result; then continue."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The exact question to show the human.",
+                }
+            },
+            "required": ["question"],
+        },
+    }
+    MAX_CUA_CHAINS = 32
+
+    # computer_toolset members -> our executor action types. All 17 covered
+    # (the 6 Anthropic-only extras live in the shared executor — OpenAI never
+    # emits them, so no per-provider gating is needed).
+    _MEMBER_MAP = {
+        "screenshot": "screenshot",
+        "zoom": "zoom",
+        "left_click": ("click", "left"),
+        "right_click": ("click", "right"),
+        "middle_click": ("click", "middle"),
+        "double_click": "double_click",
+        "triple_click": "triple_click",
+        "left_click_drag": "drag",
+        "mouse_move": "move",
+        "cursor_position": "cursor_position",
+        "left_mouse_down": "left_mouse_down",
+        "left_mouse_up": "left_mouse_up",
+        "scroll": "scroll",
+        "type": "type",
+        "key": "keypress",
+        "hold_key": "hold_key",
+        "wait": "wait",
+    }
+
+    def supports_computer_use(self) -> bool:
+        return True
+
+    def computer_use_turn(
+        self,
+        task: str | None = None,
+        outputs: list | None = None,
+        previous_response_id: str | None = None,
+        instructions: str | None = None
+    ) -> dict:
+        """
+        One computer-use turn via Messages API (non-streaming; the CUA
+        worker already runs off the GUI thread — streaming buys nothing).
+
+        Tools sent: the `computer_toolset_20260801` client toolset plus
+        the `ask_user` custom tool (same array, per docs). Member calls
+        arrive as tool_use blocks with toolset_name "computer"; answers go
+        back as tool_result blocks echoing toolset_name. Coordinates are
+        screenshot pixels, like OpenAI.
+
+        One action per turn (disable_parallel_tool_use): matches the
+        worker's single-call output shape, no outbox rework needed.
+        """
+        from anthropic import (
+            AuthenticationError, RateLimitError, InternalServerError,
+            APIConnectionError, APITimeoutError, APIError,
+        )
+        try:
+            try:
+                max_tokens = int(self.provider_config.get("max_tokens", 4096))
+            except (ValueError, TypeError):
+                max_tokens = 4096
+            tools = [dict(self.COMPUTER_TOOLSET), dict(self.ASK_USER_TOOL)]
+            tool_choice = {"type": "auto", "disable_parallel_tool_use": True}
+
+            if previous_response_id is None:
+                if not task:
+                    raise ValueError("First computer-use turn requires a task.")
+                import uuid
+                chain_id = uuid.uuid4().hex[:12]
+                messages: list = [{"role": "user", "content": [
+                    {"type": "text", "text": task}]}]
+                system = instructions or None
+                self._cua_chains[chain_id] = {
+                    "messages": messages, "system": system}
+                if len(self._cua_chains) > self.MAX_CUA_CHAINS:
+                    oldest = next(iter(self._cua_chains))
+                    del self._cua_chains[oldest]
+            else:
+                chain_id = previous_response_id
+                slot = self._cua_chains.get(chain_id)
+                if slot is None:
+                    raise ValueError(
+                        "Unknown computer-use chain; restart the task.")
+                if not outputs:
+                    raise ValueError("Follow-up turn requires outputs.")
+                messages = slot["messages"]
+                system = slot["system"]
+                results: list = []
+                results: list = []
+                for out in outputs:
+                    if out.get("kind") != "computer":
+                        results.append({
+                            "type": "tool_result",
+                            "tool_use_id": out.get("call_id"),
+                            "content": out.get("output_text", ""),
+                        })
+                        continue
+                    # Per-call result wins (cursor text, zoom/member image);
+                    # then the post screenshot (last item only); else OK.
+                    # (Never an empty image — the API rejects it.)
+                    if out.get("result_image_b64"):
+                        content = [{
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": out["result_image_b64"],
+                            }}]
+                    elif out.get("result_text"):
+                        content = [{"type": "text",
+                                    "text": out["result_text"]}]
+                    elif out.get("screenshot_b64"):
+                        content = [{
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": out["screenshot_b64"],
+                            }}]
+                    else:
+                        content = [{"type": "text", "text": "OK"}]
+                    results.append({
+                        "type": "tool_result",
+                        "tool_use_id": out.get("call_id"),
+                        "toolset_name": "computer",
+                        "content": content,
+                    })
+                messages.append({"role": "user", "content": results})
+
+            response = self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                tools=tools,
+                tool_choice=tool_choice,
+                system=system,
+                messages=messages,
+                timeout=90,
+            )
+            messages.append({"role": "assistant", "content": response.content})
+
+            actions: list = []
+            out_call_id = None
+            all_ids: list = []
+            asks: list = []
+            done_parts: list = []
+            for block in (response.content or []):
+                btype = getattr(block, "type", "")
+                if btype == "text":
+                    done_parts.append(getattr(block, "text", "") or "")
+                    continue
+                if btype not in ("tool_use", "server_tool_use"):
+                    continue
+                name = getattr(block, "name", "")
+                tset = getattr(block, "toolset_name", None)
+                bid = getattr(block, "id", None)
+                if bid and tset == "computer":
+                    all_ids.append(bid)
+                block_input = getattr(block, "input", None) or {}
+                if isinstance(block_input, str):
+                    try:
+                        import json as _json
+                        block_input = _json.loads(block_input or "{}")
+                    except Exception:
+                        block_input = {}
+                if tset == "computer":
+                    mapped = self._MEMBER_MAP.get(name)
+                    if mapped is None:
+                        raise ValueError(
+                            f"Unknown computer member '{name}'.")
+                    action = self._member_to_action(name, mapped, block_input)
+                    actions.append(action)
+                    out_call_id = bid
+                elif name == "ask_user" and not tset:
+                    asks.append({
+                        "call_id": bid,
+                        "question": block_input.get("question", ""),
+                    })
+                # Unknown third-party blocks are ignored (never crash a turn).
+
+            done_text = "".join(done_parts).strip() or None
+            if len(all_ids) > 1:
+                logging.warning(
+                    f"Anthropic returned {len(all_ids)} tool blocks despite "
+                    f"disable_parallel_tool_use; answering all to keep the "
+                    f"chain valid.")
+            return {
+                "actions": actions,
+                "call_id": out_call_id,
+                "call_ids": all_ids,
+                "response_id": chain_id,
+                "pending_safety_checks": [],
+                "ask": asks,
+                "done_text": done_text,
+            }
+        except (AuthenticationError, RateLimitError) as e:
+            raise FatalError(f"Anthropic computer-use auth/quota error: {e}") from e
+        except (APIConnectionError, APITimeoutError, InternalServerError) as e:
+            raise RetryableError(f"Anthropic computer-use transient error: {e}") from e
+        except APIError as e:
+            _code = getattr(e, "status_code", None)
+            if _code in _RETRYABLE_CODES:
+                raise RetryableError(
+                    f"Anthropic computer-use transient API error ({_code}): {e}",
+                    retry_after=extract_retry_after(
+                        response=getattr(e, "response", None),
+                        message=str(e))) from e
+            raise FatalError(f"Anthropic computer-use API error: {e}") from e
+
+    @staticmethod
+    def _member_to_action(name: str, mapped, block_input: dict) -> dict:
+        """Converts one computer_toolset member call to our action format."""
+        if mapped == "screenshot":
+            return {"type": "screenshot"}
+        if mapped == "zoom":
+            region = block_input.get("region") or [0, 0, 100, 100]
+            return {"type": "zoom", "region": list(region)[:4]}
+        if mapped == "cursor_position":
+            return {"type": "cursor_position"}
+        if mapped == "left_mouse_down":
+            return {"type": "left_mouse_down"}
+        if mapped == "left_mouse_up":
+            return {"type": "left_mouse_up"}
+        if mapped == "hold_key":
+            raw = str(block_input.get("text", ""))
+            keys = [k for k in raw.split("+") if k] or [raw]
+            try:
+                duration = float(block_input.get("duration", 1.0))
+            except Exception:
+                duration = 1.0
+            return {"type": "hold_key", "keys": keys, "duration": duration}
+        if mapped == "triple_click":
+            coord = block_input.get("coordinate") or [0, 0]
+            return {"type": "triple_click", "x": coord[0], "y": coord[1]}
+        if mapped == "drag":
+            start = block_input.get("start_coordinate") or [0, 0]
+            end = block_input.get("coordinate") or [0, 0]
+            return {"type": "drag",
+                    "path": [{"x": start[0], "y": start[1]},
+                             {"x": end[0], "y": end[1]}]}
+        if mapped == "move":
+            coord = block_input.get("coordinate") or [0, 0]
+            return {"type": "move", "x": coord[0], "y": coord[1]}
+        if mapped == "scroll":
+            coord = block_input.get("coordinate") or [0, 0]
+            direction = str(block_input.get("scroll_direction", "down"))
+            try:
+                amount = int(block_input.get("scroll_amount", 3) or 3)
+            except Exception:
+                amount = 3
+            step = amount * 120
+            sx, sy = 0, 0
+            if direction == "up":
+                sy = -step
+            elif direction == "down":
+                sy = step
+            elif direction == "left":
+                sx = -step
+            elif direction == "right":
+                sx = step
+            return {"type": "scroll", "x": coord[0], "y": coord[1],
+                    "scroll_x": sx, "scroll_y": sy}
+        if mapped == "type":
+            return {"type": "type", "text": block_input.get("text", "")}
+        if mapped == "keypress":
+            raw = str(block_input.get("text", ""))
+            keys = [k for k in raw.split("+") if k] or [raw]
+            return {"type": "keypress", "keys": keys}
+        if mapped == "wait":
+            return {"type": "wait"}
+        # click family: ("click", button) tuples or "double_click".
+        button = mapped[1] if isinstance(mapped, tuple) else "left"
+        coord = block_input.get("coordinate") or [0, 0]
+        keys = []
+        mods = block_input.get("text")
+        if mods:
+            keys = [k for k in str(mods).split("+") if k]
+        action = {"type": "click" if "double" not in name else "double_click",
+                  "x": coord[0], "y": coord[1], "button": button or "left"}
+        if keys:
+            action["keys"] = keys
+        return action
 
     def _get_tools_from_cache(self):
         if self._tools_cache is not None:

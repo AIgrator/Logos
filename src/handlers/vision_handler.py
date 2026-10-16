@@ -493,12 +493,14 @@ class CuaTurnWorker(QThread):
                     logging.warning(f"CUA action failed: {action} -> {e}")
                     err_b64, _, _ = self._handler.capture_screenshot_b64()
                     err_outs = list(function_outs)
-                    if turn.get("call_id"):
-                        err_outs.append({
-                            "kind": "computer",
-                            "call_id": turn.get("call_id"),
-                            "screenshot_b64": err_b64,
-                        })
+                    err_ids = turn.get("call_ids") or (
+                        [turn.get("call_id")] if turn.get("call_id") else [])
+                    for i, cid in enumerate(err_ids):
+                        # Screenshot rides on the last item only (token cost).
+                        item = {"kind": "computer", "call_id": cid}
+                        if i == len(err_ids) - 1:
+                            item["screenshot_b64"] = err_b64
+                        err_outs.append(item)
                     outcome = {
                         "action_error": f"**Error:** {describe_action(action)} failed: {e}",
                         "executed": executed,
@@ -529,12 +531,23 @@ class CuaTurnWorker(QThread):
                 except Exception as e:
                     logging.warning(f"post-action shot failed: {e}")
             next_outputs = list(function_outs)
-            if turn.get("call_id"):
-                next_outputs.append({
-                    "kind": "computer",
-                    "call_id": turn.get("call_id"),
-                    "screenshot_b64": shot_b64,
-                })
+            ok_ids = turn.get("call_ids") or (
+                [turn.get("call_id")] if turn.get("call_id") else [])
+            for i, cid in enumerate(ok_ids):
+                comp_out = {"kind": "computer", "call_id": cid}
+                # Single-action turns may carry their own result (cursor
+                # text, zoom/member image) — prefer it over the post shot.
+                if len(ok_ids) == 1 and len(executed_raw) == 1 and isinstance(
+                        executed_raw[0], dict):
+                    res = executed_raw[0].get("_result") or {}
+                    if res.get("text"):
+                        comp_out["result_text"] = res["text"]
+                    if res.get("image_b64"):
+                        comp_out["result_image_b64"] = res["image_b64"]
+                # Post screenshot rides on the last item only (token cost).
+                if i == len(ok_ids) - 1:
+                    comp_out["screenshot_b64"] = shot_b64
+                next_outputs.append(comp_out)
             self._handler.trace_turn(
                 tag, turn_no, executed_raw,
                 bool(turn.get("pending_safety_checks")), shot_file,
@@ -1161,9 +1174,68 @@ class VisionHandler(BaseAgent):
                     "right": _Btn.right}
 
         if kind == "screenshot":
+            shot_b64, _, _ = self.capture_screenshot_b64()
+            action["_result"] = {"image_b64": shot_b64}
             return "screenshot"
 
-        if kind in ("click", "double_click", "move"):
+        if kind == "cursor_position":
+            from pynput.mouse import Controller as _MCtl
+            pos = _MCtl().position
+            action["_result"] = {"text": f"X={pos[0]}, Y={pos[1]}"}
+            return f"cursor_position({pos[0]}, {pos[1]})"
+
+        if kind == "zoom":
+            region = action.get("region") or [0, 0, 100, 100]
+            x0, y0, x1, y1 = (int(float(v)) for v in list(region)[:4])
+            shot_b64, _, _ = self.capture_screenshot_b64()
+            import base64 as _b64
+            import io as _io
+            from PIL import Image as _Image
+            img = _Image.open(_io.BytesIO(_b64.b64decode(shot_b64)))
+            w, h = img.size
+            box = (max(0, x0), max(0, y0), min(w, x1), min(h, y1))
+            crop = img.crop(box) if box[2] > box[0] and box[3] > box[1] else img
+            buf = _io.BytesIO()
+            crop.save(buf, format="PNG")
+            action["_result"] = {
+                "image_b64": _b64.b64encode(buf.getvalue()).decode("ascii")}
+            return f"zoom({x0}, {y0}, {x1}, {y1})"
+
+        if kind == "left_mouse_down":
+            from pynput.mouse import Button as _Btn, Controller as _MCtl
+            _MCtl().press(_Btn.left)
+            return "left_mouse_down"
+
+        if kind == "left_mouse_up":
+            from pynput.mouse import Button as _Btn, Controller as _MCtl
+            _MCtl().release(_Btn.left)
+            return "left_mouse_up"
+
+        if kind == "hold_key":
+            keys = action.get("keys") or ([action.get("key")]
+                                          if action.get("key") else [])
+            try:
+                duration = min(float(action.get("duration", 1.0)), 30.0)
+            except Exception:
+                duration = 1.0
+            norm = [normalize_key(k) for k in keys] or ["shift"]
+            kbd = self._kbd()
+            pressed = []
+            try:
+                for kk in norm:
+                    key = self._pyn_key(kk)
+                    kbd.press(key)
+                    pressed.append(key)
+                time.sleep(duration)
+            finally:
+                for key in reversed(pressed):
+                    try:
+                        kbd.release(key)
+                    except Exception:
+                        pass
+            return f"hold_key({','.join(norm)}, {duration}s)"
+
+        if kind in ("click", "double_click", "triple_click", "move"):
             x, y = scale_point(float(action["x"]), float(action["y"]), scale)
             if self.ensure_point_visible(x, y):
                 time.sleep(0.6)  # compositor settle after relocate
@@ -1182,7 +1254,7 @@ class VisionHandler(BaseAgent):
                 if kind == "move":
                     pass
                 else:
-                    presses = 2 if kind == "double_click" else 1
+                    presses = {"double_click": 2, "triple_click": 3}.get(kind, 1)
                     for i in range(presses):
                         mouse.press(button)
                         mouse.release(button)
