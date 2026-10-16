@@ -1058,12 +1058,25 @@ class VisionHandler(BaseAgent):
         except Exception as e:
             logging.warning(f"own-window visibility failed: {e}")
 
+    def _shot_max_width(self) -> int:
+        """Max sent width, 0 = native. Vendors normalize anyway (OpenAI:
+        strong results at 1440x900/1600x900); smaller = fewer tokens."""
+        try:
+            return int((self.settings.get("vision", {}) or {}).get(
+                "screenshot_max_width", 1600) or 0)
+        except Exception:
+            return 1600
+
     def capture_screenshot_b64(self):
         """Full-screen capture WITHOUT our window -> (base64 png, w, h).
 
         The Logos window must not cover screen elements on the shot the
         model decides from. Done via opacity so the window is never
         unmapped (no taskbar/focus churn, no recreation risk).
+
+        Downscales to screenshot_max_width (aspect kept); model coords
+        then live in sent-image space — execute_action scales them back
+        via self._shot_scale (Anthropic rule, OpenAI recipes agree).
         """
         import mss
         from PIL import Image
@@ -1075,6 +1088,12 @@ class VisionHandler(BaseAgent):
                 img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
         finally:
             self._set_own_window_visible(True)
+        native_w = img.size[0]
+        max_w = self._shot_max_width()
+        if max_w and native_w > max_w:
+            img = img.resize((max_w, int(img.size[1] * max_w / native_w)),
+                             Image.LANCZOS)
+        self._shot_scale = native_w / img.size[0] if img.size[0] else 1.0
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode("ascii"), img.size[0], img.size[1]
@@ -1183,7 +1202,7 @@ class VisionHandler(BaseAgent):
         # layout-dependent typing); only screenshots still use mss/PIL.
         from pynput.mouse import Button as _Btn, Controller as _MCtl
         mouse = _MCtl()
-        scale = 1.0  # native-resolution screenshots; see scale_point()
+        scale = getattr(self, "_shot_scale", 1.0) or 1.0
         _buttons = {"left": _Btn.left, "middle": _Btn.middle,
                     "right": _Btn.right}
 

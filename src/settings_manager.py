@@ -161,7 +161,8 @@ class SettingsManager(QObject):
             "max_correction_attempts": 3,
             "allow_shell_commands": False,
             "grounding_backend": "local",
-            "max_turns_per_task": 20
+            "max_turns_per_task": 20,
+            "screenshot_max_width": 1600
         },
         "browser": {
             "headless": False,

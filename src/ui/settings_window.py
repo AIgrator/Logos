@@ -264,6 +264,7 @@ class SettingsWindow(QDialog):
         vision_cfg = self.settings_manager.get("vision", {})
         self.allow_shell_commands_checkbox.setChecked(bool(vision_cfg.get("allow_shell_commands", False)))
         self.max_turns_spinbox.setValue(int(vision_cfg.get("max_turns_per_task", 20) or 20))
+        self.shot_width_spinbox.setValue(int(vision_cfg.get("screenshot_max_width", 1600) or 0))
 
         # Debug (keys persist under "omniparser" for now; the recognizer
         # service will adopt them later)
@@ -373,6 +374,7 @@ class SettingsWindow(QDialog):
         vision_settings = {
             "allow_shell_commands": self.allow_shell_commands_checkbox.isChecked(),
             "max_turns_per_task": self.max_turns_spinbox.value(),
+            "screenshot_max_width": self.shot_width_spinbox.value(),
         }
         try:
             existing_vision = self.settings_manager.get("vision", {}) or {}
@@ -697,18 +699,29 @@ class SettingsWindow(QDialog):
         vision_layout.addWidget(self._create_help_label(max_turns_tooltip), 1, 1, Qt.AlignLeft)
         vision_layout.addWidget(self.max_turns_spinbox, 1, 3)
 
+        self.shot_width_spinbox = QSpinBox()
+        self.shot_width_spinbox.setRange(0, 3840)
+        self.shot_width_spinbox.setSingleStep(160)
+        self.shot_width_spinbox.setFixedWidth(80)
+        shot_width_tooltip = ("Max screenshot width sent to the model "
+                              "(0 = native). Vendors normalize anyway; "
+                              "1600 saves tokens with no accuracy loss.")
+        vision_layout.addWidget(QLabel("Screenshot max width:"), 2, 0)
+        vision_layout.addWidget(self._create_help_label(shot_width_tooltip), 2, 1, Qt.AlignLeft)
+        vision_layout.addWidget(self.shot_width_spinbox, 2, 3)
+
         self.save_trace_log_checkbox = QCheckBox("Save detailed trace log")
         trace_log_tooltip = "Appends one JSON line per computer-use turn (actions, safety, screenshot path) to the app timeline."
-        vision_layout.addWidget(self.save_trace_log_checkbox, 2, 0)
-        vision_layout.addWidget(self._create_help_label(trace_log_tooltip), 2, 1)
+        vision_layout.addWidget(self.save_trace_log_checkbox, 3, 0)
+        vision_layout.addWidget(self._create_help_label(trace_log_tooltip), 3, 1)
         self.save_pre_intent_checkbox = QCheckBox("Save pre-action screenshot")
         pre_intent_tooltip = "Saves a screenshot before each turn's actions (screenshots/cua_<time>/)."
-        vision_layout.addWidget(self.save_pre_intent_checkbox, 3, 0)
-        vision_layout.addWidget(self._create_help_label(pre_intent_tooltip), 3, 1)
+        vision_layout.addWidget(self.save_pre_intent_checkbox, 4, 0)
+        vision_layout.addWidget(self._create_help_label(pre_intent_tooltip), 4, 1)
         self.save_post_checkbox = QCheckBox("Save post-action screenshot")
         post_action_tooltip = "Saves an annotated screenshot after each turn (red marks: clicks, drags)."
-        vision_layout.addWidget(self.save_post_checkbox, 4, 0)
-        vision_layout.addWidget(self._create_help_label(post_action_tooltip), 4, 1)
+        vision_layout.addWidget(self.save_post_checkbox, 5, 0)
+        vision_layout.addWidget(self._create_help_label(post_action_tooltip), 5, 1)
 
         annotation_group = QGroupBox("Annotation Settings")
         annotation_layout = QGridLayout(annotation_group)
@@ -741,7 +754,7 @@ class SettingsWindow(QDialog):
         annotation_layout.addWidget(QLabel("Padding:"), 2, 0)
         annotation_layout.addWidget(self._create_help_label(padding_tooltip), 2, 1, Qt.AlignLeft)
         annotation_layout.addWidget(self.text_padding_spinbox, 2, 3)
-        vision_layout.addWidget(annotation_group, 5, 0, 1, 4)
+        vision_layout.addWidget(annotation_group, 6, 0, 1, 4)
 
         return group
 
