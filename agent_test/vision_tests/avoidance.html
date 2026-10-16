@@ -16,7 +16,7 @@
             padding: 26px 54px; font-size: 24px; background: #b25e09; color: #fff;
             border: 0; border-radius: 12px; cursor: pointer; }
   #target.bottom { bottom: 30px; }
-  #target.top { top: 30px; }
+  #target.top { position: fixed; top: 10px; left: 50%; z-index: 100; }
   #result { text-align: center; font-size: 22px; min-height: 36px; margin-top: 12px; }
   #next { display: block; width: 220px; margin: 14px auto; padding: 12px;
           font-size: 18px; background: #0d6efd; color: #fff; border: 0;
@@ -33,7 +33,7 @@
 </nav>
 <h1>ЗАДАЧА: нажми оранжевую кнопку ДВАЖДЫ — сначала внизу, потом вверху (человек: надвинь окно Logos прямо на неё перед стартом)</h1>
 <p class="hint">Правильное поведение: полоска Logos сама уезжает в сторону — и только потом клик. После первого клика кнопка переедет вверх: если окно чата окажется на ней — оно должно уехать снова. Если клик попал по окну Logos вместо кнопки — тест провален.</p>
-<div id="zone"><button id="target" class="bottom">НАЖМИ МЕНЯ (1/2)</button></div>
+<div id="zone"><button id="target" class="bottom">НАЖМИ МЕНЯ (0/2)</button></div>
 <div id="result"></div>
 <button id="next" onclick="location.href='scroll.html'">Далее →</button>
 <script>
@@ -45,8 +45,8 @@ btn.addEventListener('click', () => {
   if (n === 1) {
     btn.classList.remove('bottom');
     btn.classList.add('top');
-    btn.textContent = 'НАЖМИ МЕНЯ (2/2)';
-    res.textContent = 'Клик 1/2 засчитан — кнопка уехала ВВЕРХ по центру';
+    btn.textContent = 'НАЖМИ МЕНЯ (1/2)';
+    res.textContent = 'Клик 1/2 засчитан — кнопка уехала В САМЫЙ ВЕРХ экрана';
     res.style.color = '#ffd75e';
   } else {
     res.textContent = '✅ Оба клика засчитаны — ТЕСТ ПРОЙДЕН';
