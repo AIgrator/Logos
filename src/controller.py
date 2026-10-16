@@ -743,7 +743,7 @@ class AppController(QObject):
         (the task then pauses and the user can steer via chat).
         GUI thread only.
         """
-        from PySide6.QtWidgets import QInputDialog
+        from PySide6.QtWidgets import QInputDialog, QLabel
         from PySide6.QtGui import QIcon
         try:
             dlg = QInputDialog(self.ui)
@@ -753,6 +753,16 @@ class AppController(QObject):
                 dlg.setWindowIcon(QIcon("assets/ico.ico"))
             except Exception:
                 pass
+            # Bound the width and wrap the question: long model texts
+            # otherwise stretch the dialog across the whole screen.
+            dlg.setFixedWidth(640)
+            try:
+                label = dlg.findChild(QLabel)
+                if label is not None:
+                    label.setWordWrap(True)
+            except Exception:
+                pass
+            dlg.adjustSize()
             if dlg.exec():
                 return dlg.textValue()
             return None
