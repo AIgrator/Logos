@@ -1151,8 +1151,14 @@ class VisionHandler(BaseAgent):
         if not isinstance(action, dict) or "type" not in action:
             raise ValueError(f"Malformed computer action: {action!r}")
         kind = action["type"]
-        pg = self.computer.pyautogui
+        # Mouse AND held keys go through pynput (cross-platform, one stack).
+        # pyautogui's input proved flaky on this setup (dropped Win combos,
+        # layout-dependent typing); only screenshots still use mss/PIL.
+        from pynput.mouse import Button as _Btn, Controller as _MCtl
+        mouse = _MCtl()
         scale = 1.0  # native-resolution screenshots; see scale_point()
+        _buttons = {"left": _Btn.left, "middle": _Btn.middle,
+                    "right": _Btn.right}
 
         if kind == "screenshot":
             return "screenshot"
@@ -1161,24 +1167,32 @@ class VisionHandler(BaseAgent):
             x, y = scale_point(float(action["x"]), float(action["y"]), scale)
             if self.ensure_point_visible(x, y):
                 time.sleep(0.6)  # compositor settle after relocate
+            button = _buttons.get(
+                (action.get("button", "left") or "left").lower())
+            if button is None and kind != "move":
+                raise ValueError(f"Unsupported mouse button: {action.get('button')!r}")
             keys = action.get("keys") or []
             held = []
             try:
                 for k in keys:
-                    kk = normalize_key(k)
-                    pg.keyDown(kk)
+                    kk = self._pyn_key(k)
+                    self._kbd().press(kk)
                     held.append(kk)
+                mouse.position = (int(x), int(y))
                 if kind == "move":
-                    pg.moveTo(x, y)
-                elif kind == "double_click":
-                    pg.click(x, y, button=action.get("button", "left") or "left",
-                             clicks=2, interval=0.1)
+                    pass
                 else:
-                    pg.click(x, y, button=action.get("button", "left") or "left")
+                    presses = 2 if kind == "double_click" else 1
+                    for i in range(presses):
+                        mouse.press(button)
+                        mouse.release(button)
+                        if i < presses - 1:
+                            time.sleep(0.1)
             finally:
+                kbd = self._kbd()
                 for kk in reversed(held):
                     try:
-                        pg.keyUp(kk)
+                        kbd.release(kk)
                     except Exception:
                         pass
             return describe_action(action)
@@ -1190,31 +1204,27 @@ class VisionHandler(BaseAgent):
             pts = [scale_point(float(p["x"]), float(p["y"]), scale) for p in path]
             if any(self.ensure_point_visible(px, py) for px, py in pts):
                 time.sleep(0.6)  # compositor settle after relocate
-            pg.moveTo(*pts[0])
-            pg.mouseDown()
+            mouse.position = (int(pts[0][0]), int(pts[0][1]))
+            mouse.press(_Btn.left)
             try:
                 for pt in pts[1:]:
-                    pg.moveTo(*pt, duration=0.1)
+                    mouse.position = (int(pt[0]), int(pt[1]))
+                    time.sleep(0.02)
             finally:
-                pg.mouseUp()
+                mouse.release(_Btn.left)
             return describe_action(action)
 
         if kind == "scroll":
             x, y = scale_point(float(action.get("x", 0)), float(action.get("y", 0)), scale)
             if self.ensure_point_visible(x, y):
                 time.sleep(0.6)  # compositor settle after relocate
-            pg.moveTo(x, y)
-            # Pixel deltas -> wheel clicks (WHEEL_DELTA=120). Sign: assumed
-            # screen-space (positive down/right); verify on the live test.
+            mouse.position = (int(x), int(y))
+            # Pixel deltas -> wheel clicks (WHEEL_DELTA=120). Sign verified
+            # live: positive scroll_y goes DOWN. pynput: dy>0 is up.
             v = int(round(float(action.get("scroll_y", 0)) / 120))
             h = int(round(float(action.get("scroll_x", 0)) / 120))
-            if v:
-                pg.scroll(-v)
-            if h:
-                try:
-                    pg.hscroll(h)
-                except Exception:
-                    pass
+            if v or h:
+                mouse.scroll(h, -v)
             return describe_action(action)
 
         if kind == "keypress":
@@ -1225,7 +1235,8 @@ class VisionHandler(BaseAgent):
             if len(norm) == 1:
                 self._press_single(norm[0])
             else:
-                pg.hotkey(*norm)
+                from src.computer.tools.win_keys import hotkey_pynput
+                hotkey_pynput(norm)
             return describe_action(action)
 
         if kind == "type":
@@ -1241,7 +1252,39 @@ class VisionHandler(BaseAgent):
 
         raise ValueError(f"Unsupported computer action: {kind!r}")
 
-    # -- low-level performers ---------------------------------------------
+    # -- low-level performers (pynput throughout; pyautogui input is dead
+    # on this setup and must not be used for acting) ---------------------
+
+    def _kbd(self):
+        """Cached pynput keyboard controller."""
+        kbd = getattr(self, "_kbd_controller", None)
+        if kbd is None:
+            from pynput.keyboard import Controller
+            kbd = Controller()
+            self._kbd_controller = kbd
+        return kbd
+
+    @staticmethod
+    def _pyn_key(name: str):
+        """normalize_key() names -> pynput keys (mirrors win_keys mapping)."""
+        from pynput.keyboard import Key, KeyCode
+        table = {
+            "enter": Key.enter, "tab": Key.tab, "esc": Key.esc,
+            "escape": Key.esc, "space": Key.space, "backspace": Key.backspace,
+            "delete": Key.delete, "up": Key.up, "down": Key.down,
+            "left": Key.left, "right": Key.right, "home": Key.home,
+            "end": Key.end, "pageup": Key.page_up, "pagedown": Key.page_down,
+            "insert": Key.insert, "shift": Key.shift, "ctrl": Key.ctrl,
+            "alt": Key.alt, "win": Key.cmd, "capslock": Key.caps_lock,
+        }
+        for i in range(1, 25):
+            table[f"f{i}"] = getattr(Key, f"f{i}", None)
+        key = table.get(str(name).lower())
+        if key is None:
+            if len(str(name)) == 1:
+                return KeyCode.from_char(str(name))
+            raise ValueError(f"Cannot map key '{name}' for pynput.")
+        return key
 
     def _press_single(self, key: str) -> None:
         import sys
@@ -1256,10 +1299,10 @@ class VisionHandler(BaseAgent):
 
     def _type_text(self, text: str) -> None:
         # Clipboard paste: fast, layout-independent (same approach as the
-        # legacy write_text tool).
+        # legacy write_text tool). Paste chord via pynput, not pyautogui.
         import sys
         import pyperclip
-        pg = self.computer.pyautogui
+        from src.computer.tools.win_keys import hotkey_pynput
         original = None
         try:
             try:
@@ -1269,9 +1312,9 @@ class VisionHandler(BaseAgent):
             pyperclip.copy(text)
             time.sleep(0.2)
             if sys.platform == "darwin":
-                pg.hotkey("command", "v")
+                hotkey_pynput(["command", "v"])
             else:
-                pg.hotkey("ctrl", "v")
+                hotkey_pynput(["ctrl", "v"])
             time.sleep(0.2)
         finally:
             if original is not None:
