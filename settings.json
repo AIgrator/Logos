@@ -1,8 +1,8 @@
 {
-  "active_provider": "openai",
+  "active_provider": "anthropic",
   "llm_providers": {
     "anthropic": {
-      "model": "claude-fable-5",
+      "model": "claude-haiku-5-5",
       "max_tokens": "4096",
       "require_json_output": true
     },

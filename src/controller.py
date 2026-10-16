@@ -737,34 +737,55 @@ class AppController(QObject):
             return False
 
     def ask_user_text(self, question: str):
-        """Modal question with a free-text answer (Vision ask_user tool).
+        """Modal question with optional free text (Vision ask_user tool).
 
-        Returns the typed answer, "" on empty OK, or None if dismissed
-        (the task then pauses and the user can steer via chat).
+        Width matches the compact window. Yes sends the typed text (or
+        "да" when empty — no typing needed for plain confirmations);
+        No sends the typed text (or "нет"); closing via X returns None
+        (the task pauses and the user can steer via chat).
         GUI thread only.
         """
-        from PySide6.QtWidgets import QInputDialog, QLabel
+        from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
+                                       QLabel, QLineEdit, QPushButton)
         from PySide6.QtGui import QIcon
         try:
-            dlg = QInputDialog(self.ui)
+            try:
+                width = int(self.ui.main_window.width())
+            except Exception:
+                width = 700
+            width = max(480, min(width, 900))
+            dlg = QDialog(self.ui)
             dlg.setWindowTitle("Vision asks")
-            dlg.setLabelText(question)
             try:
                 dlg.setWindowIcon(QIcon("assets/ico.ico"))
             except Exception:
                 pass
-            # Bound the width and wrap the question: long model texts
-            # otherwise stretch the dialog across the whole screen.
-            dlg.setFixedWidth(640)
-            try:
-                label = dlg.findChild(QLabel)
-                if label is not None:
-                    label.setWordWrap(True)
-            except Exception:
-                pass
-            dlg.adjustSize()
+            dlg.setFixedWidth(width)
+            layout = QVBoxLayout(dlg)
+            label = QLabel(question)
+            label.setWordWrap(True)
+            layout.addWidget(label)
+            edit = QLineEdit(dlg)
+            edit.setPlaceholderText("Дополнение (необязательно)…")
+            layout.addWidget(edit)
+            row = QHBoxLayout()
+            row.addStretch()
+            btn_yes = QPushButton("Yes")
+            btn_no = QPushButton("No")
+            row.addWidget(btn_yes)
+            row.addWidget(btn_no)
+            layout.addLayout(row)
+            result: dict = {}
+            btn_yes.clicked.connect(
+                lambda: (result.setdefault("answer",
+                                           edit.text().strip() or "да"),
+                         dlg.accept()))
+            btn_no.clicked.connect(
+                lambda: (result.setdefault("answer",
+                                           edit.text().strip() or "нет"),
+                         dlg.accept()))
             if dlg.exec():
-                return dlg.textValue()
+                return result.get("answer", "да")
             return None
         except Exception as e:
             logging.error(f"ask dialog failed: {e}")

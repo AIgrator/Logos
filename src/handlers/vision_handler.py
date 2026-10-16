@@ -273,11 +273,15 @@ class CuaTurnWorker(QThread):
         from datetime import datetime
         try:
             logger = logging.getLogger("llm_communication")
+            try:
+                _prov = self._provider.get_provider_id()
+            except Exception:
+                _prov = "?"
             entry = {
                 "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "direction": direction,
                 "mode": "Vision-CUA",
-                "provider": "openai",
+                "provider": _prov,
                 "model": getattr(self._provider, "model", "?"),
             }
             entry.update(payload)
