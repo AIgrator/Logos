@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>#avoidance — увод окна от клика</title>
+<style>
+  body { font-family: Segoe UI, Arial, sans-serif; background: #1e1e1e; color: #eee;
+         margin: 0; padding: 0; }
+  nav { background: #2a2a2a; padding: 10px 16px; }
+  nav a { color: #6cb6ff; font-size: 16px; margin-right: 14px; text-decoration: none; }
+  h1 { font-size: 22px; text-align: center; margin: 16px 20px 4px; }
+  .hint { text-align: center; color: #aaa; font-size: 15px; margin-bottom: 10px; }
+  #zone { position: relative; height: 520px; margin: 0 40px; background: #262626;
+          border: 2px dashed #555; border-radius: 12px; }
+  #target { position: absolute; left: 50%; top: 50%; transform: translate(-50%,-50%);
+            padding: 26px 54px; font-size: 24px; background: #b25e09; color: #fff;
+            border: 0; border-radius: 12px; cursor: pointer; }
+  #result { text-align: center; font-size: 22px; min-height: 36px; margin-top: 12px; }
+  #next { display: block; width: 220px; margin: 14px auto; padding: 12px;
+          font-size: 18px; background: #0d6efd; color: #fff; border: 0;
+          border-radius: 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<nav>
+  <a href="index.html">#главная</a>
+  <a href="dragdrop.html">#dragdrop</a>
+  <a href="avoidance.html">#avoidance</a>
+  <a href="scroll.html">#scroll</a>
+  <a href="widgets.html">#widgets</a>
+</nav>
+<h1>ЗАДАЧА: нажми оранжевую кнопку в центре (человек: надвинь окно Logos прямо на неё перед стартом)</h1>
+<p class="hint">Правильное поведение: полоска Logos сама уезжает в сторону — и только потом клик. Если клик попал по окну Logos вместо кнопки — тест провален.</p>
+<div id="zone"><button id="target">НАЖМИ МЕНЯ</button></div>
+<div id="result"></div>
+<button id="next" onclick="location.href='scroll.html'">Далее →</button>
+<script>
+let n = 0;
+document.getElementById('target').addEventListener('click', () => {
+  n++;
+  document.getElementById('result').textContent = `✅ Кнопка нажата ${n} раз(а) — ТЕСТ ПРОЙДЕН`;
+  document.getElementById('result').style.color = '#39d353';
+});
+</script>
+</body>
+</html>

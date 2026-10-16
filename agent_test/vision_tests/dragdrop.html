@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>#dragdrop — перетаскивание по цветам</title>
+<style>
+  body { font-family: Segoe UI, Arial, sans-serif; background: #1e1e1e; color: #eee;
+         margin: 0; padding: 0; user-select: none; }
+  nav { background: #2a2a2a; padding: 10px 16px; }
+  nav a { color: #6cb6ff; font-size: 16px; margin-right: 14px; text-decoration: none; }
+  h1 { font-size: 24px; text-align: center; margin: 16px 0 4px; }
+  #status { text-align: center; font-size: 20px; min-height: 32px; color: #ffd75e; }
+  #arena { position: relative; width: 1100px; height: 560px; margin: 10px auto;
+           background: #262626; border: 2px dashed #555; border-radius: 12px; overflow: hidden; }
+  .small { position: absolute; width: 70px; height: 70px; border-radius: 10px;
+           cursor: grab; z-index: 10; box-shadow: 0 0 0 3px #000; }
+  .big { position: absolute; width: 170px; height: 170px; border-radius: 14px;
+         opacity: 0.85; display: flex; align-items: center; justify-content: center;
+         font-size: 15px; color: #000; font-weight: bold; }
+  .big.done { outline: 5px solid #39d353; opacity: 1; }
+  .small.placed { display: none; }
+  #next { display: block; width: 220px; margin: 14px auto; padding: 12px;
+          font-size: 18px; background: #0d6efd; color: #fff; border: 0;
+          border-radius: 8px; cursor: pointer; }
+</style>
+</head>
+<body>
+<nav>
+  <a href="index.html">#главная</a>
+  <a href="dragdrop.html">#dragdrop</a>
+  <a href="avoidance.html">#avoidance</a>
+  <a href="scroll.html">#scroll</a>
+  <a href="widgets.html">#widgets</a>
+</nav>
+<h1>ЗАДАЧА: перетащи каждый маленький блок в большой блок ТАКОГО ЖЕ цвета (всего 3 пары)</h1>
+<div id="status">Осталось: 3</div>
+<div id="arena"></div>
+<button id="next" onclick="location.href='avoidance.html'">Далее →</button>
+<script>
+const COLORS = [
+  {name: 'red',   css: '#e5484d'},
+  {name: 'green', css: '#30a46c'},
+  {name: 'blue',  css: '#3e63dd'},
+];
+const arena = document.getElementById('arena');
+const status = document.getElementById('status');
+let remaining = 3;
+
+function rnd(min, max) { return Math.floor(Math.random() * (max - min)) + min; }
+function freeSpot(w, h) {
+  for (let t = 0; t < 200; t++) {
+    const x = rnd(20, 1100 - w - 20), y = rnd(20, 560 - h - 20);
+    let ok = true;
+    document.querySelectorAll('#arena div').forEach(el => {
+      const r = el.getBoundingClientRect(), a = arena.getBoundingClientRect();
+      const ex = r.left - a.left, ey = r.top - a.top;
+      if (x < ex + el.offsetWidth + 15 && x + w + 15 > ex &&
+          y < ey + el.offsetHeight + 15 && y + h + 15 > ey) ok = false;
+    });
+    if (ok) return [x, y];
+  }
+  return [rnd(20, 900), rnd(20, 400)];
+}
+
+COLORS.forEach(c => {
+  const [bx, by] = freeSpot(170, 170);
+  const big = document.createElement('div');
+  big.className = 'big'; big.dataset.color = c.name;
+  big.style.cssText = `left:${bx}px;top:${by}px;background:${c.css}`;
+  arena.appendChild(big);
+});
+COLORS.forEach(c => {
+  const [sx, sy] = freeSpot(70, 70);
+  const s = document.createElement('div');
+  s.className = 'small'; s.dataset.color = c.name;
+  s.style.cssText = `left:${sx}px;top:${sy}px;background:${c.css}`;
+  arena.appendChild(s);
+
+  let dx = 0, dy = 0, drag = false;
+  s.addEventListener('pointerdown', e => {
+    drag = true;
+    dx = e.clientX - s.offsetLeft; dy = e.clientY - s.offsetTop;
+    s.setPointerCapture(e.pointerId);
+  });
+  s.addEventListener('pointermove', e => {
+    if (!drag) return;
+    s.style.left = (e.clientX - dx) + 'px';
+    s.style.top = (e.clientY - dy) + 'px';
+  });
+  s.addEventListener('pointerup', e => {
+    if (!drag) return;
+    drag = false;
+    const cx = e.clientX, cy = e.clientY;
+    let hit = null;
+    document.querySelectorAll('.big').forEach(b => {
+      const r = b.getBoundingClientRect();
+      if (cx >= r.left && cx <= r.right && cy >= r.top && cy <= r.bottom) hit = b;
+    });
+    if (hit && hit.dataset.color === s.dataset.color && !hit.classList.contains('done')) {
+      hit.classList.add('done');
+      s.classList.add('placed');
+      remaining--;
+      status.textContent = remaining === 0
+        ? '✅ ВСЕ ТРИ ПАРЫ СОБРАНЫ — ТЕСТ ПРОЙДЕН'
+        : `Верно! Осталось: ${remaining}`;
+      status.style.color = remaining === 0 ? '#39d353' : '#ffd75e';
+    } else if (hit) {
+      status.textContent = '❌ Не тот цвет — попробуй другой большой блок';
+      status.style.color = '#ff7b72';
+    } else {
+      status.textContent = 'Мимо — отпусти строго внутри большого блока';
+      status.style.color = '#ff7b72';
+    }
+  });
+});
+</script>
+</body>
+</html>
