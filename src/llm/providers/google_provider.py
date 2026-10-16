@@ -41,9 +41,288 @@ class GoogleProvider(BaseLLMProvider):
     @staticmethod
     def get_provider_config() -> dict:
         return {
+            "api_url": "https://api.google.com",
             "supports_cancellation": True,
-            "supports_streaming_tools": True
+            "supports_streaming_tools": True,
         }
+
+    def supports_computer_use(self) -> bool:
+        return True
+
+    COMPUTER_TOOLSET = {
+        "type": "computer_use",
+        "environment": "desktop",
+    }
+
+    ASK_USER_TOOL = {
+        "name": "ask_user",
+        "description": (
+            "Show the human a modal dialog with your question and wait "
+            "for their answer. Use it before any destructive, "
+            "irreversible, or transmitting action, and whenever the task "
+            "cannot proceed safely without clarification. The human's "
+            "answer returns as this call's result; then continue."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "The exact question to show the human.",
+                }
+            },
+            "required": ["question"],
+        },
+    }
+
+    MAX_CUA_CHAINS = 32
+
+    # computer_toolset members -> our executor action types.
+    # Google desktop computer_use supports:
+    #   click, double_click, triple_click, middle_click, right_click,
+    #   mouse_down, mouse_up, move, scroll, type, key_down, key_up,
+    #   hotkey, wait, screenshot
+    _MEMBER_MAP = {
+        "click": ("click", "left"),
+        "double_click": ("double_click", "left"),
+        "middle_click": ("click", "middle"),
+        "right_click": ("click", "right"),
+        "mouse_down": "mouse_down",
+        "mouse_up": "mouse_up",
+        "move": "move",
+        "scroll": "scroll",
+        "type": "type",
+        "key_down": "key_down",
+        "key_up": "key_up",
+        "hotkey": "hotkey",
+        "wait": "wait",
+        "screenshot": "screenshot",
+    }
+
+    # Members we deliberately don't implement in v1.
+    _UNSUPPORTED_MEMBERS = {
+        "cursor_position", "key_down", "key_up",
+    }
+
+    @staticmethod
+    def _member_to_action(name: str, mapped, block_input: dict) -> dict:
+        """Converts one computer_use tool call into our action dict."""
+        if mapped == "screenshot":
+            return {"type": "screenshot"}
+        if mapped == "mouse_down":
+            return {"type": "left_mouse_down"}
+        if mapped == "mouse_up":
+            return {"type": "left_mouse_up"}
+        if mapped == "hold_key":
+            raw = str(block_input.get("text", ""))
+            keys = [k for k in raw.split("+") if k] or [raw]
+            try:
+                duration = float(block_input.get("duration", 1.0))
+            except Exception:
+                duration = 1.0
+            return {"type": "hold_key", "keys": keys, "duration": duration}
+        if mapped == "triple_click":
+            coord = block_input.get("coordinate") or [0, 0]
+            return {"type": "triple_click", "x": coord[0], "y": coord[1]}
+        if mapped == "drag":
+            start = block_input.get("start_coordinate") or [0, 0]
+            end = block_input.get("coordinate") or [0, 0]
+            return {"type": "drag",
+                    "path": [{"x": start[0], "y": start[1]},
+                             {"x": end[0], "y": end[1]}]}
+        if mapped == "move":
+            coord = block_input.get("coordinate") or [0, 0]
+            return {"type": "move", "x": coord[0], "y": coord[1]}
+        if mapped == "scroll":
+            coord = block_input.get("coordinate") or [0, 0]
+            # Pixel deltas -> wheel clicks (WHEEL_DELTA=120).
+            v = int(round(float(block_input.get("scroll_y", 0)) / 120))
+            h = int(round(float(block_input.get("scroll_x", 0)) / 120))
+            return {"type": "scroll", "x": coord[0], "y": coord[1],
+                    "scroll_x": h, "scroll_y": v}
+        if mapped == "type":
+            return {"type": "type", "text": block_input.get("text", "")}
+        if mapped == "wait":
+            try:
+                seconds = float(block_input.get("seconds", 1.0))
+            except Exception:
+                seconds = 1.0
+            return {"type": "wait", "seconds": seconds}
+        if mapped == "click":
+            coord = block_input.get("coordinate") or [0, 0]
+            button = block_input.get("button", "left")
+            keys = block_input.get("keys") or []
+            return {"type": "click", "x": coord[0], "y": coord[1],
+                    "button": button, "keys": keys}
+        raise ValueError(f"Unsupported computer action mapping: {name}")
+
+    def computer_use_turn(
+        self,
+        task: str | None = None,
+        call_id: str | None = None,
+        screenshot_b64: str | None = None,
+        previous_response_id: str | None = None,
+        acknowledged_safety_checks: list | None = None,
+        instructions: str | None = None,
+    ) -> dict:
+        """
+        One computer-use turn via the Gemini API.
+
+        Tools sent: the `computer_use` tool (desktop environment) plus
+        the `ask_user` custom tool.  Model calls arrive as
+        `function_call` blocks; answers go back as `tool_result`
+        blocks echoing `toolset_name`.  Coordinates are screenshot
+        pixels, like OpenAI.
+
+        One action per turn (disable_parallel_tool_use): matches the
+        worker's single-call output shape, no outbox rework needed.
+        """
+        try:
+            try:
+                max_tokens = int(self.provider_config.get("max_tokens", 4096))
+            except (ValueError, TypeError):
+                max_tokens = 4096
+
+            tools = [
+                types.Tool(
+                    computer_use=types.ComputerUse(
+                        environment=types.Environment.ENVIRONMENT_DESKTOP,
+                    )
+                ),
+                types.Tool(
+                    function_declaration=self.ASK_USER_TOOL,
+                ),
+            ]
+
+            if previous_response_id is None:
+                if not task:
+                    raise ValueError("First computer-use turn requires a task.")
+                import uuid
+                chain_id = uuid.uuid4().hex[:12]
+                messages: list = [
+                    types.Content(
+                        role="user",
+                        content=[types.Part(text=task)]
+                    )]
+                system = instructions or None
+                self._cua_chains[chain_id] = {
+                    "messages": messages, "system": system}
+                if len(self._cua_chains) > self.MAX_CUA_CHAINS:
+                    oldest = next(iter(self._cua_chains))
+                    del self._cua_chains[oldest]
+            else:
+                chain_id = previous_response_id
+                slot = self._cua_chains.get(chain_id)
+                if slot is None:
+                    raise ValueError(
+                        "Unknown computer-use chain; restart the task.")
+                if not outputs:
+                    raise ValueError("Follow-up turn requires outputs.")
+                messages = slot["messages"]
+                system = slot["system"]
+                results: list = []
+                for out in outputs:
+                    if out.get("kind") != "computer":
+                        results.append({
+                            "type": "tool_result",
+                            "tool_use_id": out.get("call_id"),
+                            "content": out.get("output_text", ""),
+                        })
+                        continue
+                    # Per-call result wins (cursor text, zoom/member image);
+                    # otherwise the post-batch screenshot (last item only);
+                    # never an empty image — the API rejects it.
+                if out.get("result_image_b64"):
+                    content = [{
+                        "type": "image",
+                        "image_url": {
+                            "url": f"data:image/png;base64,{out['result_image_b64']}"
+                        }
+                    }]
+                elif out.get("result_text"):
+                    content = [{"type": "text",
+                                "text": out["result_text"]}]
+                elif out.get("screenshot_b64"):
+                    content = [{
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": out["screenshot_b64"],
+                        }}
+                    ]
+                    # end of screenshot block
+                else:
+                    content = [{"type": "text", "text": "OK"}]
+                    results.append({
+                        "type": "tool_result",
+                        "tool_use_id": out.get("call_id"),
+                        "toolset_name": "computer",
+                        "content": content,
+                    })
+                messages.append({"role": "user", "content": results})
+
+            response = self.client.models.generate_content(
+                model=self.model,
+                max_tokens=max_tokens,
+                tools=tools,
+                tool_choice=tool_choice,
+                system=system,
+                messages=messages,
+                timeout=90,
+            )
+            messages.append({"role": "assistant", "content": response.content})
+
+            actions: list = []
+            out_call_id = None
+            all_ids: list = []
+            asks: list = []
+            done_parts: list = []
+            for block in (response.content or []):
+                btype = getattr(block, "type", "")
+                if btype == "text":
+                    done_parts.append(getattr(block, "text", "") or "")
+                    continue
+                if btype not in ("tool_use", "server_tool_use"):
+                    continue
+                name = getattr(block, "name", "")
+                tset = getattr(block, "toolset_name", None)
+                bid = getattr(block, "id", None)
+                if bid and tset == "computer":
+                    all_ids.append(bid)
+                block_input = getattr(block, "input", None) or {}
+                if isinstance(block_input, str):
+                    try:
+                        block_input = _json.loads(block_input or "{}")
+                    except Exception:
+                        block_input = {}
+                if tset == "computer":
+                    mapped = self._MEMBER_MAP.get(name)
+                    if mapped is None:
+                        raise ValueError(
+                            f"Unknown computer member '{name}'.")
+                    action = self._member_to_action(name, mapped, block_input)
+                    actions.append(action)
+                    out_call_id = bid
+                elif name == "ask_user" and not tset:
+                    asks.append({
+                        "call_id": bid,
+                        "question": block_input.get("question", ""),
+                    })
+                # Unknown third-party blocks are ignored (never crash a turn).
+
+            done_text = "".join(done_parts).strip() or None
+            return {
+                "actions": actions,
+                "call_id": out_call_id,
+                "call_ids": all_ids,
+                "response_id": chain_id,
+                "pending_safety_checks": [],
+                "ask": asks,
+                "done_text": done_text,
+            }
+        except (AuthenticationError, RetryableError) as e:
+            raise FatalError(f"Anthropic client error (400): {error_text}") from e
 
     def __init__(self, provider_config: dict):
         super().__init__(provider_config)
@@ -56,6 +335,10 @@ class GoogleProvider(BaseLLMProvider):
             raise ValueError("Gemini API key is not configured in settings.")
 
         self.client = genai.Client(api_key=self.api_key)
+        # Server-side conversation chains (Google has no response chaining:
+        # the full message history travels with every call). Keyed by the
+        # chain id we hand out as response_id. Bounded; oldest dropped.
+        self._cua_chains: dict = {}
 
     def _ensure_generated_tools_module(self, mode: str):
         """
