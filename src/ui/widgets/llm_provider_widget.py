@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QComboBox, QFormLayout, QLineEdit,
     QCheckBox, QPushButton, QMessageBox, QStackedWidget, QLabel
 )
-from PySide6.QtCore import QTimer
+from PySide6.QtCore import QTimer, Qt
 
 from llm import PROVIDERS
 from llm.model_config_manager import ModelConfigManager
@@ -125,7 +125,11 @@ class LLMProviderWidget(QWidget):
         elif widget_type == "note":
             widget = QLabel(schema_item.get("label", ""))
             widget.setWordWrap(True)
-            widget.setStyleSheet("color: palette(mid); font-style: italic;")
+            widget.setTextInteractionFlags(widget.textInteractionFlags() | Qt.TextSelectableByMouse)
+            widget.setStyleSheet(
+                "QLabel { padding: 8px; border: 1px solid palette(mid); "
+                "border-radius: 4px; background: palette(alternate-base); }"
+            )
 
         tooltip = schema_item.get("tooltip")
         if tooltip and not isinstance(widget, dict) and widget is not None:
