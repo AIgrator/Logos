@@ -42,8 +42,8 @@ class GoogleProvider(BaseLLMProvider):
             "free_tier_note": {
                 "type": "note",
                 "label": (
-                    "Free-tier API key works for: <b>Chat, Terminal, Browser</b>.<br>"
-                    "Requires a <b>PAID</b> key: <b>Computer Use (Vision mode)</b> and <b>Native Google Search</b>."
+                    "&#9432;&nbsp; Free-tier API key works for: <b>Chat, Terminal, Browser</b>.<br>"
+                    "&#9888;&nbsp; Requires a <b>PAID</b> key: <b>Computer Use (Vision mode)</b> and <b>Native Google Search</b>."
                 ),
             },
             "api_key": {"type": "password", "label": "API Key"},

@@ -127,8 +127,9 @@ class LLMProviderWidget(QWidget):
             widget.setWordWrap(True)
             widget.setTextInteractionFlags(widget.textInteractionFlags() | Qt.TextSelectableByMouse)
             widget.setStyleSheet(
-                "QLabel { padding: 8px; border: 1px solid palette(mid); "
-                "border-radius: 4px; background: palette(alternate-base); }"
+                "QLabel { padding: 8px 10px; border: none; "
+                "border-left: 3px solid palette(highlight); "
+                "border-radius: 3px; background: palette(alternate-base); }"
             )
 
         tooltip = schema_item.get("tooltip")
