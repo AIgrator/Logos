@@ -29,15 +29,38 @@ class GoogleProvider(BaseLLMProvider):
             # Computer Use requires a Gemini 3.x+ model (2.x has no
             # computer_use tool); 3.8-flash is the documented recommendation.
             "model": "gemini-3.8-flash",
-            "require_json_output": True
+            "require_json_output": True,
+            # Native Google Search grounding for chat. OFF by default:
+            # grounding is NOT available on the Free tier (429 on every
+            # request) and is billed per search on paid tiers.
+            "native_web_search": False
         }
 
     @staticmethod
     def get_ui_schema() -> dict:
         return {
+            "free_tier_note": {
+                "type": "note",
+                "label": (
+                    "Free-tier API key works for: Chat, Terminal, Browser.\n"
+                    "Requires a PAID key: Computer Use (Vision mode) and Native Google Search grounding."
+                ),
+            },
             "api_key": {"type": "password", "label": "API Key"},
             "model": {"type": "dropdown", "label": "Model", "options_source": "models.json"},
-            "require_json_output": {"type": "checkbox", "label": "Require JSON Output"}
+            "require_json_output": {"type": "checkbox", "label": "Require JSON Output"},
+            "native_web_search": {
+                "type": "checkbox",
+                "label": "Native Google Search (web grounding) — needs a PAID key",
+                "tooltip": (
+                    "When ON, chat uses Gemini's native Google Search grounding "
+                    "and can cite web results. WARNING: grounding is billed and is "
+                    "NOT available on the Free tier — a free API key will fail with "
+                    "429 RESOURCE_EXHAUSTED on every message. When OFF (default), "
+                    "chat works on any key and web search is done by the app's own "
+                    "web_search / web_fetchs tools instead."
+                ),
+            },
         }
 
     @staticmethod
@@ -775,17 +798,18 @@ class GoogleProvider(BaseLLMProvider):
             'safety_settings': safety_settings
         }
 
-        # --- Tool Loading for Chat ---
-        # Start with the native Google Search and URL Context tools enabled by default for chat.
-        tools = [
-            genai_types.Tool(google_search=genai_types.GoogleSearch()),
-            {"url_context": {}},
-        ]
-        logging.info("Enabled native Google Search and URL Context for chat.")
-
-        # Configure the generation with the combined tools
-        if tools:
-            generation_config_kwargs['tools'] = tools
+        # --- Tools for Chat ---
+        # Native Google Search grounding is opt-in (settings: native_web_search).
+        # It is gated: NOT available on the Free tier, so a free key gets
+        # 429 RESOURCE_EXHAUSTED on every request that carries the tool, and on
+        # paid tiers it is billed per search. When the toggle is OFF (default)
+        # no built-in tools are attached and chat web search goes through the
+        # app's own web_search / web_fetchs function tools instead.
+        if self.provider_config.get("native_web_search", False):
+            generation_config_kwargs['tools'] = [
+                genai_types.Tool(google_search=genai_types.GoogleSearch()),
+                {"url_context": {}},
+            ]
 
         generation_config = genai.types.GenerateContentConfig(**generation_config_kwargs)
         contents = self._prepare_chat_contents(prompt, attachments, history)

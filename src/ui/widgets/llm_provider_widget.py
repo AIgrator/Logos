@@ -6,7 +6,7 @@ UI elements based on the schemas provided by each discovered LLM provider.
 """
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QComboBox, QFormLayout, QLineEdit,
-    QCheckBox, QPushButton, QMessageBox, QStackedWidget
+    QCheckBox, QPushButton, QMessageBox, QStackedWidget, QLabel
 )
 from PySide6.QtCore import QTimer
 
@@ -85,6 +85,8 @@ class LLMProviderWidget(QWidget):
                     label = schema_item.get("label", key)
                     if schema_item.get("type") == "checkbox":
                         form_layout.addRow(widget)
+                    elif schema_item.get("type") == "note":
+                        form_layout.addRow(widget)
                     elif schema_item.get("type") == "nested_dropdown":
                         form_layout.addRow(schema_item.get("primary_dropdown_label", "Provider"), widget['primary'])
                         form_layout.addRow(schema_item.get("secondary_dropdown_label", "Model"), widget['secondary'])
@@ -120,6 +122,14 @@ class LLMProviderWidget(QWidget):
         elif widget_type == "checkbox":
             widget = QCheckBox(schema_item.get("label", key))
             widget.setChecked(bool(default_value))
+        elif widget_type == "note":
+            widget = QLabel(schema_item.get("label", ""))
+            widget.setWordWrap(True)
+            widget.setStyleSheet("color: palette(mid); font-style: italic;")
+
+        tooltip = schema_item.get("tooltip")
+        if tooltip and not isinstance(widget, dict) and widget is not None:
+            widget.setToolTip(tooltip)
 
         return widget
 
