@@ -795,7 +795,7 @@ class VisionHandler(BaseAgent):
         self._last_shot_file = None
         try:
             import mss
-            with mss.mss() as sct:
+            with mss.MSS() as sct:
                 mon = sct.monitors[1]
                 display = f"{mon['width']}x{mon['height']}"
         except Exception:
@@ -1124,7 +1124,7 @@ class VisionHandler(BaseAgent):
         self._set_own_window_visible(False)
         try:
             time.sleep(0.3)  # let DWM recomposite without us
-            with mss.mss() as sct:
+            with mss.MSS() as sct:
                 raw = sct.grab(sct.monitors[1])
                 img = Image.frombytes("RGB", raw.size, raw.bgra, "raw", "BGRX")
         finally:

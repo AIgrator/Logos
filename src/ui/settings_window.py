@@ -133,10 +133,10 @@ class SettingsWindow(QDialog):
             "agent": ("fa5s.brain", "Agent"),
             "apps": ("fa5s.th-large", "Applications"),
             "hotkeys": ("fa5s.keyboard", "Hotkeys"),
-            "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
             "browser": ("fa5s.globe", "Browser"),
             "terminal": ("fa5s.terminal", "Terminal"),
             "vision": ("fa5s.robot", "Vision"),
+            "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
             "context": ("fa5s.file-alt", "Context")
         }
 

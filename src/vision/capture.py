@@ -33,7 +33,7 @@ class Capture:
         Returns:
             Image.Image: The captured screenshot.
         """
-        with mss.mss() as sct:
+        with mss.MSS() as sct:
             sct_img = sct.grab(sct.monitors[1])
             img = Image.frombytes("RGB", sct_img.size, sct_img.bgra, "raw", "BGRX")
             return img
