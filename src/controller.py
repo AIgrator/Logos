@@ -360,8 +360,9 @@ class AppController(QObject):
     def run(self):
         self.ui.show_main_window()
         title_string = self._get_llm_title_string()
-        self.ui.set_main_window_title(title_string)
-        self.ui.set_title_bar_text(title_string)
+        window_title = self._get_llm_window_title()
+        self.ui.set_main_window_title(window_title)
+        self.ui.set_title_bar_text(window_title)
         self.ui.refresh_model_button(title_string)
         self.ui.set_assistant_name(self._get_current_model_name())
         self._start_vision_initialization()
@@ -806,7 +807,11 @@ class AppController(QObject):
         return display_name.lower().replace(' ', '-')
 
     def _get_llm_title_string(self) -> str:
-        """Generates a detailed, user-friendly string for window titles."""
+        """User-friendly "Provider - model" string (without the build id).
+
+        Used for the toolbar model button and switch notices; the build id is
+        appended only for the window/title bar via ``_get_llm_window_title``.
+        """
         try:
             active_provider_name = self.settings.get("active_provider")
             providers = self.settings.get("llm_providers", {})
@@ -838,10 +843,14 @@ class AppController(QObject):
                 else:
                     title = f"{provider_display_name_main} - {model_name}"
 
-            return f"{title} [{get_build_id()}]"
+            return title
         except Exception as e:
             logging.error(f"Failed to generate LLM title string: {e}", exc_info=True)
             return "Logos AI Assistant"
+
+    def _get_llm_window_title(self) -> str:
+        """Window/title-bar text: the LLM title string plus the build id."""
+        return f"{self._get_llm_title_string()} [{get_build_id()}]"
 
     def _on_settings_changed(self, new_settings):
         self.settings = new_settings
@@ -862,8 +871,9 @@ class AppController(QObject):
             logging.warning(f"Could not propagate ad-blocking setting: {e}")
 
         title_string = self._get_llm_title_string()
-        self.ui.set_main_window_title(title_string)
-        self.ui.set_title_bar_text(title_string)
+        window_title = self._get_llm_window_title()
+        self.ui.set_main_window_title(window_title)
+        self.ui.set_title_bar_text(window_title)
         self.ui.refresh_model_button(title_string)
         self.ui.set_assistant_name(self._get_current_model_name())
 
@@ -905,8 +915,9 @@ class AppController(QObject):
         self.vision_handler.settings = self.settings
         logging.info("Settings have been updated and providers reloaded (session-only switch).")
         title_string = self._get_llm_title_string()
-        self.ui.set_main_window_title(title_string)
-        self.ui.set_title_bar_text(title_string)
+        window_title = self._get_llm_window_title()
+        self.ui.set_main_window_title(window_title)
+        self.ui.set_title_bar_text(window_title)
         self.ui.refresh_model_button(title_string)
         self.ui.set_assistant_name(self._get_current_model_name())
         if custom_notice:

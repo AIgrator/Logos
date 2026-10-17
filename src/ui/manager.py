@@ -64,6 +64,7 @@ class MainWindow(QMainWindow):
         """Override resizeEvent to keep the size grip in the bottom-right corner."""
         super().resizeEvent(event)
         self.ui_manager._update_file_search_popup_geometry()
+        self.ui_manager._reflow_toolbar()
         if self.size_grip.isVisible():
             grip_size = self.size_grip.size()
             self.size_grip.move(self.width() - grip_size.width(), self.height() - grip_size.height())
@@ -294,7 +295,7 @@ class UIManager(QWidget):
         self.main_window.setWindowTitle("Logos AI Assistant")
         self.main_window.setWindowIcon(QIcon("assets/ico.ico"))
 
-        self.full_mode_geometry = QRect(100, 100, 400, 600)
+        self.full_mode_geometry = QRect(100, 100, 400, 640)
         self._update_compact_mode_geometry()
 
         self.main_window.setGeometry(self.full_mode_geometry)
@@ -352,6 +353,15 @@ class UIManager(QWidget):
         self.bottom_toolbar_layout = QHBoxLayout(self.bottom_toolbar_container)
         self.bottom_toolbar_layout.setSpacing(10)
         self.bottom_toolbar_layout.setContentsMargins(0, 8, 0, 0)
+
+        # Second row (above the icon toolbar, below the input) dedicated to
+        # mode + model selection so long provider/model names are not clipped.
+        self.mode_model_container = QWidget()
+        self.mode_model_layout = QHBoxLayout(self.mode_model_container)
+        self.mode_model_layout.setSpacing(10)
+        self.mode_model_layout.setContentsMargins(0, 8, 0, 0)
+        # None until first layout pass; True = single-row (wide), False = two rows.
+        self._toolbar_single_row = None
 
         self.settings_button = QPushButton()
         self.settings_button.setIconSize(QSize(20, 20))
@@ -413,7 +423,7 @@ class UIManager(QWidget):
 
         self.model_button = QPushButton("⚡ ...")
         self.model_button.setMinimumSize(140, 36)
-        self.model_button.setMaximumWidth(260)
+        self.model_button.setMaximumWidth(420)
         self.tooltip_manager.install(self.model_button, "Switch model (this session only)")
         self.model_button.clicked.connect(self._show_model_switch_popup)
         self.model_switch_popup = None
@@ -444,8 +454,9 @@ class UIManager(QWidget):
         self.bottom_toolbar_layout.addWidget(self.settings_button)
         self.bottom_toolbar_layout.addWidget(self.toggle_button)
         self.bottom_toolbar_layout.addWidget(self.attachment_button)
-        self.bottom_toolbar_layout.addWidget(self.mode_button)
-        self.bottom_toolbar_layout.addWidget(self.model_button)
+
+        self.mode_model_layout.addWidget(self.mode_button)
+        self.mode_model_layout.addWidget(self.model_button, 1)
         self.pause_task_button = QPushButton()
         self.pause_task_button.setIconSize(QSize(20, 20))
         self.pause_task_button.setFixedSize(QSize(36, 36))
@@ -456,7 +467,7 @@ class UIManager(QWidget):
         self.pause_task_button.installEventFilter(self.pause_task_hover_filter)
         self.pause_task_button.clicked.connect(self._on_pause_task_clicked)
         self.pause_task_button.setVisible(False)
-        self.bottom_toolbar_layout.addWidget(self.pause_task_button)
+        self.mode_model_layout.addWidget(self.pause_task_button)
         self.bottom_toolbar_layout.addStretch()
         # One morphing action button: Stop while thinking with empty input,
         # Send otherwise (sending cancels the in-flight response).
@@ -467,6 +478,7 @@ class UIManager(QWidget):
 
         self.layout.addWidget(self.input_container)
         self.layout.addWidget(self.bottom_toolbar_container)
+        self.layout.addWidget(self.mode_model_container)
 
         self.send_button.clicked.connect(self._on_send_clicked)
         self.user_input.return_pressed.connect(self._on_send_clicked)
@@ -501,6 +513,7 @@ class UIManager(QWidget):
         self.settings_manager.settings_changed.connect(self.on_settings_changed)
         self.controller.theme_manager.theme_changed.connect(self._update_icon_colors)
         self._update_icon_colors()
+        self._reflow_toolbar()
         init_duration = time.perf_counter() - init_start
         logging.info(f"UIManager.__init__ completed in {init_duration:.3f}s")
 
@@ -963,6 +976,61 @@ class UIManager(QWidget):
         except Exception:
             active = False
         self.pause_task_button.setVisible(active)
+        self._reflow_toolbar()
+
+    def _preferred_single_row_width(self) -> int:
+        """Width the toolbar needs to fit everything on one row (no clipping)."""
+        widgets = [
+            self.settings_button, self.toggle_button, self.attachment_button,
+            self.mode_button, self.model_button, self.send_button,
+        ]
+        if not self.pause_task_button.isHidden():
+            widgets.append(self.pause_task_button)
+        if not self.cancel_button.isHidden():
+            widgets.append(self.cancel_button)
+
+        total = 0
+        for w in widgets:
+            total += min(w.sizeHint().width(), w.maximumWidth())
+        spacing = self.bottom_toolbar_layout.spacing()
+        total += spacing * (len(widgets) + 1)
+        margins = self.layout.contentsMargins()
+        total += margins.left() + margins.right()
+        return total + 8  # small buffer so the last widget is never clipped
+
+    def _reflow_toolbar(self):
+        """Single row when the window is wide enough, two rows otherwise.
+
+        Called on every window resize and whenever the set of visible buttons
+        changes (e.g. the Pause button appearing). In compact mode both rows
+        are hidden, so we leave them alone.
+        """
+        if getattr(self, "is_compact", False):
+            return
+        if not hasattr(self, "pause_task_button"):
+            return
+        margins = self.layout.contentsMargins()
+        available = self.main_window.width() - margins.left() - margins.right()
+        single = available >= self._preferred_single_row_width()
+        if single == self._toolbar_single_row:
+            return
+        self._toolbar_single_row = single
+
+        extras = [self.mode_button, self.model_button, self.pause_task_button]
+        for w in extras:
+            self.bottom_toolbar_layout.removeWidget(w)
+            self.mode_model_layout.removeWidget(w)
+
+        if single:
+            # Insert after the three left icons, before the stretch (index 3).
+            for offset, w in enumerate(extras):
+                self.bottom_toolbar_layout.insertWidget(3 + offset, w)
+            self.mode_model_container.setVisible(False)
+        else:
+            self.mode_model_layout.addWidget(self.mode_button)
+            self.mode_model_layout.addWidget(self.model_button, 1)
+            self.mode_model_layout.addWidget(self.pause_task_button)
+            self.mode_model_container.setVisible(True)
 
     def set_vision_mode_loading(self, is_loading: bool):
         if is_loading:
@@ -1188,7 +1256,9 @@ class UIManager(QWidget):
         self.compact_position = self.settings_manager.get("compact_mode", {}).get("position", "bottom_center")
         self.attachment_scroll_area.setVisible(False)
         self.input_container.setVisible(False)
+        self.mode_model_container.setVisible(False)
         self.bottom_toolbar_container.setVisible(False)
+        self._toolbar_single_row = None  # re-evaluate when returning to full mode
         self.custom_title_bar.setVisible(True)
         self.main_window.size_grip.setVisible(True)
         self.layout.setContentsMargins(5, 0, 5, 5)
@@ -1253,6 +1323,8 @@ class UIManager(QWidget):
         self.layout.setContentsMargins(11, 11, 11, 11)
         self.input_container.setVisible(True)
         self.bottom_toolbar_container.setVisible(True)
+        self._toolbar_single_row = None  # force single/two-row re-evaluation
+        self._reflow_toolbar()
         self.user_input.set_compact_mode(False)
         self.main_window.setMinimumSize(0, 0)
         self.main_window.setMaximumSize(16777215, 16777215)
