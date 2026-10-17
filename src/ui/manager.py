@@ -244,10 +244,6 @@ class HighlightOverlay(QWidget):
 
 class UIManager(QWidget):
     user_command_submitted = Signal(str)
-    plan_approved = Signal()
-    regenerate_plan_clicked = Signal()
-    edit_plan_clicked = Signal()
-    plan_cancel_clicked = Signal()
     screenshot_button_clicked = Signal()
     select_files_button_clicked = Signal()
     settings_button_clicked = Signal()
@@ -270,7 +266,6 @@ class UIManager(QWidget):
     pause_resume_clicked = Signal()
     pause_for_feedback_clicked = Signal()
     stop_clicked = Signal()
-    next_step_clicked = Signal()
     warning_confirmed = Signal()
     shutdown_requested = Signal()
     image_pasted = Signal(bytes)
@@ -434,15 +429,6 @@ class UIManager(QWidget):
             IconHoverFilter(self.controller.theme_manager, 'fa5s.paper-plane', parent=self.send_button)
         )
 
-        self.plan_send_button = QPushButton()
-        self.plan_send_button.setObjectName("SendButton")
-        self.plan_send_button.setIconSize(QSize(20, 20))
-        self.plan_send_button.setFixedSize(QSize(36, 36))
-        self.tooltip_manager.install(self.plan_send_button, "Send Feedback")
-        self.plan_send_button.installEventFilter(
-            IconHoverFilter(self.controller.theme_manager, 'fa5s.paper-plane', parent=self.plan_send_button)
-        )
-
         self.cancel_button = QPushButton()
         self.cancel_button.setObjectName("CancelButton")
         self.cancel_button.setIconSize(QSize(20, 20))
@@ -481,26 +467,7 @@ class UIManager(QWidget):
         self.layout.addWidget(self.input_container)
         self.layout.addWidget(self.bottom_toolbar_container)
 
-        self.approve_plan_button = QPushButton("Run")
-        self.regenerate_plan_button = QPushButton("Regenerate")
-        self.edit_plan_button = QPushButton("Edit")
-        self.plan_cancel_button = QPushButton("Cancel")
-
-        self._plan_buttons_container = QWidget()
-        self._plan_buttons_layout = QHBoxLayout(self._plan_buttons_container)
-        self._plan_buttons_layout.setContentsMargins(0, 8, 0, 0)
-        self._plan_buttons_layout.setSpacing(8)
-        self._plan_buttons_layout.addWidget(self.approve_plan_button)
-        self._plan_buttons_layout.addWidget(self.regenerate_plan_button)
-        self._plan_buttons_layout.addWidget(self.edit_plan_button)
-        self._plan_buttons_layout.addWidget(self.plan_cancel_button)
-        self._plan_buttons_layout.addStretch()
-        self._plan_buttons_layout.addWidget(self.plan_send_button)
-        self.layout.addWidget(self._plan_buttons_container)
-        self._plan_buttons_container.setVisible(False)
-
         self.send_button.clicked.connect(self._on_send_clicked)
-        self.plan_send_button.clicked.connect(self._on_send_clicked)
         self.user_input.return_pressed.connect(self._on_send_clicked)
         self.user_input.escape_pressed.connect(self._hide_file_search_popup)
         self.user_input.up_arrow_pressed.connect(self._select_previous_suggestion)
@@ -508,10 +475,6 @@ class UIManager(QWidget):
         self.user_input.tab_pressed.connect(self._on_tab_pressed)
         self.user_input.image_pasted.connect(self._handle_pasted_image)
         self.user_input.files_pasted.connect(self._handle_pasted_files)
-        self.approve_plan_button.clicked.connect(self.plan_approved.emit)
-        self.regenerate_plan_button.clicked.connect(self.regenerate_plan_clicked.emit)
-        self.edit_plan_button.clicked.connect(self.edit_plan_clicked.emit)
-        self.plan_cancel_button.clicked.connect(self.plan_cancel_clicked.emit)
         self.settings_button.clicked.connect(self.settings_button_clicked.emit)
         self.toggle_button.clicked.connect(self.toggle_mode)
         self.add_file_action.triggered.connect(self.add_file_clicked.emit)
@@ -1007,7 +970,6 @@ class UIManager(QWidget):
         has_attachments = bool(self.attachment_thumbnails)
         is_enabled = has_text or has_attachments
         self.send_button.setEnabled(is_enabled)
-        self.plan_send_button.setEnabled(has_text)
         self.tooltip_manager.install(self.send_button, "Send" if is_enabled else "Message text cannot be empty")
         self._refresh_action_buttons()
 
@@ -1030,9 +992,7 @@ class UIManager(QWidget):
             self._handle_suggestion_selection(self.file_search_popup.currentItem())
             return
 
-        is_plan_feedback_mode = self._plan_buttons_container.isVisible()
-        button_to_check = self.plan_send_button if is_plan_feedback_mode else self.send_button
-        if button_to_check.isEnabled():
+        if self.send_button.isEnabled():
             self.user_command_submitted.emit(self.user_input.toPlainText())
             self.user_input.clear()
 
@@ -1182,22 +1142,6 @@ class UIManager(QWidget):
     def stop_retry_countdown(self):
         self.chat_widget.stop_retry_countdown()
 
-    def set_approve_button_visible(self, visible):
-        self.approve_plan_button.setVisible(visible)
-
-    def set_regenerate_button_visible(self, visible: bool):
-        self.regenerate_plan_button.setVisible(visible)
-
-    def set_edit_button_visible(self, visible: bool):
-        self.edit_plan_button.setVisible(visible)
-
-    def set_plan_controls_visible(self, visible: bool):
-        self._plan_buttons_container.setVisible(visible)
-        if self.is_compact:
-            self.bottom_toolbar_container.setVisible(False)
-        else:
-            self.bottom_toolbar_container.setVisible(not visible)
-
     def display_confirmation_dialog(self, message):
         msg_box = QMessageBox(self.main_window)
         msg_box.setWindowTitle("Confirm Action")
@@ -1331,11 +1275,3 @@ class UIManager(QWidget):
         msg_box.setStyleSheet(styles.DARK_STYLE)
         msg_box.exec()
         return msg_box.clickedButton() == apply_button
-
-    def open_plan_editor(self, plan):
-        try:
-            from .plan_editor import open_plan_editor as _open
-            return _open(self.main_window, plan)
-        except Exception as e:
-            logging.error(f"Failed to open plan editor: {e}")
-            return None

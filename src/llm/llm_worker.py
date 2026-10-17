@@ -6,7 +6,7 @@ import threading
 import time
 from datetime import datetime
 
-from .llm_parsing import repair_json_string, validate_object, universal_fallback_parser
+from .llm_parsing import repair_json_string, validate_object, safe_repair_object
 from .exceptions import FatalError, RetryableError, MAX_AUTO_WAIT_SECONDS, extract_retry_after, format_wait, is_quota_error, is_transient_throttle
 from .error_formatter import format_llm_error, format_quota_wall
 from time import perf_counter
@@ -20,7 +20,7 @@ class LLMWorker(QObject):
 
     response_chunk = Signal(str)
     response_finished = Signal(str)
-    planning_response_received = Signal(str, object, str)  # reasoning, tool_calls (object), schema_name
+    structured_response_received = Signal(str, object, str)  # reasoning, tool_calls (object), schema_name
     tool_call_received = Signal(dict)
     plain_text_response_received = Signal(str)  # For when a plan was expected but not received
     retry_attempt = Signal(int, int, str, float)  # attempt_num, max_attempts, error, wait_seconds
@@ -423,16 +423,21 @@ class LLMWorker(QObject):
                     validated_payload, validation_error = validate_object(object_to_validate, schema_name)
                     final_schema_name = schema_name
 
-                    # --- FALLBACK MECHANISM (Pre-Correction) ---
-                    if validation_error and schema_name == 'evaluation':
-                        logging.warning(f"Initial validation for '{schema_name}' failed. Activating universal fallback parser.")
-                        fallback_payload, fallback_schema_name = universal_fallback_parser(object_to_validate)
-                        if fallback_payload:
-                            validated_payload = fallback_payload
-                            final_schema_name = fallback_schema_name
-                            validation_error = None # Resolved by fallback
+                    # --- SAFE PRE-CORRECTION REPAIR (any schema) ---
+                    # validate_object already tried the response as-is; here we
+                    # attempt meaning-preserving repairs (decoding string-encoded
+                    # JSON anywhere in the tree, slicing JSON out of prose). A
+                    # candidate is accepted only if it validates, so this can
+                    # rescue a malformed reply but never alter a valid one.
+                    if validation_error:
+                        repaired_payload, repair_error = safe_repair_object(object_to_validate, schema_name)
+                        if repaired_payload is not None:
+                            logging.warning(f"Safe repair recovered schema '{schema_name}' before self-correction.")
+                            validated_payload = repaired_payload
+                            final_schema_name = schema_name
+                            validation_error = None
                         else:
-                             logging.error("Universal fallback parser could not recover the response.")
+                            logging.info(f"Safe repair could not recover schema '{schema_name}': {repair_error}")
 
                     # --- SELF-CORRECTION MECHANISM ---
                     if validation_error:
@@ -503,9 +508,8 @@ class LLMWorker(QObject):
                     llm_logger.info(json.dumps(log_payload, ensure_ascii=False))
 
                     payload = validated_payload.get('payload', {}) if final_schema_name in ('terminal_tool_code', 'browser_tool_code') else validated_payload
-                    reasoning = payload.get('payload', {}).get('evaluation', {}).get('reason', '') if final_schema_name == 'evaluation' else ""
 
-                    self.planning_response_received.emit(reasoning, payload, final_schema_name)
+                    self.structured_response_received.emit("", payload, final_schema_name)
                     return
 
                 # --- Streaming for Chat ---

@@ -12,10 +12,7 @@ Per-turn flow (each turn runs in a worker thread, never on the GUI thread):
   3. actions execute in order via deterministic performers (pyautogui/mss)
   4. fresh screenshot -> next turn (server-side chain via previous_response_id)
 
-Legacy plan-era entry points (handle_plan_*, regenerate_plan, ...) are kept
-as deprecated stubs because the controller/UI still references them; they
-explain the removal instead of crashing. See legacy/vision_2026-10-15/ for
-the pre-rebuild implementation.
+See legacy/vision_2026-10-15/ for the pre-rebuild implementation.
 """
 import base64
 import io
@@ -638,8 +635,6 @@ class VisionHandler(BaseAgent):
         self._visible_box = {}
         self._visible_event = threading.Event()
         self._pause_hist_mark = 0
-        # Deprecated plan-era surface (controller/UI still reference it).
-        self.action_plan = []
 
     # -- task entry ----------------------------------------------------
 
@@ -1294,6 +1289,7 @@ class VisionHandler(BaseAgent):
             x, y = scale_point(float(action["x"]), float(action["y"]), scale)
             if self.ensure_point_visible(x, y):
                 time.sleep(0.6)  # compositor settle after relocate
+            self._audit_pointer(kind, x, y, scale=scale)
             button = _buttons.get(
                 (action.get("button", "left") or "left").lower())
             if button is None and kind != "move":
@@ -1315,6 +1311,7 @@ class VisionHandler(BaseAgent):
                         mouse.release(button)
                         if i < presses - 1:
                             time.sleep(0.1)
+                self._audit_pointer(kind, x, y, phase="post", scale=scale)
             finally:
                 kbd = self._kbd()
                 for kk in reversed(held):
@@ -1378,6 +1375,43 @@ class VisionHandler(BaseAgent):
             return "wait"
 
         raise ValueError(f"Unsupported computer action: {kind!r}")
+
+    def _audit_pointer(self, kind: str, x: float, y: float,
+                       phase: str = "pre", scale: float = 1.0) -> None:
+        """Forensic one-liner per pointing action: where we asked the cursor
+        to go vs where it actually is, whose window owns the point, and the
+        focused window. Tells apart dead input (cursor never moves) from
+        eaten clicks (cursor arrives but our always-on-top window takes it).
+        """
+        try:
+            import sys as _sys
+            if _sys.platform != "win32":
+                return
+            import ctypes
+            import os as _os
+            from ctypes.wintypes import POINT
+            user32 = ctypes.windll.user32
+            cur = POINT()
+            user32.GetCursorPos(ctypes.byref(cur))
+            pt = POINT(int(x), int(y))
+            hwnd_at = user32.WindowFromPoint(pt)
+
+            def _owner(hwnd):
+                pid = ctypes.c_ulong()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                return pid.value
+
+            fg = user32.GetForegroundWindow()
+            n = user32.GetWindowTextLengthW(fg)
+            buf = ctypes.create_unicode_buffer(n + 1)
+            user32.GetWindowTextW(fg, buf, n + 1)
+            logging.info(
+                f"audit-{phase} {kind}@({int(x)},{int(y)}) scale={scale:.3f}: "
+                f"cursor=({cur.x},{cur.y}) "
+                f"under_ours={_owner(hwnd_at) == _os.getpid()} "
+                f"focus={buf.value!r} (fg_pid={_owner(fg)})")
+        except Exception as e:
+            logging.warning(f"pointer audit failed: {e}")
 
     # -- low-level performers (pynput throughout; pyautogui input is dead
     # on this setup and must not be used for acting) ---------------------
@@ -1470,43 +1504,18 @@ class VisionHandler(BaseAgent):
     def cancel_job_wait(self):
         pass
 
-    # -- deprecated plan-era surface (controller/UI still reference it) -----
-
-    def _removed(self, name: str):
-        msg = (f"Vision plan workflow was removed in the agent-loop rebuild "
-               f"({name}). Use the task input — the agent loops by itself.")
-        logging.warning(msg)
+    def handle_fatal_error(self, error_message):
+        """Shows an unrecoverable LLM error and returns to idle."""
+        logging.error(f"VisionHandler displaying fatal error to user: {error_message}")
         try:
-            self.ui.add_message(f"<i>{msg}</i>")
+            self.ui.add_message(error_message, force_scroll=True)
         except Exception:
             pass
-        return None
-
-    def handle_plan_response(self, reasoning, tool_calls_obj, schema_name):
-        return self._removed("handle_plan_response")
-
-    def handle_fatal_error(self, error_message):
-        return self._removed("handle_fatal_error")
-
-    def handle_plan_approval(self):
-        return self._removed("handle_plan_approval")
-
-    def regenerate_plan(self):
-        return self._removed("regenerate_plan")
-
-    def clear_plan(self):
-        return self._removed("clear_plan")
-
-    def apply_edited_plan(self, edited):
-        self._removed("apply_edited_plan")
-        return False
+        self._set_state(VisionState.IDLE)
 
     def pause_for_feedback(self):
         if self.state == VisionState.EXECUTING:
             self.pause_or_resume()
-
-    def next_step(self):
-        return self._removed("next_step")
 
     def _on_analysis_complete(self, *args, **kwargs):
         return None

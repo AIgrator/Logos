@@ -1,11 +1,8 @@
 """
 Minimal ToolRegistry class.
 
-Generates five files in the cache directory:
- - strategic_tools.txt  (a simplified text format for strategic planning)
+Generates two files in the cache directory:
  - tools.txt            (a detailed text format for tool definitions)
- - gemini_tools.py      (a Python module with Gemini-compatible tool schemas)
- - ui_tools.json        (a JSON format for the UI plan editor)
  - response_formats.json (a JSON with response format instructions for the LLM)
 
 This file intentionally keeps behaviour minimal and predictable per user request.
@@ -77,36 +74,6 @@ class ToolRegistry:
             return {}
         return filtered_meta
 
-    def generate_strategic(self, force: bool = False) -> dict:
-        generated_files = {}
-        for mode in ['vision', 'terminal', 'browser']:
-            out = os.path.join(self.get_cache_dir(), mode, 'strategic_tools.txt')
-            generated_files[mode] = out
-            if not force and os.path.exists(out):
-                continue
-
-            lines = []
-            try:
-                meta = self._get_filtered_metadata(mode)
-                for meta_name, info in meta.items():
-                    tool = info.get('tool') or {}
-                    name = tool.get('name') or meta_name
-                    args = []
-                    for arg_name, arg_schema in (tool.get('arguments') or {}).items():
-                        if isinstance(arg_schema, dict) and arg_schema.get('strategic') is False:
-                            continue
-                        args.append(arg_name)
-                    args_str = ', '.join(args)
-                    signature = f"{name}({args_str})"
-                    strategic_text = tool.get('strategic') or tool.get('description') or ''
-                    lines.append(f"- `{signature}`: {strategic_text}")
-            except Exception:
-                lines = []
-
-            text = '\n'.join(lines)
-            self._write_text(out, text)
-        return generated_files
-
     def generate_tools(self, force: bool = False) -> dict:
         generated_files = {}
         for mode in ['vision', 'terminal', 'browser']:
@@ -143,143 +110,6 @@ class ToolRegistry:
 
             data = '\n'.join(lines).rstrip() + '\n'
             self._write_text(dest, data)
-        return generated_files
-
-    def generate_gemini(self, force: bool = False) -> dict:
-        generated_files = {}
-        for mode in ['vision', 'terminal', 'browser']:
-            out = os.path.join(self.get_cache_dir(), mode, 'gemini_tools.py')
-            generated_files[mode] = out
-            if not force and os.path.exists(out):
-                continue
-
-            meta = self._get_filtered_metadata(mode)
-            tools_list = [info.get('tool') for info in meta.values() if info.get('tool')]
-
-            def pstr(s: str) -> str:
-                if s is None:
-                    return 'None'
-                return repr(s)
-
-            def map_type(t):
-                if t is None:
-                    return 'protos.Type.STRING'
-                if isinstance(t, str):
-                    tt = t.upper()
-                    if tt in ('STRING', 'STR'):
-                        return 'protos.Type.STRING'
-                    if tt in ('INTEGER', 'INT', 'NUMBER'):
-                        return 'protos.Type.INTEGER'
-                    if tt in ('ARRAY', 'LIST'):
-                        return 'protos.Type.ARRAY'
-                    if tt in ('OBJECT', 'DICT', 'MAP'):
-                        return 'protos.Type.OBJECT'
-                try:
-                    code = int(t)
-                    if code == 1:
-                        return 'protos.Type.STRING'
-                    if code == 3:
-                        return 'protos.Type.INTEGER'
-                    if code == 5:
-                        return 'protos.Type.ARRAY'
-                except Exception:
-                    pass
-                return 'protos.Type.STRING'
-
-            lines = [
-                'from google.generativeai import protos', '',
-                'def get_tools_schema():',
-                '    """Return a list of protos.Tool instances equivalent to GoogleProvider._get_tools_schema()."""',
-                '    return [',
-                '        protos.Tool(function_declarations=['
-            ]
-
-            for t in tools_list:
-                name = t.get('name', '')
-                desc = t.get('description', '')
-                args = t.get('arguments', {})
-                required_keys = [k for k, v in args.items() if isinstance(v, dict) and v.get('required')]
-
-                lines.extend([
-                    '            protos.FunctionDeclaration(',
-                    f'                name={pstr(name)},',
-                    f'                description={pstr(desc)},',
-                    '                parameters=protos.Schema(',
-                    '                    type=protos.Type.OBJECT,',
-                    '                    properties={'
-                ])
-
-                if isinstance(args, dict):
-                    for arg_name, arg_schema in args.items():
-                        if isinstance(arg_schema, dict):
-                            a_type = arg_schema.get('type')
-                            a_desc = arg_schema.get('description', '')
-                            a_enum = arg_schema.get('enum', [])
-                            a_items = arg_schema.get('items')
-                        else:
-                            a_type, a_desc, a_enum, a_items = None, str(arg_schema), [], None
-
-                        lines.extend([
-                            f'                        {pstr(arg_name)}: protos.Schema(',
-                            f'                            type={map_type(a_type)},',
-                            f'                            description={pstr(a_desc)},'
-                        ])
-                        if a_enum:
-                            lines.append(f'                            enum=[{", ".join(pstr(e) for e in a_enum)}],')
-                        if a_items is not None:
-                            lines.append('                            items=protos.Schema(')
-                            if isinstance(a_items, dict):
-                                lines.append(f'                                type={map_type(a_items.get("type"))},')
-                                if a_items.get("enum"):
-                                    lines.append(f'                                enum=[{", ".join(pstr(e) for e in a_items.get("enum", []))}],')
-                                lines.append(f'                                description={pstr(a_items.get("description", ""))},')
-                            else:
-                                lines.append(f'                                type={map_type(a_items)},')
-                            lines.append('                            ),')
-                        lines.append('                        ),')
-
-                lines.extend([
-                    '                    },',
-                    f'                    required=[{", ".join(pstr(r) for r in required_keys)}]' if required_keys else '                    required=[]',
-                    '                )',
-                    '            ),'
-                ])
-
-            lines.extend(['        ])', '    ]', ''])
-            code = '\n'.join(lines)
-            self._write_text(out, code)
-        return generated_files
-
-    def generate_ui_tools(self, force: bool = False) -> dict:
-        generated_files = {}
-        for mode in ['vision', 'terminal', 'browser']:
-            out = os.path.join(self.get_cache_dir(), mode, 'ui_tools.json')
-            generated_files[mode] = out
-            if not force and os.path.exists(out):
-                continue
-
-            ui_actions = []
-            try:
-                meta = self._get_filtered_metadata(mode)
-                for _, info in meta.items():
-                    tool_meta = info.get('tool', {})
-                    if not tool_meta:
-                        continue
-
-                    arguments = {arg_name: arg_info.get('default')
-                                 for arg_name, arg_info in tool_meta.get('arguments', {}).items()}
-
-                    action = {
-                        "name": tool_meta.get('name'),
-                        "description": tool_meta.get('description'),
-                        "arguments": arguments
-                    }
-                    ui_actions.append(action)
-            except Exception:
-                pass
-
-            with open(out, 'w', encoding='utf-8') as f:
-                json.dump(ui_actions, f, indent=4)
         return generated_files
 
     def generate_response_formats(self, force: bool = False) -> dict:
@@ -324,10 +154,7 @@ class ToolRegistry:
             logging.info("Tool manifests changed since last generation; forcing cache regeneration.")
             force = True
         results = {
-            'strategic': self.generate_strategic(force=force),
             'tools': self.generate_tools(force=force),
-            'gemini': self.generate_gemini(force=force),
-            'ui_tools': self.generate_ui_tools(force=force),
             'response_formats': self.generate_response_formats(force=force),
         }
         self._write_manifest_fingerprint()
@@ -379,5 +206,7 @@ class ToolRegistry:
             logging.error(f"Failed to write manifest fingerprint: {e}", exc_info=True)
 
 if __name__ == '__main__':
-    tr = ToolRegistry()
+    sys.path.insert(0, os.path.join(project_root, 'src'))
+    from settings_manager import SettingsManager
+    tr = ToolRegistry(settings_manager=SettingsManager())
     print(tr.generate_all(force=True))

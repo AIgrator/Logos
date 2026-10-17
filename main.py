@@ -137,7 +137,6 @@ def main():
     import logging_config
     from controller import AppController
     from settings_manager import SettingsManager
-    from thread_pool import ThreadPool
     from initial_setup import run_setup_wizard
 
     # --- Main Execution ---
@@ -269,9 +268,7 @@ def main():
     except Exception:
         logging.debug("ToolRegistry.generate_all() failed during main startup", exc_info=True)
 
-    thread_pool = ThreadPool()
-    app.aboutToQuit.connect(thread_pool.cleanup)
-    controller = AppController(app, settings_manager, thread_pool, local_server, working_directory)
+    controller = AppController(app, settings_manager, local_server, working_directory)
     _phase("AppController created")
 
     # Apply the theme using the new manager

@@ -118,10 +118,6 @@ class SettingsManager(QObject):
         "hotkeys": {
             "toggle_mode": "Ctrl+Shift+A",
             "cancel_request": "Ctrl+Shift+X",
-            "regenerate_plan": "Ctrl+Shift+R",
-            "edit_plan": "Ctrl+Shift+E",
-            "cancel_plan": "Ctrl+Shift+D",
-            "run_plan": "Ctrl+Shift+W",
             "pause_resume": "Ctrl+Alt+P",
             "stop_execution": "Ctrl+Alt+S",
             "pause_for_feedback": "Ctrl+Alt+F"

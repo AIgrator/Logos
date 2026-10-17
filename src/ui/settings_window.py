@@ -285,10 +285,6 @@ class SettingsWindow(QDialog):
         self.stop_execution_hotkey.set_key_sequence(hotkey_settings.get("stop_execution", "Ctrl+Alt+S"))
         self.pause_for_feedback_hotkey.set_key_sequence(hotkey_settings.get("pause_for_feedback", "Ctrl+Alt+F"))
         self.cancel_request_hotkey.set_key_sequence(hotkey_settings.get("cancel_request", "Ctrl+Shift+X"))
-        self.regenerate_plan_hotkey.set_key_sequence(hotkey_settings.get("regenerate_plan", "Ctrl+Shift+R"))
-        self.edit_plan_hotkey.set_key_sequence(hotkey_settings.get("edit_plan", "Ctrl+Shift+E"))
-        self.cancel_plan_hotkey.set_key_sequence(hotkey_settings.get("cancel_plan", "Ctrl+Shift+D"))
-        self.run_plan_hotkey.set_key_sequence(hotkey_settings.get("run_plan", "Ctrl+Return"))
 
         # Context (agent history compaction; all defaults = send everything)
         context_settings = self.settings_manager.get("context", {})
@@ -335,11 +331,7 @@ class SettingsWindow(QDialog):
             "pause_resume": self.pause_resume_hotkey.get_key_sequence(),
             "stop_execution": self.stop_execution_hotkey.get_key_sequence(),
             "pause_for_feedback": self.pause_for_feedback_hotkey.get_key_sequence(),
-            "cancel_request": self.cancel_request_hotkey.get_key_sequence(),
-            "regenerate_plan": self.regenerate_plan_hotkey.get_key_sequence(),
-            "edit_plan": self.edit_plan_hotkey.get_key_sequence(),
-            "cancel_plan": self.cancel_plan_hotkey.get_key_sequence(),
-            "run_plan": self.run_plan_hotkey.get_key_sequence()
+            "cancel_request": self.cancel_request_hotkey.get_key_sequence()
         }
 
         browser_settings = {
@@ -461,14 +453,6 @@ class SettingsWindow(QDialog):
         layout.addRow("Pause for Feedback:", self.pause_for_feedback_hotkey)
         self.cancel_request_hotkey = HotkeyEdit()
         layout.addRow("Cancel Request:", self.cancel_request_hotkey)
-        self.regenerate_plan_hotkey = HotkeyEdit()
-        layout.addRow("Regenerate Plan:", self.regenerate_plan_hotkey)
-        self.edit_plan_hotkey = HotkeyEdit()
-        layout.addRow("Edit Plan:", self.edit_plan_hotkey)
-        self.cancel_plan_hotkey = HotkeyEdit()
-        layout.addRow("Cancel Plan:", self.cancel_plan_hotkey)
-        self.run_plan_hotkey = HotkeyEdit()
-        layout.addRow("Run Plan:", self.run_plan_hotkey)
 
         return group
 

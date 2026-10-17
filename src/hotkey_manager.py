@@ -60,11 +60,7 @@ class HotkeyManager(QObject):
             "pause_resume": self.controller.request_hotkey_pause_resume,
             "stop_execution": self.controller.request_hotkey_stop_execution,
             "pause_for_feedback": self.controller.request_hotkey_pause_for_feedback,
-            "cancel_request": self.controller.request_hotkey_cancel_request,
-            "regenerate_plan": self.controller.request_hotkey_regenerate_plan,
-            "edit_plan": self.controller.request_hotkey_edit_plan,
-            "cancel_plan": self.controller.request_hotkey_cancel_plan,
-            "run_plan": self.controller.request_hotkey_run_plan
+            "cancel_request": self.controller.request_hotkey_cancel_request
         }
 
         hotkey_map = {}

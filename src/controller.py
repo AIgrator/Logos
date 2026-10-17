@@ -41,19 +41,14 @@ class AppController(QObject):
     hotkey_stop_execution_triggered = Signal()
     hotkey_pause_for_feedback_triggered = Signal()
     hotkey_cancel_request_triggered = Signal()
-    hotkey_regenerate_plan_triggered = Signal()
-    hotkey_edit_plan_triggered = Signal()
-    hotkey_cancel_plan_triggered = Signal()
-    hotkey_run_plan_triggered = Signal()
 
-    def __init__(self, app, settings_manager: SettingsManager, thread_pool, local_server=None, working_directory=None):
+    def __init__(self, app, settings_manager: SettingsManager, local_server=None, working_directory=None):
         super().__init__()
         init_start = time.perf_counter()
         # Basic references
         self.app = app
         self.settings_manager = settings_manager
         self.theme_manager = ThemeManager(self.settings_manager)
-        self.thread_pool = thread_pool
         self.settings = self.settings_manager.all()
         self.working_directory = working_directory if working_directory else os.getcwd()
 
@@ -139,7 +134,7 @@ class AppController(QObject):
         # Connect LLM worker signals
         self.llm_worker.response_chunk.connect(self.handle_response_chunk)
         self.llm_worker.response_finished.connect(self._handle_chat_response)
-        self.llm_worker.planning_response_received.connect(self._handle_plan_response)
+        self.llm_worker.structured_response_received.connect(self._handle_structured_response)
         self.llm_worker.plain_text_response_received.connect(self._handle_plain_text_response)
         self.llm_worker.retry_attempt.connect(self._handle_retry_attempt)
         self.llm_worker.retry_countdown.connect(self._handle_retry_countdown)
@@ -159,10 +154,6 @@ class AppController(QObject):
         # --- Connect UI Signals ---
         self.ui.shutdown_requested.connect(self.handle_shutdown)
         self.ui.user_command_submitted.connect(self.handle_user_input)
-        self.ui.plan_approved.connect(self._handle_plan_approval)
-        self.ui.plan_cancel_clicked.connect(self._handle_plan_cancel)
-        self.ui.regenerate_plan_clicked.connect(self._handle_regenerate_plan)
-        self.ui.edit_plan_clicked.connect(self._handle_edit_plan)
         self.ui.screenshot_button_clicked.connect(self._handle_screenshot_request)
         self.ui.add_file_clicked.connect(self._handle_add_file_request)
         self.ui.add_folder_clicked.connect(self._handle_add_folder_request)
@@ -179,7 +170,6 @@ class AppController(QObject):
         self.ui.pause_resume_clicked.connect(self._handle_pause_resume)
         self.ui.pause_for_feedback_clicked.connect(self._handle_pause_for_feedback)
         self.ui.stop_clicked.connect(self._handle_stop)
-        self.ui.next_step_clicked.connect(self._handle_next_step)
         self.ui.toggle_fullscreen_button_clicked.connect(self._on_toggle_fullscreen_clicked)
         self.ui.file_search_requested.connect(self.search_files)
         self.ui.image_pasted.connect(self._handle_pasted_image)
@@ -197,10 +187,6 @@ class AppController(QObject):
         self.hotkey_stop_execution_triggered.connect(self.hotkey_stop_execution)
         self.hotkey_pause_for_feedback_triggered.connect(self.hotkey_pause_for_feedback)
         self.hotkey_cancel_request_triggered.connect(self.hotkey_cancel_request)
-        self.hotkey_regenerate_plan_triggered.connect(self.hotkey_regenerate_plan)
-        self.hotkey_edit_plan_triggered.connect(self.hotkey_edit_plan)
-        self.hotkey_cancel_plan_triggered.connect(self.hotkey_cancel_plan)
-        self.hotkey_run_plan_triggered.connect(self.hotkey_run_plan)
 
 
 
@@ -310,15 +296,6 @@ class AppController(QObject):
         self._stop_thread(getattr(self, "vision_thread", None), "vision", 2500)
         self._stop_thread(getattr(self, "screenshot_thread", None), "screenshot", 1000)
         try:
-            pool = getattr(self, "thread_pool", None)
-            if pool is not None and hasattr(pool, "cleanup"):
-                try:
-                    pool.cleanup(timeout_ms=1500)
-                except TypeError:
-                    pool.cleanup()
-        except Exception as e:
-            logging.warning(f"Thread pool cleanup failed: {e}")
-        try:
             web = getattr(getattr(self, "terminal_handler", None), "web_thread", None)
             if web is not None:
                 try:
@@ -378,18 +355,6 @@ class AppController(QObject):
 
     def request_hotkey_cancel_request(self):
         self.hotkey_cancel_request_triggered.emit()
-
-    def request_hotkey_regenerate_plan(self):
-        self.hotkey_regenerate_plan_triggered.emit()
-
-    def request_hotkey_edit_plan(self):
-        self.hotkey_edit_plan_triggered.emit()
-
-    def request_hotkey_cancel_plan(self):
-        self.hotkey_cancel_plan_triggered.emit()
-
-    def request_hotkey_run_plan(self):
-        self.hotkey_run_plan_triggered.emit()
 
     def run(self):
         self.ui.show_main_window()
@@ -573,48 +538,23 @@ class AppController(QObject):
             self.thinking_timer.stop()
             self.ui.show_thinking_ui(False)
 
-    def _handle_plan_response(self, reasoning: str, tool_calls_obj, schema_name: str):
+    def _handle_structured_response(self, reasoning: str, tool_calls_obj, schema_name: str):
         # The full response is already logged to the llm_communication.log file.
-        if self.state == ControllerState.VISION:
-            self.vision_handler.handle_plan_response(reasoning, tool_calls_obj, schema_name)
-        elif self.state == ControllerState.TERMINAL:
+        if self.state == ControllerState.TERMINAL:
             self.terminal_handler.handle_llm_response(reasoning, tool_calls_obj, schema_name)
         elif self.state == ControllerState.BROWSER:
             self.browser_handler.handle_llm_response(reasoning, tool_calls_obj, schema_name)
         else:
-            logging.warning("Received a plan response while in chat mode. Ignoring.")
+            logging.warning("Received a structured response in an unexpected state. Ignoring.")
             self.thinking_timer.stop()
             self.ui.show_thinking_ui(False)
 
     def _handle_plain_text_response(self, text: str):
-        """Handles the case where a plain text response was received instead of a plan."""
+        """Handles a plain text response received instead of a structured one."""
         # The full response is already logged to the llm_communication.log file.
-        logging.warning("Received unexpected plain text response in vision mode.")
+        logging.warning("Received unexpected plain text response for a structured request.")
         self.thinking_timer.stop()
         self.ui.show_thinking_ui(False)
-
-        if self.state == ControllerState.VISION:
-            model_name = self._get_current_model_name()
-
-            # Sanitize text for HTML display
-            import html
-            escaped_text = html.escape(text)
-
-            message = (
-                f"<b>{model_name}:</b> I received an unexpected response instead of a plan. Here is the raw response:\n"
-                f"<pre>{escaped_text}</pre>\n"
-                "Your original request has been restored in the input field. Would you like to try sending it again?"
-            )
-            self.ui.add_message(message, force_scroll=True)
-
-            # Restore the original user request to the input field
-            if self.vision_handler.original_user_request:
-                self.ui.user_input.setText(self.vision_handler.original_user_request)
-
-            # Reset the state to allow for a new attempt
-            self.vision_handler._set_state(VisionState.IDLE)
-        else:
-            logging.info("Ignoring plain text response as we are not in vision mode.")
 
     def _handle_retry_attempt(self, attempt_num, max_attempts, error, wait_seconds):
         """Updates the UI to show that a retry is happening."""
@@ -1030,63 +970,6 @@ class AppController(QObject):
         logging.info("Deactivating vision mode and switching to chat mode.")
         self._activate_chat_mode()
 
-    def _handle_plan_approval(self):
-        if self.state == ControllerState.VISION:
-            self.vision_handler.handle_plan_approval()
-
-    def _handle_regenerate_plan(self):
-        """Triggered when the user clicks Regenerate: ask the vision handler to re-request a plan."""
-        if self.state == ControllerState.VISION:
-            # Set the assistant name in the UI before regenerating the plan
-            model_name = self._get_current_model_name()
-            self.ui.set_assistant_name(model_name)
-            self.vision_handler.regenerate_plan()
-
-    def _handle_plan_cancel(self):
-        """Called when the user clicks Cancel on the plan controls.
-        Clears the stored strategic plan and restores attachment buttons in the UI.
-        """
-        if self.state == ControllerState.VISION:
-            # Instruct the vision handler to forget the plan
-            try:
-                self.vision_handler.clear_plan()
-            except Exception as e:
-                logging.error(f"Failed to clear plan: {e}")
-
-            # Restore attachment buttons and hide plan controls
-            try:
-                self.ui.set_plan_controls_visible(False)
-            except Exception as e:
-                logging.error(f"Failed to update UI after plan cancel: {e}")
-
-    def _handle_edit_plan(self):
-        """Open the plan editor, validate and apply the edited plan.
-
-        UX: The editor returns an edited plan. We accept it only if it passes
-        validation in vision.apply_edited_plan. After Save, the
-        user stays in chat and must click Approve & Run to start execution.
-        """
-        if self.state != ControllerState.VISION or self.vision_handler.state != VisionState.WAITING_FOR_APPROVAL:
-            self.ui.add_message("<i>Edit is only available when a strategic plan is awaiting your approval.</i>", force_scroll=True)
-            return
-
-        # Open editor with the current plan (fallback to empty list)
-        try:
-            current_plan = self.vision_handler.action_plan or []
-            edited = self.ui.open_plan_editor(current_plan)
-            if edited is None:
-                # User cancelled or error
-                return
-
-            accepted = self.vision_handler.apply_edited_plan(edited)
-            if accepted:
-                self.ui.add_message("<i>Edited plan saved. Please click 'Approve and Run' to start execution.</i>", force_scroll=True)
-            else:
-                self.ui.add_message("<i>Edited plan was rejected. Please fix errors and try again.</i>", force_scroll=True)
-        except Exception as e:
-            logging.error(f"Failed to open/apply plan editor: {e}")
-            self.ui.add_message("<i>Could not open the plan editor due to an internal error.</i>", force_scroll=True)
-
     def _handle_stop(self):
         if self.state == ControllerState.VISION:
             self.vision_handler.stop()
@@ -1135,10 +1018,6 @@ class AppController(QObject):
     def _handle_pause_for_feedback(self):
         if self.state == ControllerState.VISION:
             self.vision_handler.pause_for_feedback()
-
-    def _handle_next_step(self):
-        if self.state == ControllerState.VISION:
-            self.vision_handler.next_step()
 
     def _update_thinking_timer(self):
         self.thinking_time += 1
@@ -1431,7 +1310,7 @@ class AppController(QObject):
 
         if self.state == ControllerState.VISION:
             # Only allow deactivation if the assistant is in a safe, non-executing state
-            safe_states = [VisionState.IDLE, VisionState.PAUSED_ON_ERROR, VisionState.WAITING_FOR_APPROVAL]
+            safe_states = [VisionState.IDLE, VisionState.PAUSED_ON_ERROR]
             if self.vision_handler.state in safe_states:
                 logging.info("Deactivating vision mode via hotkey.")
                 self._deactivate_vision_mode()
@@ -1469,34 +1348,6 @@ class AppController(QObject):
             self.handle_cancel_request()
         else:
             logging.warning("Cannot cancel request: No active request.")
-
-    def hotkey_regenerate_plan(self):
-        if self.state == ControllerState.VISION and self.vision_handler.state == VisionState.WAITING_FOR_APPROVAL:
-            logging.info("Regenerating plan via hotkey.")
-            self.vision_handler.regenerate_plan()
-        else:
-            logging.warning("Cannot regenerate plan: Not awaiting approval.")
-
-    def hotkey_edit_plan(self):
-        if self.state == ControllerState.VISION and self.vision_handler.state == VisionState.WAITING_FOR_APPROVAL:
-            logging.info("Editing plan via hotkey.")
-            self._handle_edit_plan()
-        else:
-            logging.warning("Cannot edit plan: Not awaiting approval.")
-
-    def hotkey_cancel_plan(self):
-        if self.state == ControllerState.VISION and self.vision_handler.state == VisionState.WAITING_FOR_APPROVAL:
-            logging.info("Canceling plan via hotkey.")
-            self.vision_handler.clear_plan()
-        else:
-            logging.warning("Cannot cancel plan: Not awaiting approval.")
-
-    def hotkey_run_plan(self):
-        if self.state == ControllerState.VISION and self.vision_handler.state == VisionState.WAITING_FOR_APPROVAL:
-            logging.info("Running plan via hotkey.")
-            self._handle_plan_approval()
-        else:
-            logging.warning("Cannot run plan: Not awaiting approval.")
 
     def _handle_new_instance_connection(self):
         """

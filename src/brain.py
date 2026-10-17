@@ -6,52 +6,14 @@ Prompts are loaded lazily into memory when first requested.
 """
 import logging
 import json
-from typing import Any
 from src.computer.schemas.terminal import generate_response_formats_dict
 
 
 class Brain:
-    # Static section appended to the strategic planning prompt only when
-    # shell commands are enabled for Vision. Kept here (not in the .txt) so
-    # the base prompt file stays backend-agnostic.
-    SHELL_SECTION = """
-### Shell and File Actions (enabled)
-
-You additionally have shell/file tools (`execute_shell`, `list_directory`, `read_files`, `write_file`).
-Rules for using them:
-
-1.  **When to use shell:** ONLY when the UI path is impossible or clearly worse (e.g., listing many files, reading file content, running a script). If the target element is visible on screen, prefer the UI action — it is verifiable. Do NOT route around the UI out of convenience. Conversely, for console commands prefer `execute_shell` (silent, returns output as text) over opening a visible terminal window — unless the user explicitly asked to SEE the process.
-    Decide by the NATURE of the need, not by habit:
-    - Data question ("show", "check", "which", "list", "what is the last...") → terminal FIRST (`execute_shell`), answer with the result text. Opening windows to LOOK at data is wasteful.
-    - OS/file state changes with a CLI equivalent (create folders/files, read content, query settings, services) → terminal.
-    - App-specific GUI with no CLI (web forms, dialogs, drag-and-drop, context menus, buttons) → visual.
-    - The user explicitly wants to SEE it ("open ... so I can see", "show me") → visual.
-    - Ambiguous → terminal first (it is verified instantly, without screenshots); escalate to visual only if the command cannot deliver.
-2.  **Working directory:** All relative paths resolve against the Task Working Directory stated in System Information. Prefer relative paths.
-    **NEVER hardcode user profile paths** (like `C:\\Users\\...\\Desktop`): folder layouts differ per user and you do not know whose screen this is. The user speaks in human terms ("рабочий стол", "documents", "downloads") and never gives paths — you map those words onto portable tokens expanded on the real machine: `{DESKTOP}` (the desktop the user sees), `{HOME}`, `{WORKDIR}`, `{DOCUMENTS}`, `{DOWNLOADS}`.
-    Example: `New-Item -ItemType Directory -Path '{DESKTOP}\\LogosTest' -Force`.
-    If the path itself is needed as DATA for later steps (e.g. to type it into a Save dialog or to verify it), make the FIRST task resolve it via the runtime environment (PowerShell: `[Environment]::GetFolderPath('Desktop')`; cmd: `echo %USERPROFILE%\\Desktop`) — its output stays in history for the following tasks. Do this only when the concrete path is truly required downstream; otherwise the tokens suffice.
-    NEVER type channel prefixes such as `shell:` as literal text via `write_text` — to run a command, use the `execute_shell` tool.
-3.  **Quoting:** On Windows commands run via cmd.exe: write plain cmd syntax (`mkdir`, `dir`) or a simple `powershell -Command "..."` without nested quotes. The executor unwraps one PowerShell layer and fixes JSON-escaped quotes, but deeply nested quoting still breaks — keep commands simple.
-4.  **No interactive commands:** NEVER run editors, pagers, prompts or anything awaiting input (`vim`, `nano`, `more`, `ssh` without batch flags, installers asking questions). The command must terminate on its own within 60 seconds.
-5.  **Textual contract:** Every shell/file task MUST fill both `expected_outcome` (human-readable) and `expected_output` (concrete check, e.g. "STDOUT contains 'Done' and EXIT CODE: 0"). Such tasks are judged by command output only — no screenshots are taken.
-6.  **One state change per task** applies to shell actions exactly as to clicks.
-"""
-
     def __init__(self, settings_manager=None):
         self._response_formats_cache = None
         self._cache = {}
         self._settings_manager = settings_manager
-
-    def is_shell_allowed_in_vision(self) -> bool:
-        """Single source of truth for the shell-in-Vision flag."""
-        try:
-            if self._settings_manager is not None:
-                vision = self._settings_manager.get("vision", {}) or {}
-                return bool(vision.get("allow_shell_commands", False))
-        except Exception:
-            pass
-        return False
 
     def get_response_formats(self):
         """Lazily loads response formats from the cache file."""
@@ -87,36 +49,6 @@ Rules for using them:
         return self._cache[key]
 
     # --- Template Getters ---
-    def get_strategic_tools(self): return self._get_vision_tools_text('strategic_tools', 'cache/vision/strategic_tools.txt')
-    def get_tools_prompt(self): return self._get_vision_tools_text('tools_prompt', 'cache/vision/tools.txt')
-
-    @staticmethod
-    def _strip_shell_tools(text: str) -> str:
-        """Remove shell/file tool lines so a disabled flag means the model
-        never sees them (prompt and toolset cannot diverge)."""
-        try:
-            from src.computer.modes.vision import SHELL_TOOL_NAMES
-        except Exception:
-            return text
-        kept = []
-        for line in text.splitlines():
-            stripped = line.strip()
-            if stripped.startswith("- `"):
-                name = stripped[3:].split("(", 1)[0].split("`", 1)[0]
-                if name in SHELL_TOOL_NAMES:
-                    continue
-            kept.append(line)
-        return "\n".join(kept)
-
-    def _get_vision_tools_text(self, key: str, filepath: str) -> str:
-        text = self._get_cached_prompt(key, filepath)
-        if not self.is_shell_allowed_in_vision():
-            text = self._strip_shell_tools(text)
-        return text
-    def get_strategic_planning_system_template(self): return self._get_cached_prompt('strategic_planning_system', 'prompts/vision/strategic_planning_system.txt')
-    def get_strategic_planning_user_template(self): return self._get_cached_prompt('strategic_planning_user', 'prompts/vision/strategic_planning_user.txt')
-    def get_evaluation_system_template(self): return self._get_cached_prompt('evaluation_system', 'prompts/vision/evaluation_system.txt')
-    def get_evaluation_user_template(self): return self._get_cached_prompt('evaluation_user', 'prompts/vision/evaluation_user.txt')
     def get_error_explanation_system_template(self): return self._get_cached_prompt('error_explanation_system', 'prompts/vision/error_explanation_system.txt')
     def get_error_explanation_user_template(self): return self._get_cached_prompt('error_explanation_user', 'prompts/vision/error_explanation_user.txt')
     def get_wait_origin_system_template(self): return self._get_cached_prompt('wait_origin_system', 'prompts/vision/wait_origin_system.txt')
@@ -156,143 +88,11 @@ Rules for using them:
 
         return prompt
 
-    def _build_context_block(
-        self,
-        user_request: str | None = None,
-        original_request: str | None = None,
-        plan_status_str: str | None = None,
-        goal_description: str | None = None,
-        performed_task: dict[str, Any] | None = None,
-        executed_actions: list[dict[str, Any]] | None = None,
-        error_message: str | None = None,
-        screen_context: str | None = None,
-        post_action_context: str | None = None,
-        screen_resolution: str | None = None,
-        os_info: str | None = None,
-        installed_applications: list[str] | None = None,
-        history: list[dict[str, str]] | None = None,
-        replacements: dict[str, Any] | None = None,
-        working_directory: str | None = None,
-    ) -> dict[str, str]:
-        """
-        Centrally builds the context block strings for user prompts.
-        """
-        context = {}
-        context['user_request'] = user_request or "No user request provided."
-        context['original_request'] = original_request or "No original request provided."
-        context['plan_status_str'] = plan_status_str or "No plan available."
-        context['goal_description'] = goal_description or "No current goal specified."
-
-        if performed_task:
-            context['task_description'] = performed_task.get('task_description', 'No description provided.')
-            context['expected_outcome'] = performed_task.get('expected_outcome', 'No expected outcome provided.')
-        else:
-            context['task_description'] = "No task was performed."
-            context['expected_outcome'] = "No expected outcome specified."
-
-        actions_executed_str = json.dumps(executed_actions, indent=2) if executed_actions else "[]"
-        context['actions_executed'] = actions_executed_str
-        context['task_error_context'] = f"An error occurred: {error_message}" if error_message else "No errors were reported during execution."
-        context['screen_context'] = screen_context or "No screen analysis available."
-        context['post_action_context'] = post_action_context or "No post-action screen analysis available."
-        context['screen_resolution'] = screen_resolution or "Unknown"
-        context['os_info'] = os_info or "Unknown"
-        context['installed_applications'] = "\n".join([f"- {app}" for app in installed_applications]) if installed_applications else "No application list provided."
-        context['history_str'] = "\n".join([f"- {item['role']}: {item['content']}" for item in history]) if history else "No history available."
-        context['working_directory'] = working_directory or "Unknown (use absolute paths from the request context)."
-
-        # --- New context for re-planning ---
-        if replacements and replacements.get('is_replan'):
-            context['replan_context_block'] = self._build_replan_context_block(
-                user_request, plan_status_str, replacements.get('failure_context')
-            )
-        else:
-            context['replan_context_block'] = "" # Ensure the placeholder is replaced with nothing if not re-planning
-
-        return context
-
-    def _build_replan_context_block(self, user_request, plan_status, failure_context):
-        """Builds the specific text block for re-planning scenarios."""
-        replan_template = self._get_cached_prompt('strategic_planning_replan_context', 'prompts/vision/strategic_planning_replan_context.txt')
-        return self._apply_replacements(replan_template, {
-            "user_request": user_request,
-            "plan_status": plan_status,
-            "failure_context": failure_context
-        })
-
     def _apply_replacements(self, template: str, replacements: dict[str, str]) -> str:
         """Replaces all placeholders in a template with values from a dictionary."""
         for key, value in replacements.items():
             template = template.replace(f"{{{key}}}", str(value))
         return template
-
-    def get_strategic_prompts(self, user_request: str, screen_context: str, installed_applications: list = None, screen_resolution: str = "Unknown", os_info: str = "Unknown", is_replan: bool = False, plan_status: str = None, failure_context: str = None, working_directory: str | None = None) -> tuple[str, str]:
-        """Formats the system and user prompts for the strategic planning phase."""
-        system_template = self.get_strategic_planning_system_template()
-        user_template = self.get_strategic_planning_user_template()
-
-        if "template not found" in system_template or "template not found" in user_template:
-            return None, None
-
-        system_prompt = self._format_prompt_with_schema(system_template, "strategic_plan", {
-            "strategic_tools": self.get_strategic_tools(),
-            "shell_section": self.SHELL_SECTION if self.is_shell_allowed_in_vision() else "",
-        })
-
-        # Build context with re-planning info if applicable
-        context_replacements = {
-            'is_replan': is_replan,
-            'failure_context': failure_context
-        }
-        context = self._build_context_block(
-            user_request=user_request,
-            plan_status_str=plan_status,
-            screen_context=screen_context,
-            screen_resolution=screen_resolution,
-            os_info=os_info,
-            installed_applications=installed_applications,
-            replacements=context_replacements,
-            working_directory=working_directory,
-        )
-        user_prompt = self._apply_replacements(user_template, context)
-
-        return system_prompt, user_prompt
-
-    def get_evaluation_prompts(self, original_request: str, plan_status_str: str, history: list, performed_task: dict, executed_actions: list, post_action_context: str, error_message: str = None, correction_attempts: int = 0, max_correction_attempts: int = 3, os_info: str = "Unknown", action_result: str | None = None, working_directory: str | None = None) -> tuple[str, str]:
-        """Generates the system and user prompts for the evaluation phase."""
-        system_template = self.get_evaluation_system_template()
-        user_template = self.get_evaluation_user_template()
-
-        if "template not found" in system_template or "template not found" in user_template:
-            return None, None
-
-        system_prompt = self._format_prompt_with_schema(system_template, "evaluation", {
-            "available_tools": self.get_tools_prompt(),
-            "correction_attempts": correction_attempts,
-            "max_correction_attempts": max_correction_attempts
-        })
-
-        context = self._build_context_block(
-            original_request=original_request,
-            plan_status_str=plan_status_str,
-            history=history,
-            performed_task=performed_task,
-            executed_actions=executed_actions,
-            post_action_context=post_action_context,
-            error_message=error_message,
-            os_info=os_info,
-            working_directory=working_directory,
-        )
-
-        # Dynamically create the clipboard content block if a result was returned
-        if action_result is not None:
-            context['clipboard_content_block'] = f"### Clipboard Content ###\n{action_result}"
-        else:
-            context['clipboard_content_block'] = ""
-
-        user_prompt = self._apply_replacements(user_template, context)
-
-        return system_prompt, user_prompt
 
     def get_error_explanation_prompts(self, original_request: str, last_action: dict, reason: str) -> tuple[str, str]:
         """Generates the system and user prompts for the LLM to explain why it got stuck."""

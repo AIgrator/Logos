@@ -485,10 +485,6 @@ class GoogleProvider(BaseLLMProvider):
 
     def __init__(self, provider_config: dict):
         super().__init__(provider_config)
-        # Instance-level cache for generated tools module to avoid globals
-        # and to allow one-time (fast) attempts per process instance.
-        self.cache_gemini_tools = None
-        self._cache_gemini_tools_checked = False
 
         if not self.api_key:
             raise ValueError("Gemini API key is not configured in settings.")
@@ -497,70 +493,6 @@ class GoogleProvider(BaseLLMProvider):
         # key_down registry for computer use: (chain_id, key) -> timestamp.
         # key_up converts the wall-clock hold into hold_key(duration).
         self._held_keys: dict = {}
-
-    def _ensure_generated_tools_module(self, mode: str):
-        """
-        Ensure `cache.gemini_tools` exists and exposes `_get_tools_schema(mode)`.
-        This provider does NOT attempt to generate the module itself. Generation
-        must be performed once at application startup (see `main.py`).
-        Returns the module on success, or None if missing/invalid.
-        """
-        # Use instance fields instead of module-level globals
-        # Fast path: already loaded
-        if self.cache_gemini_tools is not None:
-            return self.cache_gemini_tools
-
-        # If we've already tried and failed, skip repeated attempts (fast)
-        if self._cache_gemini_tools_checked:
-            return None
-
-        # Try to import the generated module directly. Do not attempt generation here.
-        try:
-            import importlib
-            module_path = f'cache.{mode}.gemini_tools'
-            logging.info(f"Attempting to import tools from '{module_path}'...")
-            mod = importlib.import_module(module_path)
-        except Exception as e:
-            logging.error(f"Required generated module `{module_path}` is missing. Please run the generator once at startup (ToolRegistry.generate_all()). Error: %s", e)
-            self._cache_gemini_tools_checked = True
-            self.cache_gemini_tools = None
-            return None
-
-        # Validate the module exposes the expected factory and that it returns
-        # a non-empty collection of tool/proto objects.
-        if not hasattr(mod, '_get_tools_schema'):
-            logging.error('cache.gemini_tools found but does not expose `_get_tools_schema()`; ensure generator produced the correct artifact.')
-            self._cache_gemini_tools_checked = True
-            self.cache_gemini_tools = None
-            return None
-
-        try:
-            tools_schema = mod._get_tools_schema(mode)
-            # Must be a non-empty sequence
-            from collections.abc import Sequence
-            if not isinstance(tools_schema, Sequence) or len(tools_schema) == 0:
-                logging.warning(f'cache.gemini_tools._get_tools_schema(mode="{mode}") returned empty or non-sequence value; this may be expected if the mode has no tools.')
-                # This is not a fatal error; some modes may have no tools.
-                # We will cache the module, but there will be no tools to use.
-            else:
-                # Basic structural validation: ensure the first entry looks like a Tool proto
-                first = tools_schema[0]
-                if not hasattr(first, 'function_declarations'):
-                    logging.error('Generated tool objects do not appear to be genai_types.Tool (missing `function_declarations`).')
-                    self._cache_gemini_tools_checked = True
-                    self.cache_gemini_tools = None
-                    return None
-
-        except Exception as e:
-            logging.error('Calling cache.gemini_tools._get_tools_schema(mode="%s") failed: %s', mode, e, exc_info=True)
-            self._cache_gemini_tools_checked = True
-            self.cache_gemini_tools = None
-            return None
-
-        # Success
-        self.cache_gemini_tools = mod
-        self._cache_gemini_tools_checked = True
-        return mod
 
     def _recursive_to_dict(self, obj):
         """
@@ -699,17 +631,6 @@ class GoogleProvider(BaseLLMProvider):
         else:
             logging.info("Gemini Provider: Using legacy JSON-in-text mode.")
             if system_prompt:
-                mod = self._ensure_generated_tools_module(mode='vision')
-                if mod and hasattr(mod, '_get_tools_schema'):
-                    try:
-                        tools = mod._get_tools_schema(mode='vision')
-                        if tools:
-                            generation_config_kwargs['tools'] = tools
-                    except Exception as e:
-                        logging.error('Error calling cache.gemini_tools._get_tools_schema(): %s', e, exc_info=True)
-                        raise
-                else:
-                    logging.error('Generated cache.gemini_tools is missing or invalid; cannot use tools in legacy mode.')
                 contents = self._prepare_assistant_contents(prompt, attachments, history)
             else:
                 logging.warning("get_response called without a system_prompt. Using chat mode.")

@@ -8,21 +8,14 @@ import re
 from json_repair import repair_json
 from pydantic import ValidationError
 from typing import Any
-from difflib import SequenceMatcher
 
 # Import the Pydantic models and the schema map
-from src.computer.schemas.vision import SCHEMA_MAP as VISUAL_SCHEMA_MAP, Evaluation
+from src.computer.schemas.vision import SCHEMA_MAP as VISUAL_SCHEMA_MAP
 from src.computer.schemas.terminal import SCHEMA_MAP as TERMINAL_SCHEMA_MAP, ToolCall as TerminalToolCall
 from src.computer.schemas.browser import SCHEMA_MAP as BROWSER_SCHEMA_MAP, ToolCall as BrowserToolCall
 
 # Combine both schema maps into one for the validator to use
 SCHEMA_MAP = {**VISUAL_SCHEMA_MAP, **TERMINAL_SCHEMA_MAP, **BROWSER_SCHEMA_MAP}
-
-# --- Constants for Fuzzy Matching ---
-SIMILARITY_THRESHOLD = 0.8
-# Dynamically get valid enum values from the Pydantic schema itself
-VALID_STATUSES = list(Evaluation.model_fields['payload'].annotation.model_fields['evaluation'].annotation.model_fields['status'].annotation.__args__)
-VALID_NEXT_MOVE_TYPES = list(Evaluation.model_fields['payload'].annotation.model_fields['next_move'].annotation.model_fields['type'].annotation.__args__)
 
 # --- Constants for XML-like response parsing ---
 
@@ -45,21 +38,6 @@ VALID_TOOL_NAMES = set(TERMINAL_TOOL_NAMES + VISION_TOOL_NAMES + BROWSER_TOOL_NA
 
 TOOL_NAME_SYNONYMS = ['name', 'action', 'tool_name', 'function_name', 'tool', 'command']
 ARGUMENTS_SYNONYMS = ['arguments', 'args', 'parameters', 'params', 'payload', 'inputs']
-
-
-def decode_unicode_escapes(obj):
-    """
-    Recursively traverses a dictionary or list and decodes Unicode escape
-    sequences in all string values.
-    """
-    if isinstance(obj, dict):
-        return {k: decode_unicode_escapes(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [decode_unicode_escapes(elem) for elem in obj]
-    elif isinstance(obj, str):
-        return obj.encode('raw_unicode_escape').decode('unicode_escape')
-    else:
-        return obj
 
 
 def repair_json_string(raw_text: str) -> any:
@@ -133,17 +111,6 @@ def _repair_xml_like_tool_call(raw_text: str) -> dict | None:
             "arguments": arguments if arguments else {}
         }
     }
-
-def _get_obj_at_loc(data: Any, loc: tuple) -> Any | None:
-    """Navigates a nested structure to get the object at a given location tuple."""
-    for key in loc:
-        if isinstance(data, dict) and key in data:
-            data = data[key]
-        elif isinstance(data, list) and isinstance(key, int) and 0 <= key < len(data):
-            data = data[key]
-        else:
-            return None
-    return data
 
 def _decode_json_lenient(text: str) -> Any | None:
     """Strict-parse JSON, falling back to the lenient json_repair on malformed
@@ -256,9 +223,7 @@ def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, st
                     fixed_action['name'] = nested_name
                     holder['action'] = fixed_action
 
-    if isinstance(data_object, list) and schema_name == 'strategic_plan':
-        object_to_validate = {"type": "strategic_plan", "payload": data_object}
-    elif isinstance(data_object, dict):
+    if isinstance(data_object, dict):
         # Case 1: Already well-formed.
         if "type" in data_object and "payload" in data_object:
             object_to_validate = data_object
@@ -289,197 +254,100 @@ def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, st
         logging.error(error_msg)
         return None, error_msg
 
-# --- Universal Fallback Parser (Hierarchical) ---
+# --- Safe, schema-agnostic repair (pre-correction) ---
 
-def universal_fallback_parser(raw_object: dict) -> tuple[Any | None, str | None]:
-    """
-    Primary fallback function that attempts to repair a malformed object by trying different strategies in order of priority.
-    """
-    logging.info("Activating universal fallback parser...")
-
-    # Priority 1: Try to repair as a full strategic plan.
-    repaired_as_plan, schema_name = _try_repair_as_strategic_plan(raw_object)
-    if repaired_as_plan:
-        return repaired_as_plan, schema_name
-
-    # Priority 2: Try to repair as a standard evaluation with typos.
-    repaired_as_eval, schema_name = _try_repair_as_standard_evaluation(raw_object)
-    if repaired_as_eval:
-        return repaired_as_eval, schema_name
-
-    # Priority 3: Try to repair a 'flattened' evaluation.
-    repaired_as_flat_eval, schema_name = _try_repair_as_flattened_evaluation(raw_object)
-    if repaired_as_flat_eval:
-        return repaired_as_flat_eval, schema_name
-
-    logging.warning("Universal fallback parser failed. Could not repair the object with any known strategy.")
-    return None, None
-
-# --- Repair Strategy 1: Find a Strategic Plan ---
-
-def _find_task_list_recursively(data: Any, max_depth=5, current_depth=0) -> list[dict] | None:
-    """Recursively searches for a list of objects that look like Tasks."""
-    if current_depth > max_depth:
+def _extract_first_json_object(text: str) -> str | None:
+    """Return the first brace-balanced ``{...}`` slice of *text*, ignoring any
+    prose or markdown fences around it. Content-preserving: it only *slices*
+    the string, it never rewrites it."""
+    if not isinstance(text, str):
         return None
-    if isinstance(data, list) and data:
-        first_item = data[0]
-        if isinstance(first_item, dict) and all(k in first_item for k in ["task_description", "actions", "expected_outcome"]):
-            return data
-        for item in data:
-            found = _find_task_list_recursively(item, max_depth, current_depth + 1)
-            if found:
-                return found
-    elif isinstance(data, dict):
-        for value in data.values():
-            found = _find_task_list_recursively(value, max_depth, current_depth + 1)
-            if found:
-                return found
+    start = text.find('{')
+    if start == -1:
+        return None
+    depth = 0
+    in_string = False
+    escaped = False
+    for index in range(start, len(text)):
+        char = text[index]
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == '\\':
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == '{':
+            depth += 1
+        elif char == '}':
+            depth -= 1
+            if depth == 0:
+                return text[start:index + 1]
     return None
 
-def _try_repair_as_strategic_plan(raw_response: dict) -> tuple[Any | None, str | None]:
-    """Attempts to find a task list and wrap it in a 'strategic_failure' Evaluation object."""
-    logging.info("Repair attempt (Priority 1): Searching for a strategic plan...")
-    task_list = _find_task_list_recursively(raw_response)
-    if not task_list:
-        logging.info("Repair attempt (Priority 1) failed: No task list found.")
-        return None, None
 
-    logging.info(f"Repair attempt (Priority 1) successful: Found a plan with {len(task_list)} tasks. Wrapping it.")
-    evaluation_wrapper = {
-        "type": "evaluation",
-        "payload": {
-            "evaluation": {"status": "failure", "reason": "Inferred from fallback: LLM provided a new strategic plan directly."},
-            "next_move": {"type": "strategic_failure", "new_plan": task_list}
-        }
-    }
-    validated_obj, _ = validate_object(evaluation_wrapper, 'evaluation')
-    return (validated_obj, 'evaluation') if validated_obj else (None, None)
+def _recursively_decode_json_strings(data_object: Any, depth: int = 0) -> Any:
+    """Decode string values that are themselves JSON objects/arrays, recursively.
 
-# --- Repair Strategy 2: Fix a Standard Evaluation ---
+    Content-preserving: ``'{"a": 1}'`` becomes ``{"a": 1}``; every other string
+    value is returned untouched. Reconstructs from models that stringify a
+    nested part of the envelope (e.g. ``arguments``, or a doubly-encoded
+    ``payload``)."""
+    if depth > 20:
+        return data_object
+    if isinstance(data_object, dict):
+        return {key: _recursively_decode_json_strings(value, depth + 1) for key, value in data_object.items()}
+    if isinstance(data_object, list):
+        return [_recursively_decode_json_strings(item, depth + 1) for item in data_object]
+    if isinstance(data_object, str):
+        if data_object.lstrip()[:1] in ('{', '['):
+            decoded = _decode_json_lenient(data_object)
+            if isinstance(decoded, (dict, list)):
+                return _recursively_decode_json_strings(decoded, depth + 1)
+        return data_object
+    return data_object
 
-def _find_best_match(value: str, candidates: list[str]) -> str | None:
-    """Finds the best fuzzy match for a string from a list of candidates."""
-    if not value or not isinstance(value, str):
-        return None
-    matcher = SequenceMatcher(a=value.lower())
-    best_match, highest_ratio = None, 0
-    for candidate in candidates:
-        matcher.set_seq2(candidate.lower())
-        ratio = matcher.ratio()
-        if ratio > highest_ratio:
-            highest_ratio, best_match = ratio, candidate
-    if highest_ratio >= SIMILARITY_THRESHOLD:
-        if value != best_match:
-            logging.info(f"Corrected value '{value}' to '{best_match}' with similarity {highest_ratio:.2f}")
-        return best_match
-    return None
 
-def _find_object_by_keys(data: Any, required_keys: list[str], max_depth=5, current_depth=0) -> dict | None:
-    """Recursively searches for a dictionary that contains all of the required keys."""
-    if current_depth > max_depth:
-        return None
-    if isinstance(data, dict):
-        if all(key in data for key in required_keys):
-            return data
-        for value in data.values():
-            if (found := _find_object_by_keys(value, required_keys, max_depth, current_depth + 1)):
-                return found
-    elif isinstance(data, list):
-        for item in data:
-            if (found := _find_object_by_keys(item, required_keys, max_depth, current_depth + 1)):
-                return found
-    return None
+def _safe_repair_candidates(data_object: Any) -> list[Any]:
+    """Build the small, ordered list of meaning-preserving repairs to try."""
+    candidates: list[Any] = []
 
-def _try_repair_as_standard_evaluation(raw_object: dict) -> tuple[Any | None, str | None]:
-    """Attempts to find and repair a standard Evaluation object with potential typos."""
-    logging.info("Repair attempt (Priority 2): Searching for standard evaluation components...")
-    evaluation_part = _find_object_by_keys(raw_object, ['status', 'reason'])
-    next_move_part = _find_object_by_keys(raw_object, ['type'])
+    def add(candidate: Any) -> None:
+        if isinstance(candidate, (dict, list)) and candidate != data_object:
+            if not any(candidate == existing for existing in candidates):
+                candidates.append(candidate)
 
-    if not (evaluation_part and next_move_part):
-        logging.info("Repair attempt (Priority 2) failed: Could not find both 'evaluation' and 'next_move' components.")
-        return None, None
+    # 1. Decode any nested JSON-string values anywhere in the tree.
+    add(_recursively_decode_json_strings(data_object))
 
-    logging.info("Found potential 'evaluation' and 'next_move' components. Attempting to correct enums.")
-    if 'status' in evaluation_part:
-        if (corrected_status := _find_best_match(evaluation_part['status'], VALID_STATUSES)):
-            evaluation_part['status'] = corrected_status
-    if 'type' in next_move_part:
-        if (corrected_type := _find_best_match(next_move_part['type'], VALID_NEXT_MOVE_TYPES)):
-            next_move_part['type'] = corrected_type
+    # 2. If the whole response arrived as text, slice the JSON object out of it.
+    if isinstance(data_object, str):
+        extracted = _extract_first_json_object(data_object)
+        if extracted:
+            add(repair_json_string(extracted))
 
-    reconstructed_payload = {
-        "type": "evaluation",
-        "payload": {"evaluation": evaluation_part, "next_move": next_move_part}
-    }
+    return candidates
 
-    validated_obj, _ = validate_object(reconstructed_payload, 'evaluation')
-    if validated_obj:
-        logging.info("Repair attempt (Priority 2) successful: The object has been corrected and validated.")
-        return validated_obj, 'evaluation'
-    else:
-        logging.warning("Repair attempt (Priority 2) failed: Could not validate the reconstructed object.")
-        return None, None
 
-# --- Repair Strategy 3: Fix a Flattened Evaluation ---
+def safe_repair_object(data_object: Any, schema_name: str) -> tuple[dict | None, str | None]:
+    """Content-preserving, validate-on-accept repair for *any* schema.
 
-def _try_repair_as_flattened_evaluation(raw_object: dict) -> tuple[Any | None, str | None]:
+    Callers invoke this ONLY after ``validate_object`` has already rejected the
+    original response, so a valid response is never touched. Every candidate is
+    derived from the *same* data by decoding string-encoded JSON or slicing a
+    JSON object out of prose - no field is ever invented, renamed or dropped -
+    and a candidate is accepted only if it passes the exact same Pydantic
+    schema. Repair can therefore rescue malformed replies but can never alter
+    the meaning of a good one.
     """
-    Attempts to repair an evaluation object that is 'flattened' (e.g., 'status' and 'next_move' are at the top level).
-    """
-    logging.info("Repair attempt (Priority 3): Searching for a flattened evaluation...")
-
-    # Check for the minimum required keys at the top level
-    if 'status' not in raw_object or 'next_move' not in raw_object or not isinstance(raw_object.get('next_move'), dict):
-        logging.info("Repair attempt (Priority 3) failed: Missing 'status' or 'next_move' at the top level.")
-        return None, None
-
-    logging.info("Found flattened evaluation components. Attempting to reconstruct and correct.")
-
-    # 1. Reconstruct the 'evaluation' part, adding a default reason if missing.
-    status = raw_object['status']
-    reason = raw_object.get('reason')
-
-    # If 'reason' is not at the top level, try to find it as 'feedback'
-    # inside a nested 'evaluation' object.
-    if not reason and isinstance(raw_object.get('evaluation'), dict):
-        reason = raw_object['evaluation'].get('feedback')
-
-    if not reason:
-        # This log is for the developer, to be seen in the terminal.
-        logging.info("LLM provided a flattened response without a reason. Generating a default reason for internal logic.")
-        if status == 'success':
-            reason = "The action was completed successfully."
-        else:
-            reason = "A reason for the failure was not provided by the LLM."
-
-    evaluation_part = {
-        'status': status,
-        'reason': reason
-    }
-
-    # 2. Get the 'next_move' part.
-    next_move_part = raw_object['next_move']
-
-    # 3. Correct enum values using fuzzy matching, similar to the standard repair.
-    if (corrected_status := _find_best_match(evaluation_part['status'], VALID_STATUSES)):
-        evaluation_part['status'] = corrected_status
-
-    if 'type' in next_move_part:
-        if (corrected_type := _find_best_match(next_move_part['type'], VALID_NEXT_MOVE_TYPES)):
-            next_move_part['type'] = corrected_type
-
-    # 4. Build the final object in the correct nested structure.
-    reconstructed_payload = {
-        "type": "evaluation",
-        "payload": {"evaluation": evaluation_part, "next_move": next_move_part}
-    }
-
-    # 5. Validate the reconstructed object.
-    validated_obj, _ = validate_object(reconstructed_payload, 'evaluation')
-    if validated_obj:
-        logging.info("Repair attempt (Priority 3) successful: The flattened object has been corrected and validated.")
-        return validated_obj, 'evaluation'
-    else:
-        logging.warning("Repair attempt (Priority 3) failed: Could not validate the reconstructed flattened object.")
-        return None, None
+    last_error = f"No safe repair candidate for schema '{schema_name}'."
+    for candidate in _safe_repair_candidates(data_object):
+        validated, error = validate_object(candidate, schema_name)
+        if validated is not None:
+            logging.warning(f"safe_repair_object recovered a malformed '{schema_name}' response without altering its content.")
+            return validated, None
+        last_error = error or last_error
+    return None, last_error

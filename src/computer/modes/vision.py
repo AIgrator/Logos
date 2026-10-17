@@ -14,8 +14,7 @@ from src.computer.tools.vision.write_text import write_text
 # Shell/file tools shared with the terminal manifest. They are listed here
 # so unified Vision plans may mix UI actions with commands, but they only
 # reach the model prompt when the "allow_shell_commands" Vision setting is
-# enabled (see Brain.get_strategic_tools). Execution is additionally gated
-# in Executor.execute via the same flag.
+# enabled. Execution is additionally gated in Executor.execute via the same flag.
 from src.computer.tools.terminal.system.execute_shell import execute_shell
 from src.computer.tools.terminal.fs.list_directory import list_directory
 from src.computer.tools.terminal.fs.read_files import read_files
@@ -24,12 +23,6 @@ from src.computer.tools.common.communicate_to_user import communicate_to_user
 from src.computer.tools.common.display_message import display_message
 from src.computer.tools.common.finish import finish
 from src.computer.tools.common.get_clipboard_content import get_clipboard_content
-
-# Names of tools that originate from the terminal manifest. Used to filter
-# them out of Vision prompts while shell support is disabled.
-SHELL_TOOL_NAMES = frozenset({
-    "execute_shell", "list_directory", "read_files", "write_file",
-})
 
 TOOLS_METADATA = {
     "click": click,

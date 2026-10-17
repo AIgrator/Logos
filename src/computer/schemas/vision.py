@@ -3,45 +3,6 @@ import json
 from pydantic import BaseModel, Field
 from typing import Any, Literal
 
-# A generic representation for a tool call or a plan step
-class ToolCall(BaseModel):
-    name: str = Field(..., example="click")
-    arguments: dict[str, Any] | None = Field(default=None, example={"element_description": "The 'Login' button"})
-
-# --- Task (New) ---
-# A Task is a self-contained "contract" for a logical step.
-class Task(BaseModel):
-    task_description: str = Field(..., description="A human-readable goal for this task, e.g., 'Create a new folder named MyProject'.", example="Create a new folder named 'MyProject' on the Desktop.")
-    actions: list[ToolCall] = Field(..., description="Atomic actions. KEY RULE: at most ONE state-changing action per task (a UI action like 'click'/'launch_app' or a shell/file action like 'execute_shell') — the outcome is verified after every task. Auxiliary actions ('write_text', 'hotkey') may join the main one.")
-    expected_outcome: str = Field(..., description="A clear, verifiable description of what the screen should look like after the task is successfully completed.", example="A new folder named 'MyProject' should be visible on the Desktop.")
-    expected_output: str | None = Field(default=None, description="Optional textual success criterion for shell/file tasks (e.g. a substring of stdout or 'exit code 0'). UI tasks leave this empty and are judged visually via expected_outcome; shell tasks are judged by command output and skip screenshots.", example="STDOUT contains 'MyProject' and EXIT CODE: 0")
-
-# --- Strategic Plan ---
-class StrategicPlan(BaseModel):
-    """A multi-step plan to achieve the user's goal."""
-    type: Literal['strategic_plan'] = Field(..., example="strategic_plan")
-    payload: list[Task]
-
-# --- Evaluation ---
-class EvaluationDetails(BaseModel):
-    status: Literal['success', 'failure', 'unexpected_wait'] = Field(..., example="success")  #, 'simple_failure', 'strategic_failure'
-    reason: str = Field(..., example="The folder was created successfully.")
-
-class NextMove(BaseModel):
-    type: Literal['action', 'action_correction', 'task_replacement', 'insertion_correction', 'strategic_failure'] = Field(..., example="action")
-    action: ToolCall | None = Field(default=None, example={"name": "finish", "arguments": {"message": "Task complete."}})
-    new_task: Task | None = Field(default=None, description="A new task to be inserted or to replace the current one.")
-    new_plan: list[Task] | None = Field(default=None, description="A complete new strategic plan, provided pre-emptively by the LLM.")
-
-class EvaluationPayload(BaseModel):
-    evaluation: EvaluationDetails
-    next_move: NextMove
-
-class Evaluation(BaseModel):
-    """Evaluation of the last action and the next move."""
-    type: Literal['evaluation'] = Field(..., example="evaluation")
-    payload: EvaluationPayload
-
 # --- Wait Check Result ---
 class WaitCheckResultPayload(BaseModel):
     condition_met: bool = Field(..., example=True)
@@ -73,8 +34,6 @@ class ErrorExplanation(BaseModel):
 
 # A dictionary to easily map schema names to their Pydantic models
 SCHEMA_MAP = {
-    'strategic_plan': StrategicPlan,
-    'evaluation': Evaluation,
     'wait_check_result': WaitCheckResult,
     'wait_origin_result': WaitOriginResult,
     'error_explanation': ErrorExplanation,
