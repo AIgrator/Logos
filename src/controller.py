@@ -26,7 +26,6 @@ from src.computer.computer import Computer
 from indexer import Indexer
 from src.utils.ignore_patterns import DEFAULT_GLOBAL_IGNORE_PATTERNS
 # Heavy imports are deferred to background threads
-# from vision.worker import VisionWorker
 
 class AppController(QObject):
     llm_request_sent = Signal(str, list, str, list, str, str, int)
@@ -454,7 +453,6 @@ class AppController(QObject):
         except Exception:
             pass
         self.vision_module_ready.emit()
-        logging.info("Vision marked ready (no local backend to initialize).")
 
     def _set_state(self, new_state: ControllerState):
         logging.info(f"AppController state changed from {self.state.name} to {new_state.name}")
@@ -906,12 +904,6 @@ class AppController(QObject):
 
     def _on_settings_changed(self, new_settings):
         self.settings = new_settings
-        if self.vision:
-            self.vision.update_capture_settings(new_settings)
-            # Also notify the parser adapter of potential settings changes
-            if hasattr(self.vision, 'parser_adapter'):
-                self.vision.parser_adapter.update_settings(new_settings)
-
         self.llm_worker.update_settings_and_provider(new_settings)
 
         self.chat_handler.settings = new_settings

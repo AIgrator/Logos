@@ -47,8 +47,11 @@ NETWORK_HINT = "cua-turn"
 # The only kwargs computer_use_turn() accepts. The worker request dict may
 # carry extra local meta (tag, turn_no, debug_flags, ...); the allowlist
 # keeps them from leaking into the provider call (TypeError).
+# screenshot_b64 is injected by the worker itself (first turn only, and only
+# when the provider declares wants_first_screenshot()).
 _PROVIDER_KWARGS = frozenset({
     "task", "outputs", "previous_response_id", "instructions",
+    "screenshot_b64",
 })
 
 KEY_ALIASES = {
@@ -147,10 +150,10 @@ def scale_point(x: float, y: float, scale: float) -> tuple:
 
 def _annotation_font(font_path: str | None = None, size: int = 22):
     """Settings font first (FontComboBox path), then system fallbacks,
-    then PIL's bitmap default. 'cv2_default' means: skip to fallbacks."""
+    then PIL's bitmap default. A default sentinel means: skip to fallbacks."""
     from PIL import ImageFont
     candidates = []
-    if font_path and font_path != "cv2_default":
+    if font_path and font_path not in ("default", "cv2_default"):
         candidates.append(font_path)
     candidates += ["arial.ttf", "DejaVuSans.ttf"]
     for candidate in candidates:
@@ -302,6 +305,23 @@ class CuaTurnWorker(QThread):
         turn_no = self._request.get("turn_no", 0)
         flags = self._request.get("debug_flags") or {}
         prev_shot_file = self._request.get("prev_shot_file")
+        # Google-style providers ground the very first turn on an opening
+        # screenshot (their documented loop always sends one). Capture it
+        # here, off the GUI thread — same path as the pre-action debug shot.
+        # Providers that don't declare it never see the key (and their
+        # signatures stay untouched).
+        try:
+            wants_shot = bool(self._provider.wants_first_screenshot())
+        except Exception:
+            wants_shot = False
+        if (wants_shot and protocol.get("previous_response_id") is None
+                and not protocol.get("outputs")
+                and not protocol.get("screenshot_b64")):
+            try:
+                first_b64, _, _ = self._handler.capture_screenshot_b64()
+                protocol["screenshot_b64"] = first_b64
+            except Exception as e:
+                logging.warning(f"opening screenshot failed: {e}")
         try:
             from src.llm.base_provider import set_log_ctx
             set_log_ctx(f"Vision-{tag}", turn_no)
@@ -321,6 +341,7 @@ class CuaTurnWorker(QThread):
                 "instructions_chars": len(protocol.get("instructions") or ""),
                 "instructions": protocol.get("instructions") if first else "<chain continues>",
                 "previous_response_id": protocol.get("previous_response_id"),
+                "opening_screenshot_chars": len(protocol.get("screenshot_b64") or ""),
                 "outputs": [
                     {"kind": o.get("kind"), "call_id": o.get("call_id"),
                      "screenshot_bytes": len(o.get("screenshot_b64") or ""),
@@ -890,7 +911,8 @@ class VisionHandler(BaseAgent):
         if not self.provider_supports_cua():
             self.ui.add_message(
                 "<i>Current provider does not support Computer Use. "
-                "Switch to OpenAI (e.g. gpt-6-luna) to use Vision mode.</i>")
+                "Switch to OpenAI, Anthropic or Google (Gemini 3.x) "
+                "to use Vision mode.</i>")
             self.stop()
             return
 

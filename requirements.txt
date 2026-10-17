@@ -29,6 +29,8 @@ google-api-core
 openai
 anthropic
 xai_sdk
+httpx
 
-# --- Shared numeric lib (kept: zero startup cost, used by screenshots later) ---
-numpy==1.26.4
+# --- Clipboard & Browser (direct imports) ---
+pyperclip
+playwright

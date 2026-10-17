@@ -271,7 +271,7 @@ class SettingsWindow(QDialog):
         omniparser_settings = self.settings_manager.get("omniparser", {})
 
         # Debug
-        self.font_combo.set_selected_font(omniparser_settings.get("font_path", "cv2_default"))
+        self.font_combo.set_selected_font(omniparser_settings.get("font_path", "default"))
         self.font_size_spinbox.setValue(omniparser_settings.get("font_size", 16))
         self.text_padding_spinbox.setValue(omniparser_settings.get("text_padding", 2))
         self.save_trace_log_checkbox.setChecked(omniparser_settings.get("save_trace_log", True))

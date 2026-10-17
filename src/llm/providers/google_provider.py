@@ -26,7 +26,9 @@ class GoogleProvider(BaseLLMProvider):
     @staticmethod
     def get_default_settings() -> dict:
         return {
-            "model": "gemini-2.5-flash",
+            # Computer Use requires a Gemini 3.x+ model (2.x has no
+            # computer_use tool); 3.8-flash is the documented recommendation.
+            "model": "gemini-3.8-flash",
             "require_json_output": True
         }
 
@@ -46,15 +48,29 @@ class GoogleProvider(BaseLLMProvider):
             "supports_streaming_tools": True,
         }
 
-    def supports_computer_use(self) -> bool:
-        return True
-
-    COMPUTER_TOOLSET = {
-        "type": "computer_use",
-        "environment": "desktop",
-    }
+    # ------------------------------------------------------------------
+    # Native Computer Use (Interactions API, Gemini 3.x).
+    #
+    # Official protocol (ai.google.dev/gemini-api/docs/computer-use):
+    #   * client.interactions.create(model, input, tools, system_instruction,
+    #     previous_interaction_id) — NOT models.generate_content.
+    #   * tools: {"type": "computer_use", "environment": "desktop"} (+ our
+    #     ask_user custom function tool, same pattern as the docs' HITL
+    #     yield_to_user sample).
+    #   * coordinates are NORMALIZED 0-999 (x/1000*width); we denormalize to
+    #     sent-image pixels using the screenshot size of this turn, so the
+    #     handler's _shot_scale keeps working unchanged.
+    #   * answers: one function_result per function_call (result carries the
+    #     new screenshot image on the last call; safety_acknowledgement rides
+    #     inside the result text JSON, per docs).
+    #   * safety: safety_decision lives INSIDE the call arguments
+    #     ({decision: require_confirmation|blocked, explanation}) — mapped to
+    #     pending_safety_checks so the shared approve/replay flow just works.
+    #   * done: no function_call steps, only model_output text.
+    # ------------------------------------------------------------------
 
     ASK_USER_TOOL = {
+        "type": "function",
         "name": "ask_user",
         "description": (
             "Show the human a modal dialog with your question and wait "
@@ -63,7 +79,7 @@ class GoogleProvider(BaseLLMProvider):
             "cannot proceed safely without clarification. The human's "
             "answer returns as this call's result; then continue."
         ),
-        "input_schema": {
+        "parameters": {
             "type": "object",
             "properties": {
                 "question": {
@@ -75,254 +91,374 @@ class GoogleProvider(BaseLLMProvider):
         },
     }
 
-    MAX_CUA_CHAINS = 32
+    def supports_computer_use(self) -> bool:
+        return True
 
-    # computer_toolset members -> our executor action types.
-    # Google desktop computer_use supports:
-    #   click, double_click, triple_click, middle_click, right_click,
-    #   mouse_down, mouse_up, move, scroll, type, key_down, key_up,
-    #   hotkey, wait, screenshot
-    _MEMBER_MAP = {
-        "click": ("click", "left"),
-        "double_click": ("double_click", "left"),
-        "middle_click": ("click", "middle"),
-        "right_click": ("click", "right"),
-        "mouse_down": "mouse_down",
-        "mouse_up": "mouse_up",
-        "move": "move",
-        "scroll": "scroll",
-        "type": "type",
-        "key_down": "key_down",
-        "key_up": "key_up",
-        "hotkey": "hotkey",
-        "wait": "wait",
-        "screenshot": "screenshot",
-    }
-
-    # Members we deliberately don't implement in v1.
-    _UNSUPPORTED_MEMBERS = {
-        "cursor_position", "key_down", "key_up",
-    }
+    def wants_first_screenshot(self) -> bool:
+        # Unlike OpenAI/Anthropic (blind first turn, model asks for a
+        # screenshot via its own tool), the documented Google loop always
+        # sends an initial screenshot with the task.
+        return True
 
     @staticmethod
-    def _member_to_action(name: str, mapped, block_input: dict) -> dict:
-        """Converts one computer_use tool call into our action dict."""
-        if mapped == "screenshot":
-            return {"type": "screenshot"}
-        if mapped == "mouse_down":
-            return {"type": "left_mouse_down"}
-        if mapped == "mouse_up":
-            return {"type": "left_mouse_up"}
-        if mapped == "hold_key":
-            raw = str(block_input.get("text", ""))
-            keys = [k for k in raw.split("+") if k] or [raw]
+    def _field(obj, name, default=None):
+        """dict-or-object attribute access (SDK pydantic or plain dicts)."""
+        if isinstance(obj, dict):
+            return obj.get(name, default)
+        return getattr(obj, name, default)
+
+    @staticmethod
+    def _sent_image_size(screenshot_b64: str | None) -> tuple | None:
+        """Width/height of the PNG the model saw (for 0-999 denormalizing)."""
+        if not screenshot_b64:
+            return None
+        try:
+            import base64
+            import io
+            from PIL import Image
+            img = Image.open(io.BytesIO(base64.b64decode(screenshot_b64)))
+            return (img.size[0], img.size[1])
+        except Exception:
+            return None
+
+    def _denorm(self, x, y, size: tuple | None) -> tuple:
+        """Normalized 0-999 -> sent-image pixels (ints, clamped)."""
+        if size is None:
+            raise ValueError(
+                "Model emitted coordinates before any screenshot was sent; "
+                "send a screenshot first (take_screenshot).")
+        w, h = size
+        px = min(max(int(round(float(x) / 1000 * w)), 0), w - 1)
+        py = min(max(int(round(float(y) / 1000 * h)), 0), h - 1)
+        return (px, py)
+
+    def _predefined_to_actions(self, name: str, args: dict,
+                               size: tuple | None,
+                               record_chain: str | None,
+                               lookup_chain: str | None) -> list:
+        """One Google desktop predefined function -> our action dicts."""
+        import time as _time
+        actions: list = []
+        intent = args.get("intent")
+
+        def _emit(action: dict) -> dict:
+            if intent:
+                action["_intent"] = str(intent)[:300]
+            actions.append(action)
+            return action
+
+        if name in ("click", "double_click", "triple_click"):
+            x, y = self._denorm(args["x"], args["y"], size)
+            kind = {"click": "click", "double_click": "double_click",
+                    "triple_click": "triple_click"}[name]
+            _emit({"type": kind, "x": x, "y": y, "button": "left"})
+        elif name == "middle_click":
+            x, y = self._denorm(args["x"], args["y"], size)
+            _emit({"type": "click", "x": x, "y": y, "button": "middle"})
+        elif name == "right_click":
+            x, y = self._denorm(args["x"], args["y"], size)
+            _emit({"type": "click", "x": x, "y": y, "button": "right"})
+        elif name == "move":
+            x, y = self._denorm(args["x"], args["y"], size)
+            _emit({"type": "move", "x": x, "y": y})
+        elif name in ("mouse_down", "mouse_up"):
+            # Our down/up take no coordinates: move there first.
+            x, y = self._denorm(args["x"], args["y"], size)
+            _emit({"type": "move", "x": x, "y": y})
+            _emit({"type": "left_mouse_down" if name == "mouse_down"
+                   else "left_mouse_up"})
+        elif name == "drag_and_drop":
+            x0, y0 = self._denorm(args["start_x"], args["start_y"], size)
+            x1, y1 = self._denorm(args["end_x"], args["end_y"], size)
+            _emit({"type": "drag",
+                   "path": [{"x": x0, "y": y0}, {"x": x1, "y": y1}]})
+        elif name == "scroll":
+            x, y = self._denorm(args.get("x", 500), args.get("y", 500), size)
             try:
-                duration = float(block_input.get("duration", 1.0))
+                magnitude = int(args.get("magnitude_in_pixels", 300) or 300)
             except Exception:
-                duration = 1.0
-            return {"type": "hold_key", "keys": keys, "duration": duration}
-        if mapped == "triple_click":
-            coord = block_input.get("coordinate") or [0, 0]
-            return {"type": "triple_click", "x": coord[0], "y": coord[1]}
-        if mapped == "drag":
-            start = block_input.get("start_coordinate") or [0, 0]
-            end = block_input.get("coordinate") or [0, 0]
-            return {"type": "drag",
-                    "path": [{"x": start[0], "y": start[1]},
-                             {"x": end[0], "y": end[1]}]}
-        if mapped == "move":
-            coord = block_input.get("coordinate") or [0, 0]
-            return {"type": "move", "x": coord[0], "y": coord[1]}
-        if mapped == "scroll":
-            coord = block_input.get("coordinate") or [0, 0]
-            # Pixel deltas -> wheel clicks (WHEEL_DELTA=120).
-            v = int(round(float(block_input.get("scroll_y", 0)) / 120))
-            h = int(round(float(block_input.get("scroll_x", 0)) / 120))
-            return {"type": "scroll", "x": coord[0], "y": coord[1],
-                    "scroll_x": h, "scroll_y": v}
-        if mapped == "type":
-            return {"type": "type", "text": block_input.get("text", "")}
-        if mapped == "wait":
+                magnitude = 300
+            direction = str(args.get("direction", "down")).lower()
+            sx, sy = 0, 0
+            if direction == "up":
+                sy = -magnitude
+            elif direction == "down":
+                sy = magnitude
+            elif direction == "left":
+                sx = -magnitude
+            elif direction == "right":
+                sx = magnitude
+            else:
+                raise ValueError(f"Unknown scroll direction: {direction!r}")
+            _emit({"type": "scroll", "x": x, "y": y,
+                   "scroll_x": sx, "scroll_y": sy})
+        elif name == "type":
+            text = args.get("text", "")
+            if text is None:
+                raise ValueError("type without text")
+            if "x" in args and "y" in args:
+                # Focus-then-type (docs' browser sample pattern).
+                x, y = self._denorm(args["x"], args["y"], size)
+                _emit({"type": "click", "x": x, "y": y, "button": "left"})
+            _emit({"type": "type", "text": str(text)})
+            if args.get("press_enter"):
+                _emit({"type": "keypress", "keys": ["enter"]})
+        elif name == "press_key":
+            key = args.get("key")
+            if not key:
+                raise ValueError("press_key without key")
+            _emit({"type": "keypress", "keys": [str(key)]})
+        elif name == "hotkey":
+            keys = args.get("keys") or []
+            if not keys:
+                raise ValueError("hotkey without keys")
+            _emit({"type": "keypress", "keys": [str(k) for k in keys]})
+        elif name == "key_down":
+            # Held-key tracking per chain: key_up converts the wall-clock
+            # hold into our hold_key(duration). key_down itself emits a
+            # harmless wait so the turn stays alive.
+            key = str(args.get("key", ""))
+            if not key:
+                raise ValueError("key_down without key")
+            self._prune_held_keys()
+            self._held_keys[(record_chain, key.lower())] = _time.time()
+            _emit({"type": "wait", "seconds": 0.5})
+        elif name == "key_up":
+            key = str(args.get("key", ""))
+            if not key:
+                raise ValueError("key_up without key")
+            started = self._held_keys.pop((lookup_chain, key.lower()), None)
+            if started is None:
+                _emit({"type": "keypress", "keys": [key]})
+            else:
+                duration = min(max(_time.time() - started, 0.2), 30.0)
+                _emit({"type": "hold_key", "keys": [key],
+                       "duration": round(duration, 1)})
+        elif name == "wait":
             try:
-                seconds = float(block_input.get("seconds", 1.0))
+                seconds = float(args.get("seconds", 1.0))
             except Exception:
                 seconds = 1.0
-            return {"type": "wait", "seconds": seconds}
-        if mapped == "click":
-            coord = block_input.get("coordinate") or [0, 0]
-            button = block_input.get("button", "left")
-            keys = block_input.get("keys") or []
-            return {"type": "click", "x": coord[0], "y": coord[1],
-                    "button": button, "keys": keys}
-        raise ValueError(f"Unsupported computer action mapping: {name}")
+            _emit({"type": "wait", "seconds": seconds})
+        elif name == "take_screenshot":
+            _emit({"type": "screenshot"})
+        else:
+            raise ValueError(f"Unknown Google computer function '{name}'.")
+        return actions
+
+    def _prune_held_keys(self) -> None:
+        """Bound the key_down registry (stale entries die after 10 min)."""
+        import time as _time
+        try:
+            now = _time.time()
+            old = [k for k, t in self._held_keys.items() if now - t > 600]
+            for k in old:
+                del self._held_keys[k]
+        except Exception:
+            pass
 
     def computer_use_turn(
         self,
         task: str | None = None,
-        call_id: str | None = None,
-        screenshot_b64: str | None = None,
+        outputs: list | None = None,
         previous_response_id: str | None = None,
-        acknowledged_safety_checks: list | None = None,
         instructions: str | None = None,
+        screenshot_b64: str | None = None,
     ) -> dict:
         """
-        One computer-use turn via the Gemini API.
+        One Computer Use turn via the Interactions API.
 
-        Tools sent: the `computer_use` tool (desktop environment) plus
-        the `ask_user` custom tool.  Model calls arrive as
-        `function_call` blocks; answers go back as `tool_result`
-        blocks echoing `toolset_name`.  Coordinates are screenshot
-        pixels, like OpenAI.
+        First turn: `task` (+ `screenshot_b64`, injected by the worker) ->
+        one function_call (or done text). Follow-up turns:
+        `previous_response_id` (= prior interaction id) + `outputs` answered
+        from the previous turn. Each computer output becomes one
+        function_result carrying the fresh screenshot on the last call;
+        ask_user answers ride as plain-text function results.
 
-        One action per turn (disable_parallel_tool_use): matches the
-        worker's single-call output shape, no outbox rework needed.
+        Returns the shared contract: {"actions", "call_id", "call_ids",
+        "response_id", "pending_safety_checks", "ask", "done_text"}.
         """
+        from google.genai.errors import APIError as _GenAIAPIError
         try:
-            try:
-                max_tokens = int(self.provider_config.get("max_tokens", 4096))
-            except (ValueError, TypeError):
-                max_tokens = 4096
-
             tools = [
-                types.Tool(
-                    computer_use=types.ComputerUse(
-                        environment=types.Environment.ENVIRONMENT_DESKTOP,
-                    )
-                ),
-                types.Tool(
-                    function_declaration=self.ASK_USER_TOOL,
-                ),
+                {"type": "computer_use",
+                 "environment": "desktop",
+                 "enable_prompt_injection_detection": True},
+                dict(self.ASK_USER_TOOL),
             ]
 
+            sent_size = self._sent_image_size(screenshot_b64)
             if previous_response_id is None:
                 if not task:
                     raise ValueError("First computer-use turn requires a task.")
-                import uuid
-                chain_id = uuid.uuid4().hex[:12]
-                messages: list = [
-                    types.Content(
-                        role="user",
-                        content=[types.Part(text=task)]
-                    )]
-                system = instructions or None
-                self._cua_chains[chain_id] = {
-                    "messages": messages, "system": system}
-                if len(self._cua_chains) > self.MAX_CUA_CHAINS:
-                    oldest = next(iter(self._cua_chains))
-                    del self._cua_chains[oldest]
+                initial: list = [{"type": "text", "text": task}]
+                if screenshot_b64:
+                    initial.append({"type": "image", "data": screenshot_b64,
+                                    "mime_type": "image/png"})
+                else:
+                    logging.warning(
+                        "Google computer-use first turn without screenshot; "
+                        "the model will likely call take_screenshot first.")
+                create_kwargs: dict = {
+                    "model": self.model,
+                    "input": initial,
+                    "tools": tools,
+                    "timeout": 90,
+                }
+                if instructions:
+                    create_kwargs["system_instruction"] = instructions
+                interaction = self.client.interactions.create(**create_kwargs)
             else:
-                chain_id = previous_response_id
-                slot = self._cua_chains.get(chain_id)
-                if slot is None:
-                    raise ValueError(
-                        "Unknown computer-use chain; restart the task.")
                 if not outputs:
                     raise ValueError("Follow-up turn requires outputs.")
-                messages = slot["messages"]
-                system = slot["system"]
-                results: list = []
+                ack_by_call = {
+                    o.get("call_id") for o in outputs
+                    if o.get("kind") == "computer"
+                    and o.get("acknowledged_safety_checks")
+                }
+                # The model saw this screenshot last: prefer the fresh post
+                # screenshot, else a per-call result image, else the opening
+                # shot (coordinates always denormalize against what it saw).
                 for out in outputs:
                     if out.get("kind") != "computer":
-                        results.append({
-                            "type": "tool_result",
-                            "tool_use_id": out.get("call_id"),
-                            "content": out.get("output_text", ""),
+                        continue
+                    img = (out.get("screenshot_b64")
+                           or out.get("result_image_b64"))
+                    if img:
+                        sent_size = self._sent_image_size(img) or sent_size
+                follow: list = []
+                for out in outputs:
+                    cid = out.get("call_id")
+                    if out.get("kind") != "computer":
+                        follow.append({
+                            "type": "function_result",
+                            "call_id": cid,
+                            "name": "ask_user",
+                            "result": out.get("output_text", ""),
                         })
                         continue
-                    # Per-call result wins (cursor text, zoom/member image);
-                    # otherwise the post-batch screenshot (last item only);
-                    # never an empty image — the API rejects it.
-                if out.get("result_image_b64"):
-                    content = [{
-                        "type": "image",
-                        "image_url": {
-                            "url": f"data:image/png;base64,{out['result_image_b64']}"
-                        }
-                    }]
-                elif out.get("result_text"):
-                    content = [{"type": "text",
-                                "text": out["result_text"]}]
-                elif out.get("screenshot_b64"):
-                    content = [{
-                        "type": "image",
-                        "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": out["screenshot_b64"],
-                        }}
-                    ]
-                    # end of screenshot block
-                else:
-                    content = [{"type": "text", "text": "OK"}]
-                    results.append({
-                        "type": "tool_result",
-                        "tool_use_id": out.get("call_id"),
-                        "toolset_name": "computer",
-                        "content": content,
+                    result_text = {"status": "ok"}
+                    if out.get("result_text"):
+                        result_text["output"] = out["result_text"]
+                    if cid in ack_by_call:
+                        result_text["safety_acknowledgement"] = True
+                    parts: list = [{"type": "text",
+                                    "text": json.dumps(result_text)}]
+                    # Per-call own image (zoom/screenshot actions) plus the
+                    # fresh post screenshot when both ride one output.
+                    for key in ("result_image_b64", "screenshot_b64"):
+                        if out.get(key):
+                            parts.append({"type": "image",
+                                          "data": out[key],
+                                          "mime_type": "image/png"})
+                    follow.append({
+                        "type": "function_result",
+                        "call_id": cid,
+                        "result": parts,
                     })
-                messages.append({"role": "user", "content": results})
+                create_kwargs = {
+                    "model": self.model,
+                    "previous_interaction_id": previous_response_id,
+                    "input": follow,
+                    "tools": tools,
+                    "timeout": 90,
+                }
+                if instructions:
+                    create_kwargs["system_instruction"] = instructions
+                interaction = self.client.interactions.create(**create_kwargs)
 
-            response = self.client.models.generate_content(
-                model=self.model,
-                max_tokens=max_tokens,
-                tools=tools,
-                tool_choice=tool_choice,
-                system=system,
-                messages=messages,
-                timeout=90,
-            )
-            messages.append({"role": "assistant", "content": response.content})
+            chain_id = (self._field(interaction, "id")
+                        or previous_response_id)
+            steps = self._field(interaction, "steps") or []
+            errors = self._field(interaction, "errors") or []
+            if not steps and errors:
+                raise FatalError(
+                    f"Google interaction failed: {errors!r}"[:500])
 
             actions: list = []
+            call_ids: list = []
             out_call_id = None
-            all_ids: list = []
+            safety: list = []
             asks: list = []
             done_parts: list = []
-            for block in (response.content or []):
-                btype = getattr(block, "type", "")
-                if btype == "text":
-                    done_parts.append(getattr(block, "text", "") or "")
+            for step in steps:
+                stype = self._field(step, "type", "")
+                if stype == "model_output":
+                    for block in self._field(step, "content") or []:
+                        if self._field(block, "type") == "text":
+                            done_parts.append(
+                                self._field(block, "text", "") or "")
                     continue
-                if btype not in ("tool_use", "server_tool_use"):
-                    continue
-                name = getattr(block, "name", "")
-                tset = getattr(block, "toolset_name", None)
-                bid = getattr(block, "id", None)
-                if bid and tset == "computer":
-                    all_ids.append(bid)
-                block_input = getattr(block, "input", None) or {}
-                if isinstance(block_input, str):
+                if stype != "function_call":
+                    continue  # thought / unknown steps never crash a turn
+                fname = self._field(step, "name", "")
+                fargs = self._field(step, "arguments") or {}
+                if isinstance(fargs, str):
                     try:
-                        block_input = _json.loads(block_input or "{}")
+                        fargs = json.loads(fargs or "{}")
                     except Exception:
-                        block_input = {}
-                if tset == "computer":
-                    mapped = self._MEMBER_MAP.get(name)
-                    if mapped is None:
-                        raise ValueError(
-                            f"Unknown computer member '{name}'.")
-                    action = self._member_to_action(name, mapped, block_input)
-                    actions.append(action)
-                    out_call_id = bid
-                elif name == "ask_user" and not tset:
+                        fargs = {}
+                fid = self._field(step, "id")
+                if fname == "ask_user":
                     asks.append({
-                        "call_id": bid,
-                        "question": block_input.get("question", ""),
+                        "call_id": fid,
+                        "question": fargs.get("question",
+                                             fargs.get("reason", "")),
                     })
-                # Unknown third-party blocks are ignored (never crash a turn).
+                    continue
+                call_ids.append(fid)
+                out_call_id = fid
+                # Safety decision rides INSIDE the call arguments.
+                decision = (fargs.get("safety_decision") or {})
+                code = decision.get("decision")
+                if code in ("require_confirmation", "blocked"):
+                    safety.append({
+                        "id": fid,
+                        "code": code,
+                        "message": decision.get("explanation", ""),
+                    })
+                actions.extend(self._predefined_to_actions(
+                    fname, fargs, sent_size,
+                    # Held-key registry: key_down records under THIS turn's
+                    # interaction id; key_up looks up under the incoming
+                    # previous_response_id (== the id of the turn where the
+                    # key went down). First turns use the fresh id both ways.
+                    chain_id, previous_response_id or chain_id))
 
             done_text = "".join(done_parts).strip() or None
+            if done_text is None:
+                fallback = self._field(interaction, "output_text")
+                if isinstance(fallback, str) and fallback.strip():
+                    done_text = fallback.strip()
             return {
                 "actions": actions,
                 "call_id": out_call_id,
-                "call_ids": all_ids,
+                "call_ids": call_ids,
                 "response_id": chain_id,
-                "pending_safety_checks": [],
+                "pending_safety_checks": safety,
                 "ask": asks,
                 "done_text": done_text,
             }
-        except (AuthenticationError, RetryableError) as e:
-            raise FatalError(f"Anthropic client error (400): {error_text}") from e
+        except _GenAIAPIError as e:
+            code = getattr(e, "code", None)
+            if code == 429 or (isinstance(code, int) and 500 <= code < 600):
+                raise RetryableError(
+                    f"Google computer-use transient error ({code}): {e}",
+                    retry_after=extract_retry_after(message=str(e))) from e
+            raise FatalError(
+                f"Google computer-use API error ({code}): {e}") from e
+        except (FatalError, RetryableError):
+            raise
+        except Exception as e:
+            logging.error(
+                "Unexpected error in Google computer-use turn: %s",
+                e, exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(
+                    f"Google computer-use transient error: {e}",
+                    retry_after=extract_retry_after(message=str(e))) from e
+            raise FatalError(
+                f"Unexpected error in Google computer-use turn: {e}") from e
 
     def __init__(self, provider_config: dict):
         super().__init__(provider_config)
@@ -335,10 +471,9 @@ class GoogleProvider(BaseLLMProvider):
             raise ValueError("Gemini API key is not configured in settings.")
 
         self.client = genai.Client(api_key=self.api_key)
-        # Server-side conversation chains (Google has no response chaining:
-        # the full message history travels with every call). Keyed by the
-        # chain id we hand out as response_id. Bounded; oldest dropped.
-        self._cua_chains: dict = {}
+        # key_down registry for computer use: (chain_id, key) -> timestamp.
+        # key_up converts the wall-clock hold into hold_key(duration).
+        self._held_keys: dict = {}
 
     def _ensure_generated_tools_module(self, mode: str):
         """

@@ -226,6 +226,15 @@ class BaseLLMProvider(ABC):
         """
         return False
 
+    def wants_first_screenshot(self) -> bool:
+        """
+        Whether the provider's first computer-use turn should carry an opening
+        screenshot. OpenAI/Anthropic start blind (the model requests a shot via
+        its own tool); Google's documented loop always sends one with the task.
+        The worker injects it; providers that don't declare it never see it.
+        """
+        return False
+
     def computer_use_turn(
         self,
         task: str | None = None,

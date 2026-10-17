@@ -150,7 +150,7 @@ class SettingsManager(QObject):
             "save_pre_intent_screenshot": True,
             "save_post_screenshot": True,
             "trace_log_path": "logs/parser_trace.json",
-            "font_path": "cv2_default",
+            "font_path": "default",
             "font_size": 16,
             "text_padding": 2
         },
