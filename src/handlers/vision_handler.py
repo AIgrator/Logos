@@ -24,6 +24,7 @@ from PySide6.QtCore import QThread, Signal
 
 from states import VisionState
 from src.computer.computer import Computer
+from src.computer.input_access import InputBlockedError
 from src.computer.tools.constants import KEYBOARD_KEYS
 from src.handlers.base_agent import (
     BaseAgentHandler as BaseAgent,
@@ -511,6 +512,16 @@ class CuaTurnWorker(QThread):
                     self._handler.execute_action(action)
                     executed.append(describe_action(action))
                     executed_raw.append(action)
+                except InputBlockedError as e:
+                    logging.error(f"CUA input blocked: {e}")
+                    self._comm_log("CONSUMED", {
+                        "turn": turn_no,
+                        "status": "input_blocked",
+                        "error": str(e),
+                    })
+                    outcome = {"input_blocked": str(e)}
+                    self.turn_done.emit(outcome)
+                    return
                 except Exception as e:
                     logging.warning(f"CUA action failed: {action} -> {e}")
                     err_b64, _, _ = self._handler.capture_screenshot_b64()
@@ -635,6 +646,8 @@ class VisionHandler(BaseAgent):
         self._visible_box = {}
         self._visible_event = threading.Event()
         self._pause_hist_mark = 0
+        self._input_block_seen = False
+        self._capture_block_seen = False
 
     # -- task entry ----------------------------------------------------
 
@@ -762,6 +775,8 @@ class VisionHandler(BaseAgent):
         self.start_task(combined)
 
     def start_task(self, user_text: str, attachments=None):
+        if not self._guard_capture():
+            return
         if attachments:
             logging.info(f"Vision CUA ignoring {len(attachments)} attachment(s) (v1).")
         if self.state == VisionState.PAUSED_ON_ERROR and (user_text or "").strip():
@@ -989,6 +1004,15 @@ class VisionHandler(BaseAgent):
             logging.info("task-done: full mode restored, going IDLE")
             self._set_state(VisionState.IDLE)
             return
+        if outcome.get("input_blocked"):
+            # Hard OS block (Windows UIPI / macOS TCC): not fixable mid-task.
+            # Stop now, name the culprit and the fix; no further model turns.
+            self._stop_thinking_timer()
+            self.ui.add_text(outcome["input_blocked"],
+                             prefix_html="<b>Vision:</b> ")
+            self._exit_compact()
+            self._set_state(VisionState.PAUSED_ON_ERROR)
+            return
         if outcome.get("action_error"):
             self._stop_thinking_timer()
             self._continue_loop(outcome["action_error"])
@@ -1214,6 +1238,14 @@ class VisionHandler(BaseAgent):
         if not isinstance(action, dict) or "type" not in action:
             raise ValueError(f"Malformed computer action: {action!r}")
         kind = action["type"]
+        # Keyboard-only actions have no point to probe; while the mouse
+        # actions check both the foreground and the window under the target.
+        if kind in ("keypress", "type", "hold_key",
+                    "left_mouse_down", "left_mouse_up"):
+            note = self._guard_input()
+            if note:
+                action["_result"] = {"text": note}
+                return f"{describe_action(action)} (input blocked)"
         # Mouse AND held keys go through pynput (cross-platform, one stack).
         # pyautogui's input proved flaky on this setup (dropped Win combos,
         # layout-dependent typing); only screenshots still use mss/PIL.
@@ -1287,6 +1319,10 @@ class VisionHandler(BaseAgent):
 
         if kind in ("click", "double_click", "triple_click", "move"):
             x, y = scale_point(float(action["x"]), float(action["y"]), scale)
+            note = self._guard_input(x, y)
+            if note:
+                action["_result"] = {"text": note}
+                return f"{describe_action(action)} (input blocked)"
             if self.ensure_point_visible(x, y):
                 time.sleep(0.6)  # compositor settle after relocate
             self._audit_pointer(kind, x, y, scale=scale)
@@ -1326,6 +1362,10 @@ class VisionHandler(BaseAgent):
             if len(path) < 2:
                 raise ValueError(f"drag needs >= 2 path points: {action!r}")
             pts = [scale_point(float(p["x"]), float(p["y"]), scale) for p in path]
+            note = self._guard_input(pts[0][0], pts[0][1])
+            if note:
+                action["_result"] = {"text": note}
+                return f"{describe_action(action)} (input blocked)"
             if any(self.ensure_point_visible(px, py) for px, py in pts):
                 time.sleep(0.6)  # compositor settle after relocate
             mouse.position = (int(pts[0][0]), int(pts[0][1]))
@@ -1340,6 +1380,10 @@ class VisionHandler(BaseAgent):
 
         if kind == "scroll":
             x, y = scale_point(float(action.get("x", 0)), float(action.get("y", 0)), scale)
+            note = self._guard_input(x, y)
+            if note:
+                action["_result"] = {"text": note}
+                return f"{describe_action(action)} (input blocked)"
             if self.ensure_point_visible(x, y):
                 time.sleep(0.6)  # compositor settle after relocate
             mouse.position = (int(x), int(y))
@@ -1375,6 +1419,68 @@ class VisionHandler(BaseAgent):
             return "wait"
 
         raise ValueError(f"Unsupported computer action: {kind!r}")
+
+    def _guard_input(self, x: float | None = None, y: float | None = None) -> str | None:
+        """Probe for an OS block on synthetic input (Windows UIPI, missing
+        macOS Accessibility permission, Wayland).
+
+        Hard blocks (UIPI / TCC) cannot be lifted mid-task, so they raise
+        InputBlockedError: the task stops at once and the user is told to
+        restart Logos as administrator — no pointless model retries/tokens.
+        Soft blocks (Wayland with XWayland) return a note to hand to the
+        model, which then decides what to do.
+        """
+        try:
+            from src.computer.input_access import input_block
+            block = input_block(x, y)
+        except Exception as e:
+            logging.warning(f"input-access probe failed: {e}")
+            return None
+        if block is None:
+            return None
+        if block.hard:
+            logging.error(
+                f"input injection blocked [{block.platform}]: "
+                f"{block.detail or block.reason}")
+            raise InputBlockedError(block.chat_message())
+        if not self._input_block_seen:
+            self._input_block_seen = True
+            logging.warning(
+                f"input injection partially blocked [{block.platform}]: "
+                f"{block.detail or block.reason}")
+            try:
+                self.ui.add_text(block.chat_message(),
+                                 prefix_html="<b>Vision:</b> ")
+            except Exception as e:
+                logging.warning(f"could not surface input block: {e}")
+        return block.chat_message()
+
+    def _guard_capture(self) -> bool:
+        """Refuse to start the task when screen capture is silently blocked.
+
+        macOS without Screen Recording, or Wayland, hand back black frames —
+        the model would loop over nothing. Tell the user once and skip the
+        run (hard) instead of a catatonic task.
+        """
+        try:
+            from src.computer.capture_access import capture_block
+            block = capture_block()
+        except Exception as e:
+            logging.warning(f"capture-access probe failed: {e}")
+            return True
+        if block is None:
+            return True
+        if not self._capture_block_seen:
+            self._capture_block_seen = True
+            logging.error(
+                f"screen capture blocked [{block.platform}]: "
+                f"{block.detail or block.reason}")
+            try:
+                self.ui.add_text(block.chat_message(),
+                                 prefix_html="<b>Vision:</b> ")
+            except Exception as e:
+                logging.warning(f"could not surface capture block: {e}")
+        return not block.hard
 
     def _audit_pointer(self, kind: str, x: float, y: float,
                        phase: str = "pre", scale: float = 1.0) -> None:

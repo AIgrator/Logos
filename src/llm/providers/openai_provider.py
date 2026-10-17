@@ -141,23 +141,42 @@ class OpenAIProvider(BaseLLMProvider):
             else:
                 if not outputs:
                     raise ValueError("Follow-up turn requires outputs.")
+                # computer_call_output carries ONLY a screenshot, so a call's
+                # textual result (cursor position, zoom note, blocked-input
+                # reason) rides as an extra user note right after its output.
+                # Only the last output is guaranteed a fresh screenshot, so
+                # fall back to any image in the batch for the earlier ones.
+                fallback_img = next(
+                    (o.get("screenshot_b64") or o.get("result_image_b64")
+                     for o in outputs
+                     if o.get("kind") == "computer"
+                     and (o.get("screenshot_b64") or o.get("result_image_b64"))),
+                    None,
+                )
                 input_items = []
                 for out in outputs:
                     if out.get("kind") == "computer":
-                        shot = {
-                            "type": "computer_screenshot",
-                            "image_url": (f"data:image/png;base64,"
-                                          f"{out['screenshot_b64']}"),
-                        }
+                        img = (out.get("screenshot_b64")
+                               or out.get("result_image_b64") or fallback_img)
                         item: dict = {
                             "type": "computer_call_output",
                             "call_id": out["call_id"],
-                            "output": shot,
                         }
+                        if img:
+                            item["output"] = {
+                                "type": "computer_screenshot",
+                                "image_url": f"data:image/png;base64,{img}",
+                            }
                         if out.get("acknowledged_safety_checks"):
                             item["acknowledged_safety_checks"] = \
                                 out["acknowledged_safety_checks"]
                         input_items.append(item)
+                        if out.get("result_text"):
+                            input_items.append({
+                                "role": "user",
+                                "content": [{"type": "input_text",
+                                             "text": out["result_text"]}],
+                            })
                     else:
                         input_items.append({
                             "type": "function_call_output",
