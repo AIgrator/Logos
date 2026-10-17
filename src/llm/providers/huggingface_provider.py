@@ -8,6 +8,7 @@ import requests
 from typing import Any
 from PIL import Image
 from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
+from ..llm_parsing import repair_json_string
 from ..base_provider import BaseLLMProvider
 
 logger = logging.getLogger(__name__)
@@ -246,12 +247,31 @@ class HuggingFaceProvider(BaseLLMProvider):
                     except json.JSONDecodeError:
                         final_payload = {}
 
-                    while isinstance(final_payload, dict) and 'payload' in final_payload:
-                        if len(final_payload.keys()) == 1 or ('type' in final_payload and final_payload.get('type') == fn_name):
+                    # Peel off wrapper layers until we reach the real payload.
+                    # A wrapper is either a dict like
+                    #   {"type": "<tool>", "payload": {...}}  (or {"payload": {...}})
+                    # or the payload itself encoded as a JSON string. Models may
+                    # double-encode large payloads, so alternate between unwrapping
+                    # dicts and decoding strings.
+                    for _ in range(10):
+                        if isinstance(final_payload, dict) and 'payload' in final_payload and (
+                            len(final_payload.keys()) == 1 or final_payload.get('type') == fn_name
+                        ):
                             logger.info(f"Unwrapping nested payload for tool '{fn_name}'.")
                             final_payload = final_payload.get('payload')
-                        else:
-                            break
+                            continue
+                        if isinstance(final_payload, str):
+                            decoded = None
+                            try:
+                                decoded = json.loads(final_payload)
+                            except (json.JSONDecodeError, TypeError):
+                                decoded = repair_json_string(final_payload)
+                            if decoded is None:
+                                break
+                            final_payload = decoded
+                            logger.info(f"Decoded JSON string payload for tool '{fn_name}'.")
+                            continue
+                        break
 
                     reconstructed_object = {
                         "type": fn_name,

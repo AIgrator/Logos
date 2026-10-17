@@ -66,13 +66,20 @@ class WebTaskThread(QThread):
                 if not query:
                     raise ValueError("Action 'web_search' is missing the 'query' argument.")
 
+                provider_id = self.provider.get_provider_id()
+                provider_name = self.provider.get_display_name()
+
                 # --- PLAN A: Native Provider Search ---
                 try:
-                    logging.info(f"Plan A: Attempting to use native web search from provider '{self.provider.get_provider_id()}'.")
+                    logging.info(f"Plan A: attempting native web search via provider '{provider_id}' for query: {query!r}")
                     final_response = self.provider.web_search(query=query)
+                    if final_response:
+                        logging.info(f"Plan A: native search via '{provider_id}' succeeded ({len(final_response)} chars).")
+                    else:
+                        logging.info(f"Plan A: provider '{provider_id}' returned no native result; trying local fallback.")
                 except Exception as e:
-                    logging.warning(f"Plan A (native search) from '{self.provider.get_display_name()}' failed: {e}. Proceeding to Plan B.")
-                    self._relay.web_plan_a_failed.emit(self.provider.get_display_name())
+                    logging.warning(f"Plan A (native search) from '{provider_name}' failed: {e}. Proceeding to Plan B.", exc_info=True)
+                    self._relay.web_plan_a_failed.emit(provider_name)
                     final_response = None
 
                 if self._is_cancelled:
@@ -80,8 +87,9 @@ class WebTaskThread(QThread):
 
                 # --- PLAN B: Local Execution (if Plan A failed) ---
                 if final_response is None:
-                    logging.info("Plan B: Using local web search fallback.")
+                    logging.info(f"Plan B: using local web search for query: {query!r}")
                     final_response = self.computer.web_search(query=query)
+                    logging.info(f"Plan B: local search returned {len(final_response) if final_response else 0} chars.")
 
             if not self._is_cancelled:
                 self._relay.web_finished.emit(self.action_name, final_response, self.action_args)

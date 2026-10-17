@@ -2,6 +2,7 @@
 """
 Centralized utilities for validating and parsing LLM responses using Pydantic.
 """
+import json
 import logging
 import re
 from json_repair import repair_json
@@ -144,6 +145,50 @@ def _get_obj_at_loc(data: Any, loc: tuple) -> Any | None:
             return None
     return data
 
+def _decode_json_lenient(text: str) -> Any | None:
+    """Strict-parse JSON, falling back to the lenient json_repair on malformed
+    input (duplicated/trailing braces, literal newlines, unquoted keys, ...)."""
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        return repair_json_string(text)
+
+
+def _normalize_payload_strings(data_object: Any) -> Any:
+    """Central repair net shared by every provider.
+
+    Models sometimes hand back the envelope's 'payload' as a JSON *string*
+    instead of a real object, and that string is occasionally malformed (e.g.
+    a duplicated trailing brace). Decode + repair it here so we validate the
+    real object instead of blaming the model, and keep unwrapping while the
+    decoded value is still a nested envelope. Only replaces the payload when
+    the decoded value is structured (dict/list), so genuine string payloads of
+    other schemas are left untouched.
+    """
+    if not isinstance(data_object, dict):
+        return data_object
+
+    result = dict(data_object)
+    payload = result.get('payload')
+    envelope_type = result.get('type')
+    for _ in range(10):
+        if isinstance(payload, str):
+            decoded = _decode_json_lenient(payload)
+            if isinstance(decoded, (dict, list)):
+                logging.warning("Decoded string 'payload' into structured data before validation.")
+                payload = decoded
+                continue
+            break
+        if isinstance(payload, dict) and 'payload' in payload and (
+            len(payload.keys()) == 1 or payload.get('type') == envelope_type
+        ):
+            logging.warning("Unwrapped nested 'payload' envelope before validation.")
+            payload = payload.get('payload')
+            continue
+        break
+    result['payload'] = payload
+    return result
+
 def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, str | None]:
     """
     Validates a Python object against a predefined Pydantic schema.
@@ -160,6 +205,10 @@ def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, st
         error_msg = f"Pydantic model for schema '{schema_name}' not found."
         logging.error(error_msg)
         return None, error_msg
+
+    # Central repair net (all providers): decode a string 'payload' and unwrap
+    # any nested envelope before the schema-specific normalisation below.
+    data_object = _normalize_payload_strings(data_object)
 
     if isinstance(data_object, dict) and schema_name in ('terminal_tool_code', 'browser_tool_code'):
         # Universal repair logic for various malformed tool calls in agent modes

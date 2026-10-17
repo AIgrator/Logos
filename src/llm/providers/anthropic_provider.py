@@ -9,6 +9,7 @@ from typing import Any
 from PIL import Image
 from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error
 from ..exceptions import RETRYABLE_STATUS_CODES as _RETRYABLE_CODES
+from ..llm_parsing import repair_json_string
 from anthropic import Anthropic, APIError, AuthenticationError, RateLimitError, APIConnectionError, APITimeoutError, InternalServerError
 from ..base_provider import BaseLLMProvider
 logging.getLogger('anthropic._base_client').setLevel(logging.INFO)
@@ -510,17 +511,31 @@ class AnthropicProvider(BaseLLMProvider):
                     elif block.type == 'tool_use' and use_forced_tool:
                         final_payload = block.input
 
-                        # Continuously unwrap the payload as long as it's nested
-                        while isinstance(final_payload, dict) and 'payload' in final_payload:
-                            # If the dict has other keys besides 'payload', it might be the final object.
-                            # The main indicator of a wrapper is having 'type' equal to the tool name
-                            # or having 'payload' as the *only* key.
-                            if len(final_payload.keys()) == 1 or ('type' in final_payload and final_payload.get('type') == block.name):
+                        # Peel off wrapper layers until we reach the real payload.
+                        # A wrapper is either a dict like
+                        #   {"type": "<tool>", "payload": {...}}  (or {"payload": {...}})
+                        # or the payload itself encoded as a JSON string. Models
+                        # (especially on large payloads) may double-encode, so we
+                        # alternate between unwrapping dicts and decoding strings.
+                        for _ in range(10):
+                            if isinstance(final_payload, dict) and 'payload' in final_payload and (
+                                len(final_payload.keys()) == 1 or final_payload.get('type') == block.name
+                            ):
                                 logger.info(f"Unwrapping nested payload for tool '{block.name}'.")
                                 final_payload = final_payload.get('payload')
-                            else:
-                                # This seems to be the actual payload, stop unwrapping.
-                                break
+                                continue
+                            if isinstance(final_payload, str):
+                                decoded = None
+                                try:
+                                    decoded = json.loads(final_payload)
+                                except (json.JSONDecodeError, TypeError):
+                                    decoded = repair_json_string(final_payload)
+                                if decoded is None:
+                                    break
+                                final_payload = decoded
+                                logger.info(f"Decoded JSON string payload for tool '{block.name}'.")
+                                continue
+                            break
 
                         reconstructed_object = {
                             "type": block.name,
@@ -564,6 +579,72 @@ class AnthropicProvider(BaseLLMProvider):
                 logger.error(f"Error closing Anthropic stream: {e}", exc_info=True)
         else:
             logger.warning("No active Anthropic stream to cancel.")
+
+    def web_search(self, query: str) -> str | None:
+        """
+        Performs a native web search using Anthropic's server-side
+        `web_search` tool and returns the model's synthesized answer.
+
+        Terminal mode calls this as "Plan A" before falling back to the
+        app's local search implementation ("Plan B").
+        """
+        try:
+            max_tokens = int(self.provider_config.get("max_tokens", 4096))
+        except (ValueError, TypeError):
+            max_tokens = 4096
+
+        logger.info("Performing native web search via Anthropic web_search server tool.")
+        try:
+            message = self.client.messages.create(
+                model=self.model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": query}],
+                tools=[
+                    {
+                        "type": "web_search_20250305",
+                        "name": "web_search",
+                        "max_uses": 3
+                    },
+                    {
+                        "type": "web_fetch_20250910",
+                        "name": "web_fetch",
+                        "max_uses": 5,
+                        "citations": {"enabled": True}
+                    }
+                ],
+                extra_headers={
+                    "anthropic-beta": "web-fetch-2025-09-10"
+                }
+            )
+
+            text_parts = [
+                block.text
+                for block in (message.content or [])
+                if getattr(block, "type", None) == "text" and getattr(block, "text", None)
+            ]
+            text_content = "\n".join(text_parts).strip()
+            return text_content or None
+
+        except AuthenticationError as e:
+            raise FatalError(f"Anthropic authentication error during web search: {e}") from e
+        except RateLimitError as e:
+            raise FatalError(f"Anthropic rate limit/quota exhausted during web search: {e}") from e
+        except APIConnectionError as e:
+            raise RetryableError(f"Anthropic connection error during web search: {e}") from e
+        except APITimeoutError as e:
+            raise RetryableError(f"Anthropic timeout error during web search: {e}") from e
+        except InternalServerError as e:
+            raise RetryableError(f"Anthropic internal server error during web search: {e}") from e
+        except APIError as e:  # General API errors; 5xx (incl. 529 overload) are transient, 429 is quota
+            _code = getattr(e, 'status_code', None)
+            if _code in _RETRYABLE_CODES:
+                raise RetryableError(f"Anthropic transient API error ({_code}) during web search: {e}", retry_after=extract_retry_after(response=getattr(e, 'response', None), message=str(e))) from e
+            raise FatalError(f"Anthropic API error during web search: {e}") from e
+        except Exception as e:
+            logger.error(f"An unexpected error occurred in Anthropic provider (web_search): {e}", exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(f"Anthropic transient error (web_search): {e}", retry_after=extract_retry_after(message=str(e))) from e
+            raise FatalError(f"An unexpected error in Anthropic provider (web_search): {e}") from e
 
     def stream_response(
         self,
