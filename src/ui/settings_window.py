@@ -33,6 +33,7 @@ from src.ui.widgets.font_manager.font_combobox import FontComboBox
 from src.ui.widgets.hotkey.hotkey_edit import HotkeyEdit
 from src.apps.installed_apps import AppScanner
 from src.ui.widgets.llm_provider_widget import LLMProviderWidget
+from src.ui.widgets.mode_model_widget import ModeModelWidget
 from src.ui.utils import CustomToolTipManager, NavButtonHoverFilter
 import logging
 
@@ -229,6 +230,7 @@ class SettingsWindow(QDialog):
         active_provider = self.settings_manager.get("active_provider", "google_gemini")
         providers = self.settings_manager.get("llm_providers", {})
         self.llm_provider_widget.load_settings(active_provider, providers)
+        self.mode_model_widget.load_settings(self.settings_manager.get("mode_models", {}) or {})
 
         # Common
         self.max_retries_spinbox.setValue(self.settings_manager.get("max_retries", 3))
@@ -405,6 +407,7 @@ class SettingsWindow(QDialog):
         return {
             "active_provider": active_provider_to_save,
             "llm_providers": providers_to_save,
+            "mode_models": self.mode_model_widget.get_settings(),
             "omniparser": omniparser_settings,
             "allowed_apps": new_allowed_apps,
             "hotkeys": hotkeys_to_save,
@@ -435,6 +438,9 @@ class SettingsWindow(QDialog):
         layout = QVBoxLayout(group)
         self.llm_provider_widget = LLMProviderWidget(self.settings_manager)
         layout.addWidget(self.llm_provider_widget)
+
+        self.mode_model_widget = ModeModelWidget(self.settings_manager)
+        layout.addWidget(self.mode_model_widget)
 
         return group
 

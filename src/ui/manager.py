@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QListWidget, QListWidg
                                QTextEdit, QVBoxLayout, QWidget)
 
 from llm.model_config_manager import ModelConfigManager
+from llm.mode_capabilities import ModeCapabilities
 from states import ControllerState
 
 from . import styles
@@ -852,8 +853,13 @@ class UIManager(QWidget):
         self.model_switch_popup.open_near(self.model_button)
 
     def _build_model_sections(self) -> list:
-        """Builds popup sections: provider headers + models, keyed providers only."""
+        """Builds popup sections: provider headers + models, keyed providers only.
+
+        Models are filtered by the capabilities of the active mode, so e.g.
+        Vision only offers native computer-use models.
+        """
         sections = []
+        active_mode = getattr(self, "_active_mode_key", "chat") or "chat"
         static_config = ModelConfigManager.PROVIDER_CONFIG or {}
         user_providers = self.settings_manager.get("llm_providers", {}) or {}
         current_pid = self.settings_manager.get("active_provider")
@@ -870,6 +876,8 @@ class UIManager(QWidget):
                     items = []
                     for model_name in sorted(models or []):
                         stored_id = f"{group.lower()}/{model_name.lower().replace(' ', '-')}"
+                        if not ModeCapabilities.supports(pid, stored_id, active_mode):
+                            continue
                         if pid == current_pid and stored_id == current_model:
                             is_current = True
                         else:
@@ -892,7 +900,8 @@ class UIManager(QWidget):
                     sections.append({"kind": "subheader", "label": f"OpenRouter / {group}"})
                     sections.extend(items)
             else:
-                models = sorted(info.get("models") or [])
+                models = sorted(m for m in (info.get("models") or [])
+                                if ModeCapabilities.supports(pid, m, active_mode))
                 if not models:
                     continue
                 sections.append({"kind": "header", "label": display})

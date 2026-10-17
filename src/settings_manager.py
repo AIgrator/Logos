@@ -115,6 +115,11 @@ class SettingsManager(QObject):
         "prevent_multiple_instances": True,
         "active_provider": "google_gemini", # A sensible default
         "llm_providers": _llm_providers_defaults,
+        # Dedicated Vision (computer-use) model. Applied session-only when
+        # switching to Vision mode IF the active model cannot do computer use.
+        # Shape: {"vision": {"provider": ..., "model": ...}} — empty means
+        # "not set" (the active model is kept / a warning is shown).
+        "mode_models": {},
         "hotkeys": {
             "toggle_mode": "Ctrl+Shift+A",
             "cancel_request": "Ctrl+Shift+X",

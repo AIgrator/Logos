@@ -5,6 +5,7 @@ import os
 import time
 import copy
 from settings_manager import SettingsManager
+from llm.mode_capabilities import ModeCapabilities
 
 logger = logging.getLogger(__name__)
 
@@ -206,6 +207,11 @@ class ModelConfigManager:
                 if not provider_data.get("models") and isinstance(fb, list):
                     provider_data["models"] = list(fb)
                     logger.warning(f"Provider '{provider_id}' cache empty, applied FALLBACK_MODELS.")
+
+        # 5. Install per-mode capability data (from models.json) used by the
+        # settings UI, the model-switch popup and the controller. Falls back to
+        # built-in rules when the cache carries no "mode_capabilities" block.
+        ModeCapabilities.configure(cached_models.get("mode_capabilities"))
 
         t_merge_end = time.perf_counter()
         ModelConfigManager.PROVIDER_CONFIG = base_config

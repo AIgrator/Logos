@@ -12,6 +12,7 @@ from brain import Brain
 from build_info import get_build_id
 from llm.error_formatter import CONTINUE_LINK
 from llm.llm_worker import LLMWorker
+from llm.mode_capabilities import ModeCapabilities, SUBSECTIONS
 from settings_manager import SettingsManager
 from ui.manager import UIManager
 from ui.theme_manager import ThemeManager
@@ -866,7 +867,7 @@ class AppController(QObject):
         self.ui.refresh_model_button(title_string)
         self.ui.set_assistant_name(self._get_current_model_name())
 
-    def switch_model(self, provider_id: str, model_id: str):
+    def switch_model(self, provider_id: str, model_id: str, custom_notice: str | None = None):
         """Switches the active provider/model for this session only.
 
         The change is kept in memory (no settings.json write). The in-flight
@@ -874,6 +875,9 @@ class AppController(QObject):
         the new model picks up the task where the old one left off.
         Provider tool schemas are per-mode static files loaded fresh by the
         new provider instance — no regeneration needed on switch.
+
+        ``custom_notice`` overrides the default "Switched to ..." message
+        (used when the switch is triggered automatically by a mode change).
         """
         all_settings = self.settings_manager.all()
         user_providers = all_settings.get("llm_providers", {})
@@ -905,12 +909,63 @@ class AppController(QObject):
         self.ui.set_title_bar_text(title_string)
         self.ui.refresh_model_button(title_string)
         self.ui.set_assistant_name(self._get_current_model_name())
-        if self._can_continue():
+        if custom_notice:
+            notice = custom_notice
+            if self._can_continue():
+                notice += CONTINUE_LINK
+        elif self._can_continue():
             notice = (f"<i>Switched to <b>{title_string}</b> (this session only). "
                       f"Context preserved.</i>{CONTINUE_LINK}")
         else:
             notice = (f"<i>Switched to <b>{title_string}</b> (this session only).</i>")
         self.ui.add_message(notice, force_scroll=True)
+
+    def _apply_mode_default_model(self, subsection: str):
+        """Session-only fallback to the per-mode default model.
+
+        If the active model already meets the target modes' requirements it is
+        left untouched (a capable model like gpt-6-luna is never swapped out).
+        Only when it does not, we switch to the model the user configured for
+        this mode (the Vision model), without writing settings.json.
+        """
+        try:
+            modes = SUBSECTIONS.get(subsection, ())
+            if not modes:
+                return
+            all_settings = self.settings_manager.all()
+            user_providers = all_settings.get("llm_providers", {}) or {}
+            cur_pid = all_settings.get("active_provider")
+            cur_model = (user_providers.get(cur_pid) or {}).get("model")
+            if cur_pid and cur_model and all(ModeCapabilities.supports(cur_pid, cur_model, m) for m in modes):
+                return  # Current model fits this mode — keep it.
+            entry = (all_settings.get("mode_models", {}) or {}).get(subsection) or {}
+            pid = entry.get("provider")
+            mid = entry.get("model")
+            if not pid or not mid:
+                if cur_pid and cur_model:
+                    self.ui.add_message(
+                        "<i>Current model does not support computer use. Pick one under "
+                        "Settings → General → Vision (Computer Use).</i>",
+                        force_scroll=True,
+                    )
+                return
+            target = user_providers.get(pid) or {}
+            if not target.get("api_key"):
+                self.ui.add_message(
+                    f"<i>The Vision model ({pid}) has no API key configured.</i>",
+                    force_scroll=True,
+                )
+                return
+            if pid == cur_pid and mid == cur_model:
+                return
+            notice = (
+                "<i>Так как ваша текущая модель не удовлетворяет требованиям для этого "
+                "режима работы, мы переключились на модель, выбранную вами по умолчанию "
+                "в настройках.</i>"
+            )
+            self.switch_model(pid, mid, custom_notice=notice)
+        except Exception as e:
+            logging.warning(f"Could not apply per-mode default model for '{subsection}': {e}", exc_info=True)
 
     def _cleanup_and_switch_handler(self, new_handler, new_state):
         # If a response is streaming, cancel it before switching modes.
@@ -963,6 +1018,7 @@ class AppController(QObject):
         self._cleanup_and_switch_handler(self.vision_handler, ControllerState.VISION)
         self.ui.set_active_mode('vision')
         self.ui.add_message("<i>Vision mode enabled. Describe the task you want me to perform.</i>", force_scroll=True)
+        self._apply_mode_default_model("vision")
         self.vision_handler._set_state(VisionState.IDLE)
 
     def _deactivate_vision_mode(self):
