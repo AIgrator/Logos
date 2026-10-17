@@ -64,7 +64,7 @@ class MainWindow(QMainWindow):
         """Override resizeEvent to keep the size grip in the bottom-right corner."""
         super().resizeEvent(event)
         self.ui_manager._update_file_search_popup_geometry()
-        self.ui_manager._reflow_toolbar()
+        self.ui_manager._schedule_toolbar_reflow()
         if self.size_grip.isVisible():
             grip_size = self.size_grip.size()
             self.size_grip.move(self.width() - grip_size.width(), self.height() - grip_size.height())
@@ -362,6 +362,11 @@ class UIManager(QWidget):
         self.mode_model_layout.setContentsMargins(0, 8, 0, 0)
         # None until first layout pass; True = single-row (wide), False = two rows.
         self._toolbar_single_row = None
+        # Coalesces reflow requests so the layout is never rebuilt synchronously
+        # inside a resize event (re-entrant layout passes can crash Qt).
+        self._reflow_timer = QTimer(self)
+        self._reflow_timer.setSingleShot(True)
+        self._reflow_timer.timeout.connect(self._reflow_toolbar)
 
         self.settings_button = QPushButton()
         self.settings_button.setIconSize(QSize(20, 20))
@@ -976,7 +981,7 @@ class UIManager(QWidget):
         except Exception:
             active = False
         self.pause_task_button.setVisible(active)
-        self._reflow_toolbar()
+        self._schedule_toolbar_reflow()
 
     def _preferred_single_row_width(self) -> int:
         """Width the toolbar needs to fit everything on one row (no clipping)."""
@@ -997,6 +1002,17 @@ class UIManager(QWidget):
         margins = self.layout.contentsMargins()
         total += margins.left() + margins.right()
         return total + 8  # small buffer so the last widget is never clipped
+
+    def _schedule_toolbar_reflow(self):
+        """Defer a toolbar reflow to the next event-loop tick.
+
+        Called from resizeEvent and mode switches so the layout is rebuilt
+        outside the resize pass; repeated calls within one tick are coalesced.
+        """
+        if getattr(self, "_reflow_timer", None) is not None:
+            self._reflow_timer.start(0)
+        else:
+            self._reflow_toolbar()
 
     def _reflow_toolbar(self):
         """Single row when the window is wide enough, two rows otherwise.
@@ -1324,7 +1340,7 @@ class UIManager(QWidget):
         self.input_container.setVisible(True)
         self.bottom_toolbar_container.setVisible(True)
         self._toolbar_single_row = None  # force single/two-row re-evaluation
-        self._reflow_toolbar()
+        self._schedule_toolbar_reflow()
         self.user_input.set_compact_mode(False)
         self.main_window.setMinimumSize(0, 0)
         self.main_window.setMaximumSize(16777215, 16777215)

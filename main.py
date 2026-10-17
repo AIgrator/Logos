@@ -191,6 +191,62 @@ def main():
     except Exception:
         pass
 
+    # Route Qt's own diagnostics into the log. A native Qt fatal calls abort()
+    # (0xc0000409) and would otherwise only print to a stderr nobody sees in an
+    # EXE build — capturing it here is the only clue left after such a crash.
+    # Must run after QApplication exists and after logging is configured.
+    try:
+        from PySide6.QtCore import qInstallMessageHandler
+
+        _qt_levels = {
+            0: logging.DEBUG,     # QtDebugMsg
+            1: logging.WARNING,   # QtWarningMsg
+            2: logging.CRITICAL,  # QtCriticalMsg
+            3: logging.CRITICAL,  # QtFatalMsg
+            4: logging.INFO,      # QtInfoMsg
+        }
+
+        def _qt_message_handler(mode, context, message):
+            try:
+                code = int(getattr(mode, "value", mode))
+                level = _qt_levels.get(code, logging.WARNING)
+                loc = ""
+                if context is not None and getattr(context, "file", None):
+                    loc = f" ({context.file}:{context.line})"
+                logging.getLogger("Qt").log(level, f"[Qt] {message}{loc}")
+                if code >= 2:  # critical/fatal: flush so it survives abort()
+                    for h in logging.getLogger().handlers:
+                        try:
+                            h.flush()
+                        except Exception:
+                            pass
+            except Exception:
+                pass
+
+        qInstallMessageHandler(_qt_message_handler)
+        logging.info("Qt message handler installed (Qt fatal messages -> app.log)")
+    except Exception as e:
+        logging.warning(f"Could not install Qt message handler: {e}")
+
+    # Worker-thread deaths are invisible to sys.excepthook; give threads one too.
+    try:
+        import threading as _threading
+
+        def _log_thread_uncaught(args):
+            try:
+                name = args.thread.name if args.thread is not None else "?"
+                logging.critical(
+                    f"UNCAUGHT EXCEPTION IN THREAD '{name}'",
+                    exc_info=(args.exc_type, args.exc_value, args.exc_traceback),
+                )
+            except Exception:
+                pass
+
+        _threading.excepthook = _log_thread_uncaught
+        logging.info("threading.excepthook installed (worker-thread crashes -> app.log)")
+    except Exception as e:
+        logging.warning(f"Could not install threading.excepthook: {e}")
+
     # Determine the effective working directory for the terminal mode.
     # If a path is passed as a non-empty argument, use it; otherwise, use the original CWD.
     # This handles the case where `logos.bat` passes `""` as an argument.
