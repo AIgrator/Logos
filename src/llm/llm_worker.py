@@ -67,24 +67,31 @@ class LLMWorker(QObject):
             logging.warning(f"API key for active provider '{active_provider_name}' is missing. Cannot create provider.")
             return None
 
-        static_provider_config = self.settings_manager.PROVIDER_CONFIG.get(active_provider_name, {})
+        from llm import get_provider_class
+        provider_class = get_provider_class(active_provider_name)
+        if not provider_class:
+            logging.error(f"Provider class for '{active_provider_name}' not found in PROVIDERS mapping.")
+            return None
 
-        full_config = static_provider_config.copy()
+        # Static provider config (api_url, cancellation/streaming flags, ...)
+        # lives on the provider class. SettingsManager keeps only a lightweight
+        # copy that omits it for fast startup, so merge it in here. Without this
+        # providers that rely on 'api_url' (e.g. x-ai) fall back to the SDK's
+        # default endpoint and send requests (with the wrong key) to
+        # api.openai.com.
+        static_provider_config = dict(provider_class.get_provider_config() or {})
+        static_provider_config.update(self.settings_manager.PROVIDER_CONFIG.get(active_provider_name, {}))
+
+        full_config = static_provider_config
         full_config.update(user_provider_config)
         full_config['name'] = active_provider_name
 
-        from llm import get_provider_class
-        provider_class = get_provider_class(active_provider_name)
-        if provider_class:
-            logging.info(f"Instantiating provider '{active_provider_name}' with model '{full_config.get('model')}'.")
-            inst_start = perf_counter()
-            instance = provider_class(full_config)
-            inst_duration = perf_counter() - inst_start
-            logging.info(f"Provider '{active_provider_name}' __init__ completed in {inst_duration:.3f}s")
-            return instance
-
-        logging.error(f"Provider class for '{active_provider_name}' not found in PROVIDERS mapping.")
-        return None
+        logging.info(f"Instantiating provider '{active_provider_name}' with model '{full_config.get('model')}'.")
+        inst_start = perf_counter()
+        instance = provider_class(full_config)
+        inst_duration = perf_counter() - inst_start
+        logging.info(f"Provider '{active_provider_name}' __init__ completed in {inst_duration:.3f}s")
+        return instance
 
     @Slot()
     def prepare_provider(self):
