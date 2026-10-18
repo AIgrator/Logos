@@ -928,6 +928,7 @@ class UIManager(QWidget):
                                  else model_name)
                         items.append({"kind": "model", "label": label,
                                       "provider_id": pid, "model_id": stored_id,
+                                      "provider_display": display,
                                       "is_current": is_current})
                     if items:
                         group_entries.append((group, items))
@@ -948,6 +949,7 @@ class UIManager(QWidget):
                 for model_name in models:
                     sections.append({"kind": "model", "label": model_name,
                                       "provider_id": pid, "model_id": model_name,
+                                      "provider_display": display,
                                       "is_current": (pid == current_pid and model_name == current_model)})
         return sections
 
