@@ -277,15 +277,7 @@ class BaseAgentHandler:
         if self.state == VisionState.EXECUTING:
             # Free-text hint mid-task: keep history, steer the next step.
             # (A fresh task starts only from IDLE, e.g. after Stop.)
-            # Fresh guidance supersedes any stashed paused response.
-            self._stashed_response = None
-            if self.controller.llm_worker:
-                self.controller.llm_worker.cancel()
-            self.controller.thinking_timer.stop()
-            self.ui.show_thinking_ui(False)
-            self._set_state(VisionState.EXECUTING)
-            self.ui.set_paused(False)
-            self._continue_loop(last_command_output=f"**User guidance:** {user_text}")
+            self._steer_mid_task(user_text)
             return
 
         logging.info(f"{type(self).__name__} starting task: {user_text}")
@@ -301,6 +293,48 @@ class BaseAgentHandler:
             self.command_history.append(jobs_note)
         self._set_state(VisionState.EXECUTING)
         self._continue_loop()
+
+    def _step_in_flight(self) -> bool:
+        """Whether a tool or a background-job wait is currently running.
+
+        A steer must never break it: a long, one-way tool (e.g. a big file
+        copy) cannot be resumed, so interrupting it would force a restart.
+        The guidance is recorded instead and applied at the next boundary.
+        """
+        if getattr(self, "_tool_in_flight", False):
+            return True
+        return getattr(self, "_awaiting_job_id", None) is not None
+
+    def _steer_mid_task(self, user_text: str):
+        """Soft steer: fold a mid-task message into the loop without breaking it.
+
+        Mirrors the "understood, continuing my task" behaviour: the message is
+        acknowledged at once and taken into account on the next planning turn.
+        A running step is never interrupted; only an in-flight (stateless)
+        planning request is dropped and re-issued with the guidance.
+        """
+        # Fresh guidance supersedes any stashed paused response.
+        self._stashed_response = None
+        guidance = f"**User guidance:** {user_text}"
+        if self._step_in_flight():
+            # Record it; the step's own completion continues the loop and the
+            # planning turn then sees both the guidance and the fresh result.
+            self.command_history.append(guidance)
+            self.ui.add_message(
+                "<i>Noted — I'll take it into account after the current step "
+                "finishes.</i>")
+            logging.info(f"{type(self).__name__} steering recorded while a "
+                         f"step is in flight; deferred to the next turn.")
+            return
+        # No tool running (possibly a stateless planning request): re-plan with
+        # the guidance so the next action already accounts for it.
+        if self.controller.llm_worker:
+            self.controller.llm_worker.cancel()
+        self.controller.thinking_timer.stop()
+        self.ui.show_thinking_ui(False)
+        self._set_state(VisionState.EXECUTING)
+        self.ui.set_paused(False)
+        self._continue_loop(last_command_output=guidance)
 
     def pause_or_resume(self):
         logging.info(f"{type(self).__name__} pause button pressed in state {self.state.name}.")
