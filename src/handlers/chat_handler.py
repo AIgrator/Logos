@@ -3,6 +3,7 @@ Handles the logic for the simple chat mode.
 """
 import logging
 from states import ControllerState
+from context.tokens import context_usage, NEAR_LIMIT_RATIO
 
 class ChatHandler:
     def __init__(self, controller):
@@ -34,6 +35,7 @@ class ChatHandler:
         self.controller.thinking_timer.start(1000)
 
         self._chat_seq += 1
+        self._check_context_usage()
         self.controller._send_llm_request(
             user_text,
             attachments,
@@ -47,6 +49,28 @@ class ChatHandler:
     def handle_response_chunk(self, chunk: str):
         """Handles a chunk of a streaming response."""
         self.ui.append_to_stream(chunk)
+
+    def _check_context_usage(self):
+        """Logs how full the model's context window is.
+
+        Foundation for an eventual overflow indicator: warns when the active
+        conversation is close to the model's context window.
+        """
+        try:
+            settings = self.controller.settings or {}
+            pid = settings.get("active_provider") or ""
+            providers = settings.get("llm_providers", {}) or {}
+            model = (providers.get(pid) or {}).get("model") or ""
+            if not pid or not model:
+                return
+            text = "\n".join(str(m.get("content", "")) for m in self.conversation_history)
+            usage = context_usage(pid, model, text)
+            pct = usage["ratio"] * 100
+            log = logging.warning if usage["ratio"] >= NEAR_LIMIT_RATIO else logging.info
+            log("Context usage: ~%d/%d tokens (%.0f%%) for %s::%s",
+                usage["used"], usage["window"], pct, pid, model)
+        except Exception:
+            logging.debug("Context usage check failed", exc_info=True)
 
     def handle_chat_response(self, full_response: str):
         """Handles the final, complete response from the LLM."""

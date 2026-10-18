@@ -6,6 +6,7 @@ import time
 import copy
 from settings_manager import SettingsManager
 from llm.mode_capabilities import ModeCapabilities
+from context.tokens import ModelMetadata
 
 logger = logging.getLogger(__name__)
 
@@ -212,6 +213,11 @@ class ModelConfigManager:
         # settings UI, the model-switch popup and the controller. Falls back to
         # built-in rules when the cache carries no "mode_capabilities" block.
         ModeCapabilities.configure(cached_models.get("mode_capabilities"))
+
+        # 5b. Install per-model metadata (context window, reasoning, input
+        # modalities) used for overflow detection and model info. Falls back
+        # to a safe default window when the cache carries no block.
+        ModelMetadata.configure(cached_models.get("model_metadata"))
 
         t_merge_end = time.perf_counter()
         ModelConfigManager.PROVIDER_CONFIG = base_config
