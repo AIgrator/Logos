@@ -6,6 +6,7 @@ import uuid
 from PySide6.QtCore import Qt, QPoint, QRect, QSize, QTime, QTimer, Signal
 from PySide6.QtGui import (
     QAbstractTextDocumentLayout,
+    QColor,
     QKeySequence,
     QPainter,
     QTextCharFormat,
@@ -103,6 +104,7 @@ class ChatWidget(QAbstractScrollArea):
                             parent=self.scroll_to_bottom_button))
         self.scroll_to_bottom_button.setVisible(False)
         theme_manager.theme_changed.connect(self._apply_scroll_to_bottom_style)
+        theme_manager.theme_changed.connect(self.viewport().update)
         self._apply_scroll_to_bottom_style()
         self.verticalScrollBar().valueChanged.connect(
             self._update_scroll_to_bottom_button)
@@ -819,6 +821,9 @@ class ChatWidget(QAbstractScrollArea):
 
     def paintEvent(self, event):
         painter = QPainter(self.viewport())
+        bg_color = self.theme_manager.get_style("CHAT_BACKGROUND")
+        if bg_color:
+            painter.fillRect(event.rect(), QColor(bg_color))
         scroll_y = self.verticalScrollBar().value()
         start_sel, end_sel = self._get_selection_range()
         current_y = -scroll_y
