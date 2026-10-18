@@ -130,7 +130,6 @@ class SettingsWindow(QDialog):
         self.nav_sections = {
             "general": ("fa5s.cog", "General"),
             "common": ("fa5s.cogs", "Common"),
-            "agent": ("fa5s.brain", "Agent"),
             "apps": ("fa5s.th-large", "Applications"),
             "hotkeys": ("fa5s.keyboard", "Hotkeys"),
             "browser": ("fa5s.globe", "Browser"),
@@ -173,7 +172,6 @@ class SettingsWindow(QDialog):
         sections = {
             "general": self._create_general_section(),
             "common": self._create_common_section(),
-            "agent": self._create_agent_section(),
             "apps": self._create_apps_section(),
             "hotkeys": self._create_hotkeys_section(),
             "compact": self._create_compact_mode_section(),
@@ -239,11 +237,6 @@ class SettingsWindow(QDialog):
         self.prevent_multiple_instances_checkbox.setChecked(
             self.settings_manager.get("prevent_multiple_instances", True)
         )
-        self.webp_lossless_checkbox.setChecked(self.settings_manager.get("webp_lossless", True))
-        self.webp_quality_spinbox.setValue(self.settings_manager.get("webp_quality", 80))
-        is_lossless = self.webp_lossless_checkbox.isChecked()
-        self.webp_quality_spinbox.setDisabled(is_lossless)
-        self.webp_quality_label.setDisabled(is_lossless)
 
         theme = self.settings_manager.get("theme", DARK_THEME)
         if theme == LIGHT_THEME:
@@ -420,8 +413,6 @@ class SettingsWindow(QDialog):
             "terminal": terminal_settings,
             "compact_mode": compact_mode_settings,
             "context": context_settings,
-            "webp_lossless": self.webp_lossless_checkbox.isChecked(),
-            "webp_quality": self.webp_quality_spinbox.value(),
             "theme": theme,
             "search": search_settings
         }
@@ -582,26 +573,6 @@ class SettingsWindow(QDialog):
         app_layout.addWidget(self.prevent_multiple_instances_checkbox, 0, 3)
         tab_layout.addWidget(app_group)
 
-        compression_group = QGroupBox("Screenshot Compression")
-        compression_layout = QGridLayout(compression_group)
-        compression_layout.setColumnStretch(2, 1)
-        self.webp_lossless_checkbox = QCheckBox()
-        webp_lossless_tooltip = "Enable lossless WebP compression for screenshots."
-        compression_layout.addWidget(QLabel("Lossless Compression:"), 0, 0)
-        compression_layout.addWidget(self._create_help_label(webp_lossless_tooltip), 0, 1, Qt.AlignLeft)
-        compression_layout.addWidget(self.webp_lossless_checkbox, 0, 3)
-        self.webp_quality_spinbox = QSpinBox()
-        self.webp_quality_spinbox.setRange(1, 100)
-        self.webp_quality_spinbox.setFixedWidth(80)
-        webp_quality_tooltip = "Sets the quality for lossy WebP compression (1-100)."
-        self.webp_quality_label = QLabel("Compression Quality:")
-        compression_layout.addWidget(self.webp_quality_label, 1, 0)
-        compression_layout.addWidget(self._create_help_label(webp_quality_tooltip), 1, 1, Qt.AlignLeft)
-        compression_layout.addWidget(self.webp_quality_spinbox, 1, 3)
-        self.webp_lossless_checkbox.toggled.connect(self.webp_quality_spinbox.setDisabled)
-        self.webp_lossless_checkbox.toggled.connect(self.webp_quality_label.setDisabled)
-        tab_layout.addWidget(compression_group)
-
         theme_group = QGroupBox("Theme")
         theme_layout = QHBoxLayout(theme_group)
         self.light_theme_radio = QRadioButton("Light")
@@ -616,6 +587,23 @@ class SettingsWindow(QDialog):
 
         self.light_theme_radio.toggled.connect(self._on_theme_changed)
         self.dark_theme_radio.toggled.connect(self._on_theme_changed)
+
+        # Agent (was its own nav section; a single knob, so folded into Common)
+        agent_group = QGroupBox("Agent")
+        agent_layout = QGridLayout(agent_group)
+        agent_layout.setColumnStretch(2, 1)
+        self.max_errors_spinbox = QSpinBox()
+        self.max_errors_spinbox.setRange(1, 10)
+        self.max_errors_spinbox.setFixedWidth(80)
+        max_errors_tooltip = (
+            "Failed steps in a row before the agent stops and asks you "
+            "(after one self-assessment turn). Shared by all agent modes. "
+            "Applies immediately."
+        )
+        agent_layout.addWidget(QLabel("Failures before asking:"), 0, 0)
+        agent_layout.addWidget(self._create_help_label(max_errors_tooltip), 0, 1, Qt.AlignLeft)
+        agent_layout.addWidget(self.max_errors_spinbox, 0, 3)
+        tab_layout.addWidget(agent_group)
 
         return group
 
@@ -795,26 +783,6 @@ class SettingsWindow(QDialog):
         context_layout.addWidget(QLabel("Trim long tracebacks:"), 3, 0)
         context_layout.addWidget(self._create_help_label(trim_tooltip), 3, 1, Qt.AlignLeft)
         context_layout.addWidget(self.history_trim_tracebacks_checkbox, 3, 3)
-
-        return group
-
-    def _create_agent_section(self):
-        """Creates the Agent settings section (terminal/browser/vision modes)."""
-        group = QGroupBox("Agent")
-        agent_layout = QGridLayout(group)
-        agent_layout.setColumnStretch(2, 1)
-
-        self.max_errors_spinbox = QSpinBox()
-        self.max_errors_spinbox.setRange(1, 10)
-        self.max_errors_spinbox.setFixedWidth(80)
-        max_errors_tooltip = (
-            "Failed steps in a row before the agent stops and asks you "
-            "(after one self-assessment turn). Shared by all agent modes. "
-            "Applies immediately."
-        )
-        agent_layout.addWidget(QLabel("Failures before asking:"), 0, 0)
-        agent_layout.addWidget(self._create_help_label(max_errors_tooltip), 0, 1, Qt.AlignLeft)
-        agent_layout.addWidget(self.max_errors_spinbox, 0, 3)
 
         return group
 
