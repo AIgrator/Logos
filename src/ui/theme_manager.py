@@ -144,6 +144,16 @@ STYLES = {
         "ICON_COLOR_HOVER": "gray",
         "NAV_ICON_COLOR_CHECKED": "white",
         "DOC_LINK_STYLE": "QLabel { color: #0000FF; }",
+        "SCROLL_BOTTOM_BUTTON_STYLE": """
+            QPushButton {
+                background-color: #ffffff;
+                border: 1px solid #c0c0c0;
+                border-radius: 18px;
+            }
+            QPushButton:hover {
+                background-color: #f0f0f0;
+            }
+        """,
         # Terminal styles
         "TERMINAL_CONTAINER_BG": "#f6f8fa",
         "TERMINAL_CONTAINER_BORDER": "#d18616",
@@ -200,6 +210,16 @@ STYLES = {
         "ICON_COLOR_HOVER": "#cccccc",
         "NAV_ICON_COLOR_CHECKED": "black",
         "DOC_LINK_STYLE": "QLabel { color: #2a82da; }",
+        "SCROLL_BOTTOM_BUTTON_STYLE": """
+            QPushButton {
+                background-color: #3c3c3c;
+                border: 1px solid #555555;
+                border-radius: 18px;
+            }
+            QPushButton:hover {
+                background-color: #4a4a4a;
+            }
+        """,
         # Terminal styles
         "TERMINAL_CONTAINER_BG": "#2a2a2a",
         "TERMINAL_CONTAINER_BORDER": "#ffc107",

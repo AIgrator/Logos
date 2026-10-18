@@ -1396,7 +1396,7 @@ class UIManager(QWidget):
         self.main_window.setMaximumSize(16777215, 16777215)
         self.main_window.setWindowFlags(Qt.WindowFlags())
         self.main_window.show()
-        self.animate_geometry(self.full_mode_geometry, self.chat_widget.scroll_to_last_user_message)
+        self.animate_geometry(self.full_mode_geometry, self.chat_widget.scroll_to_bottom)
         self.tooltip_manager.install(self.toggle_button, "Minimize")
         self.toggle_button_hover_filter.set_icon_names('fa5s.compress')
         logging.info("switchToFullMode: done")

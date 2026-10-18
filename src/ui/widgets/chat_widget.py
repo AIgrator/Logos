@@ -3,7 +3,7 @@ import logging
 import sys
 import uuid
 
-from PySide6.QtCore import Qt, QPoint, QRect, QTime, QTimer, Signal
+from PySide6.QtCore import Qt, QPoint, QRect, QSize, QTime, QTimer, Signal
 from PySide6.QtGui import (
     QAbstractTextDocumentLayout,
     QKeySequence,
@@ -12,8 +12,9 @@ from PySide6.QtGui import (
     QTextCursor,
     QTextDocument,
 )
-from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QMenu
+from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QMenu, QPushButton
 
+from src.ui.utils import IconHoverFilter
 from src.ui.widgets.collapsible_block_formatter import CollapsibleBlockFormatter
 
 # --- Basic Logging Setup ---
@@ -82,6 +83,24 @@ class ChatWidget(QAbstractScrollArea):
         self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
         self.setContentsMargins(10, 10, 10, 10)
         self.verticalScrollBar().valueChanged.connect(self.viewport().update)
+
+        # Floating "jump to the latest message" button, shown only when the
+        # user has scrolled away from the bottom of the conversation.
+        self.scroll_to_bottom_button = QPushButton(self.viewport())
+        self.scroll_to_bottom_button.setObjectName("ScrollToBottomButton")
+        self.scroll_to_bottom_button.setIconSize(QSize(18, 18))
+        self.scroll_to_bottom_button.setFixedSize(36, 36)
+        self.scroll_to_bottom_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.scroll_to_bottom_button.setToolTip("Scroll to bottom")
+        self.scroll_to_bottom_button.clicked.connect(self.scroll_to_bottom)
+        self.scroll_to_bottom_button.installEventFilter(
+            IconHoverFilter(theme_manager, 'fa5s.arrow-down',
+                            parent=self.scroll_to_bottom_button))
+        self.scroll_to_bottom_button.setVisible(False)
+        theme_manager.theme_changed.connect(self._apply_scroll_to_bottom_style)
+        self._apply_scroll_to_bottom_style()
+        self.verticalScrollBar().valueChanged.connect(
+            self._update_scroll_to_bottom_button)
         logging.info("ChatWidget initialized.")
 
     def set_assistant_name(self, name: str):
@@ -404,7 +423,6 @@ class ChatWidget(QAbstractScrollArea):
             self.is_streaming = False
 
         was_at_bottom = self._is_at_bottom()
-        height_before_new_message = self._calculate_content_height()
         doc = QTextDocument(self)
         doc.setDocumentMargin(0) # Let the widget handle margins
 
@@ -440,36 +458,50 @@ class ChatWidget(QAbstractScrollArea):
 
         self._update_scroll_bar()
 
-        is_user_message = isinstance(data, str) and "<b>You:</b>" in data
         try:
             compact = bool(self.is_compact_fn()) if getattr(
                 self, "is_compact_fn", None) else False
         except Exception:
             compact = False
-        try:
-            mode = self.mode_fn() if getattr(
-                self, "mode_fn", None) else "chat"
-        except Exception:
-            mode = "chat"
-        if force_scroll or compact or mode != "chat":
-            # Everywhere except plain chat (and always in the compact
-            # strip): stick to the bottom so the latest agent turn is
-            # visible; older lines scroll up. Chat keeps follow-if-at-top.
+        if force_scroll or compact:
+            # Explicit jumps and the compact strip always show the tail.
             self.scroll_to_bottom()
-        elif is_user_message:
-            QTimer.singleShot(0, lambda: self._execute_scroll(height_before_new_message))
         elif was_at_bottom:
+            # Stay pinned to the bottom only when the user is already there;
+            # never yank someone who scrolled up to read. This also covers user
+            # messages — they are no longer pinned to the top of the viewport,
+            # which used to shove the whole history off-screen.
             self._follow_if_at_bottom(was_at_bottom)
 
         self.viewport().update()
 
 
-    def _execute_scroll(self, position):
-        self.verticalScrollBar().setValue(position)
-
     def scroll_to_bottom(self):
         """Public method to scroll the chat to the very bottom."""
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(self.verticalScrollBar().maximum()))
+
+    def _apply_scroll_to_bottom_style(self):
+        self.scroll_to_bottom_button.setStyleSheet(
+            self.theme_manager.get_style("SCROLL_BOTTOM_BUTTON_STYLE"))
+
+    def _update_scroll_to_bottom_button(self, *args):
+        """Show the jump-to-bottom button when scrolled away from the tail."""
+        if getattr(self, "scroll_to_bottom_button", None) is None:
+            return
+        bar = self.verticalScrollBar()
+        should_show = bar.maximum() > 0 and not self._is_at_bottom()
+        button = self.scroll_to_bottom_button
+        if button.isVisible() != should_show:
+            button.setVisible(should_show)
+        if not should_show:
+            return
+        x_offset, text_width = self._content_geometry()
+        if text_width <= 0:
+            return
+        x = x_offset + (text_width - button.width()) // 2
+        y = max(0, self.viewport().height() - button.height() - 16)
+        button.move(x, y)
+        button.raise_()
 
     def scroll_to_last_user_message(self):
         """
@@ -703,31 +735,18 @@ class ChatWidget(QAbstractScrollArea):
         return content_height
 
     def _update_scroll_bar(self):
+        # Standard scroll range: from the very top to showing the tail. No
+        # over-scroll / "pin the last message to the top" range — that was what
+        # made the history fly off-screen on send and showed only the last line
+        # in the compact strip.
         content_height = self._calculate_content_height()
         viewport_height = self.viewport().height()
-
-        user_message_count = sum(
-            1 for msg in self.messages
-            if msg.get('type') == 'simple' and msg.get('raw_content', '').startswith("<b>You:</b>")
-        )
-
-        if user_message_count > 1:
-            height_of_last_message = 0
-            if self.messages:
-                last_msg_doc = self.messages[-1]['doc']
-                _, text_width = self._content_geometry()
-                if text_width > 0:
-                    last_msg_doc.setTextWidth(text_width)
-                height_of_last_message = last_msg_doc.size().height() + self.document_margin
-            pinning_scroll_pos = content_height - height_of_last_message
-            standard_max_scroll = max(0, content_height - viewport_height)
-            new_range = max(pinning_scroll_pos, standard_max_scroll)
-        else:
-            new_range = max(0, content_height - viewport_height)
+        new_range = max(0, content_height - viewport_height)
 
         self.verticalScrollBar().setRange(0, new_range)
         self.verticalScrollBar().setPageStep(viewport_height)
         self.viewport().update()
+        self._update_scroll_to_bottom_button()
 
     def paintEvent(self, event):
         painter = QPainter(self.viewport())
