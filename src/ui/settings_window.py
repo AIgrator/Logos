@@ -130,12 +130,12 @@ class SettingsWindow(QDialog):
         self.nav_sections = {
             "general": ("fa5s.cog", "General"),
             "common": ("fa5s.cogs", "Common"),
-            "apps": ("fa5s.th-large", "Applications"),
             "hotkeys": ("fa5s.keyboard", "Hotkeys"),
             "browser": ("fa5s.globe", "Browser"),
             "terminal": ("fa5s.terminal", "Terminal"),
             "vision": ("fa5s.robot", "Vision"),
             "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
+            "apps": ("fa5s.th-large", "Applications"),
             "context": ("fa5s.file-alt", "Context")
         }
 
@@ -172,12 +172,12 @@ class SettingsWindow(QDialog):
         sections = {
             "general": self._create_general_section(),
             "common": self._create_common_section(),
-            "apps": self._create_apps_section(),
             "hotkeys": self._create_hotkeys_section(),
-            "compact": self._create_compact_mode_section(),
             "browser": self._create_browser_section(),
             "terminal": self._create_terminal_section(),
             "vision": self._create_vision_section(),
+            "compact": self._create_compact_mode_section(),
+            "apps": self._create_apps_section(),
             "context": self._create_context_section(),
         }
 
@@ -458,6 +458,13 @@ class SettingsWindow(QDialog):
         group = QGroupBox("Applications")
         layout = QVBoxLayout(group)
 
+        description = QLabel(
+            "Applications the assistant is allowed to open. Only the checked "
+            "apps are exposed to the model, and only in Vision mode."
+        )
+        description.setWordWrap(True)
+        layout.addWidget(description)
+
         self.scan_prompt_label = QLabel("Application cache not found. Please scan to discover all applications.")
         self.scan_prompt_label.setStyleSheet("font-style: italic; color: #D32F2F; font-weight: bold;")
         self.scan_prompt_label.setVisible(False)
@@ -468,7 +475,7 @@ class SettingsWindow(QDialog):
         layout.addWidget(scan_button)
 
         self.apps_list_widget = QListWidget()
-        self.apps_list_widget.setToolTip("Select the applications the assistant is allowed to launch.")
+        self.apps_list_widget.setToolTip("Select the applications the assistant is allowed to launch in Vision mode.")
         self.apps_list_widget.setFixedHeight(250) # Set a fixed height for the list
         layout.addWidget(self.apps_list_widget)
 
@@ -618,6 +625,14 @@ class SettingsWindow(QDialog):
         """Creates the Compact Mode settings section."""
         group = QGroupBox("Compact Mode")
         tab_layout = QVBoxLayout(group)
+
+        description = QLabel(
+            "The compact window is used automatically during Vision mode "
+            "tasks, so the assistant's own window does not cover the screen "
+            "it is working on. These values set its size and where it appears."
+        )
+        description.setWordWrap(True)
+        tab_layout.addWidget(description)
 
         compact_mode_group = QGroupBox("Compact Mode Geometry")
         compact_mode_layout = QGridLayout(compact_mode_group)
