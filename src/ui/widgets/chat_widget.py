@@ -14,6 +14,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QMenu, QPushButton
 
+from src.ui.text_render import render_text
 from src.ui.utils import IconHoverFilter
 from src.ui.widgets.collapsible_block_formatter import CollapsibleBlockFormatter
 
@@ -564,13 +565,17 @@ class ChatWidget(QAbstractScrollArea):
                 new_content = f"<b>{actor_name}:</b> {status_text}... 0s"
                 last_message['raw_content'] = new_content
                 last_message['doc'].setHtml(new_content)
+                last_message['is_status'] = True
+                last_message['plain'] = ''
             else:
                 if self.is_streaming:
                     self.is_streaming = False
                 doc = QTextDocument(self)
                 initial_content = f"<b>{actor_name}:</b> {status_text}... 0s"
                 doc.setHtml(initial_content)
-                self.messages.append({'type': 'simple', 'doc': doc, 'raw_content': initial_content})
+                self.messages.append({'type': 'simple', 'doc': doc,
+                                      'raw_content': initial_content,
+                                      'is_status': True, 'plain': ''})
                 self.is_streaming = True
             self._update_scroll_bar()
             self._follow_if_at_bottom(was_at_bottom)
@@ -683,29 +688,34 @@ class ChatWidget(QAbstractScrollArea):
 
     def append_to_stream(self, text_chunk: str):
         was_at_bottom = self._is_at_bottom()
+        prefix = f"<b>{self.current_assistant_name}:</b> "
         if not self.is_streaming or not self.messages:
             doc = QTextDocument(self)
-            initial_content = f"<b>{self.current_assistant_name}:</b> "
-            doc.setHtml(initial_content)
-            self.messages.append({'type': 'simple', 'doc': doc, 'raw_content': initial_content})
+            doc.setHtml(prefix)
+            self.messages.append({'type': 'simple', 'doc': doc,
+                                  'raw_content': prefix, 'plain': ''})
             self.is_streaming = True
 
         last_message = self.messages[-1]
 
-        if "..." in last_message.get('raw_content', '') and "s" in last_message.get('raw_content', ''):
-            prefix_to_remove = f"{self.current_assistant_name}:"
-            if text_chunk.strip().lower().startswith(prefix_to_remove.lower()):
-                start_index = text_chunk.lower().find(prefix_to_remove.lower()) + len(prefix_to_remove)
-                text_chunk = text_chunk[start_index:].lstrip()
+        # Replace the "Thinking... Ns" placeholder with the real response.
+        if last_message.get('is_status'):
+            last_message['is_status'] = False
+            last_message['plain'] = ''
 
-            last_message['raw_content'] = f"<b>{self.current_assistant_name}:</b> "
-            last_message['doc'].setHtml(last_message['raw_content'])
+        plain = last_message.get('plain', '')
+        # The model sometimes echoes its own "Name:" header; drop it.
+        stripped = text_chunk.lstrip()
+        if not plain and stripped.lower().startswith(self.current_assistant_name.lower() + ":"):
+            text_chunk = stripped[len(self.current_assistant_name) + 1:].lstrip()
 
-        cursor = QTextCursor(last_message['doc'])
-        cursor.movePosition(QTextCursor.End)
-        cursor.insertText(text_chunk)
-
-        last_message['raw_content'] += text_chunk
+        plain += text_chunk
+        last_message['plain'] = plain
+        # Render Markdown live so headings/lists/bold show while streaming
+        # instead of raw ### / ** syntax.
+        rendered = render_text(plain, prefix_html=prefix, markdown_ok=True)
+        last_message['raw_content'] = rendered
+        last_message['doc'].setHtml(rendered)
 
         self._update_scroll_bar()
         self._follow_if_at_bottom(was_at_bottom)

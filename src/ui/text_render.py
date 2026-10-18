@@ -29,7 +29,10 @@ def render_text(content: str, prefix_html: str = "", markdown_ok: bool = True) -
         import markdown
         processed = markdown.markdown(content, extensions=['fenced_code'])
         if prefix_html:
-            return f'<p style="white-space: pre-wrap;">{prefix_html}{processed}</p>'
+            # Prefix as its own paragraph: block-level markdown (<h3>/<ol>/<p>)
+            # must not be nested inside a <p> (invalid HTML).
+            return (f'<p style="white-space: pre-wrap; margin: 0 0 4px 0;">'
+                    f'{prefix_html}</p>{processed}')
         return processed
     processed = html.escape(content)
     if prefix_html:

@@ -48,9 +48,13 @@ class ChatHandler:
         """Handles the final, complete response from the LLM."""
         self.controller.thinking_timer.stop()
 
-        # Construct the final, clean HTML content before changing any UI state
+        # Construct the final, clean HTML content before changing any UI state.
+        # Model prose may be Markdown — render it (headings, lists, bold, code)
+        # instead of dumping the raw syntax into the chat.
+        from src.ui.text_render import render_text
         model_name = self.controller._get_current_model_name()
-        final_html = f"<b>{model_name}:</b> {full_response.replace('\n', '<br>')}"
+        final_html = render_text(
+            full_response, prefix_html=f"<b>{model_name}:</b> ", markdown_ok=True)
 
         # Finalize the UI with the complete response FIRST, while is_streaming is still true
         self.ui.finalize_stream(final_html)
