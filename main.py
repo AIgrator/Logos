@@ -22,41 +22,6 @@ def main():
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Application starting, please wait for modules to load...")
     _start_t = time.perf_counter()
 
-    def _native_splash_pid_file():
-        import tempfile
-        return os.path.join(tempfile.gettempdir(), "logos_splash.pid")
-
-    def _close_native_splash():
-        """Kills the transparent pre-splash started by bin/logos.bat (if any).
-
-        Windows-only by construction (the launcher is a .bat); on other
-        systems this is a no-op so startup stays cross-platform.
-        """
-        if sys.platform != "win32":
-            return
-        try:
-            import subprocess
-            pid_file = _native_splash_pid_file()
-            if not os.path.exists(pid_file):
-                return
-            with open(pid_file) as f:
-                pid = int(f.read().strip())
-            out = subprocess.run(
-                ["tasklist", "/FI", f"PID eq {pid}", "/FO", "CSV", "/NH"],
-                capture_output=True, text=True, timeout=10,
-            ).stdout.lower()
-            if "powershell" in out or "pwsh" in out:
-                subprocess.run(
-                    ["taskkill", "/PID", str(pid), "/F"],
-                    capture_output=True, timeout=10,
-                )
-            try:
-                os.remove(pid_file)
-            except Exception:
-                pass
-        except Exception:
-            pass
-
     qt_splash = None
 
     def _phase(name):
@@ -74,9 +39,8 @@ def main():
                 pass
 
     def _close_splashes():
-        """Closes whichever splash is up (native pre-splash and/or Qt fallback)."""
+        """Closes the startup splash, if it is still up."""
         nonlocal qt_splash
-        _close_native_splash()
         if qt_splash is not None:
             try:
                 qt_splash.close()
@@ -124,6 +88,29 @@ def main():
     app = QApplication.instance() or QApplication(sys.argv)
     _phase("QApplication created")
 
+    # Startup splash, owned by THIS process. Because it is one of our own
+    # windows (not a helper process spawned by the .bat), it can never be
+    # orphaned: if anything fails — a bad import, a crash, a hard exit — the
+    # OS destroys it together with the process. On top of that it is closed
+    # explicitly on every normal exit path (_close_splashes) and by the
+    # aboutToQuit backstop below.
+    if "--run-setup" not in sys.argv:
+        try:
+            from PySide6.QtWidgets import QSplashScreen
+            from PySide6.QtGui import QPixmap
+            from PySide6.QtCore import Qt
+            pix = QPixmap(os.path.join(script_dir, "assets", "ico.png")).scaled(
+                256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            qt_splash = QSplashScreen(pix)
+            qt_splash.show()
+            qt_splash.showMessage("Starting Logos…", Qt.AlignBottom | Qt.AlignHCenter)
+            app.processEvents()
+            # Backstop: whenever the event loop ends, make sure it is gone.
+            app.aboutToQuit.connect(_close_splashes)
+        except Exception as e:
+            print(f"qt splash failed: {e}", flush=True)
+            qt_splash = None
+
     # Add the 'src' directory to the Python path
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] before ModelConfigManager")
@@ -146,9 +133,8 @@ def main():
 
     # --- Setup-only mode ---
     if '--run-setup' in sys.argv:
-        # The setup wizard now handles its own theme application
-        # (app instance already exists — created early for the splash path)
-        _close_native_splash()
+        # The setup wizard handles its own theme application.
+        # (No startup splash in this mode — it is a quick settings window.)
         setup_successful = run_setup_wizard(settings_manager)
         sys.exit(0 if setup_successful else 1)
     # --- End Setup-only mode ---
@@ -275,25 +261,6 @@ def main():
             local_server.removeServer(server_name)
             local_server.listen(server_name)
     # --- End Single Instance Check ---
-
-    # Splash policy: exactly one. On Windows the transparent pre-splash from
-    # bin/logos.bat is already up (it appears before the interpreter) and
-    # stays for the whole startup. Everywhere else — Linux/macOS, or a direct
-    # `python main.py` run — show the Qt fallback instead.
-    if not os.path.exists(_native_splash_pid_file()):
-        try:
-            from PySide6.QtWidgets import QSplashScreen
-            from PySide6.QtGui import QPixmap
-            from PySide6.QtCore import Qt
-            pix = QPixmap("assets/ico.png").scaled(
-                256, 256, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-            qt_splash = QSplashScreen(pix)
-            qt_splash.show()
-            qt_splash.showMessage("Starting Logos…", Qt.AlignBottom | Qt.AlignHCenter)
-            app.processEvents()
-        except Exception as e:
-            print(f"qt splash failed: {e}", flush=True)
-            qt_splash = None
 
     # --- First Run Setup ---
     # Check if settings exist. If not, this is the first run.
