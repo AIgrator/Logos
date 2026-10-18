@@ -1128,7 +1128,7 @@ class UIManager(QWidget):
             self.cancel_button.setVisible(False)
             self.send_button.setVisible(True)
             if thinking:
-                self.tooltip_manager.install(self.send_button, "Send (current response will be cancelled)")
+                self.tooltip_manager.install(self.send_button, "Send (will be queued after the current reply)")
 
     def _on_send_clicked(self):
         if self.file_search_popup.isVisible():
@@ -1257,6 +1257,18 @@ class UIManager(QWidget):
 
     def finalize_stream(self, final_html_content: str):
         self.chat_widget.finalize_stream(final_html_content)
+
+    def add_queued_message(self, raw_html: str, display_html: str):
+        """Adds a dimmed user message for the chat queue; returns its handle."""
+        return self.chat_widget.add_queued_message(raw_html, display_html)
+
+    def activate_queued_message(self, handle):
+        """Un-dims a queued message once it becomes the active turn."""
+        self.chat_widget.activate_queued_message(handle)
+
+    def remove_queued_message(self, handle):
+        """Removes an abandoned queued message from the chat."""
+        self.chat_widget.remove_message(handle)
 
     def _input_locked_during_thinking(self) -> bool:
         """Whether typing is blocked while the model thinks.

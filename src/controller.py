@@ -43,6 +43,9 @@ class AppController(QObject):
     hotkey_pause_for_feedback_triggered = Signal()
     hotkey_cancel_request_triggered = Signal()
 
+    # How many messages may wait in the chat queue while a reply streams.
+    CHAT_QUEUE_MAX = 5
+
     def __init__(self, app, settings_manager: SettingsManager, local_server=None, working_directory=None):
         super().__init__()
         init_start = time.perf_counter()
@@ -91,6 +94,9 @@ class AppController(QObject):
         self.state = ControllerState.IDLE
         self.conversation_history = []
         self.pending_attachments = []
+        # Messages typed while a chat reply is streaming wait here and are
+        # answered in order (FIFO) once the current reply finishes.
+        self.chat_queue = []
         self.thinking_timer = QTimer(self)
         self.thinking_time = 0
         self.settings_window = None
@@ -450,6 +456,13 @@ class AppController(QObject):
         model_name = self._get_current_model_name()
         self.ui.set_assistant_name(model_name)
 
+        # While a chat reply is still streaming, a new message is queued (shown
+        # dimmed in the thread) instead of cancelling the in-flight request. It
+        # is answered, in order, once the current reply finishes.
+        if self.state == ControllerState.CHATTING and self.thinking_timer.isActive():
+            self._enqueue_chat_message(user_text)
+            return
+
         self.ui.add_message(f"<b>You:</b> {user_text}")
         self.conversation_history.append({'role': 'user', 'content': user_text})
 
@@ -478,22 +491,7 @@ class AppController(QObject):
                         logging.error(f"Error processing attachment for terminal: {e}")
                         self.ui.add_error_message(f"Error processing attachment {path}: {e}")
             else: # Chat or Vision mode
-                for attachment in self.pending_attachments:
-                    try:
-                        if isinstance(attachment, dict):
-                            attachment_type = attachment.get('type')
-                        else:
-                            # Raw payload (e.g. screenshot bytes queued directly).
-                            attachments_for_handler.append(attachment)
-                            continue
-                        if attachment_type == 'file':
-                             with open(attachment.get('path'), 'rb') as f:
-                                attachments_for_handler.append(f.read())
-                        elif attachment_type == 'image':
-                            attachments_for_handler.append(attachment.get('data'))
-                    except Exception as e:
-                        logging.error(f"Error processing attachment for chat/vision: {e}")
-                        self.ui.add_error_message(f"Could not process attachment: {e}")
+                attachments_for_handler.extend(self._collect_chat_attachments())
 
         self.pending_attachments.clear()
         self.ui.clear_thumbnails()
@@ -525,6 +523,89 @@ class AppController(QObject):
             self.browser_handler.start_task(user_text)
         else:
             self.chat_handler.start_chat(user_text, attachments_for_handler)
+
+    def _collect_chat_attachments(self, while_streaming: bool = False) -> list:
+        """Reads pending attachments into LLM-ready payloads for chat/vision.
+
+        ``while_streaming`` suppresses the (chat-bubble) error notice, which
+        would otherwise reset the active stream state when a queued message's
+        attachment fails to load.
+        """
+        payloads = []
+        for attachment in self.pending_attachments:
+            try:
+                if isinstance(attachment, dict):
+                    attachment_type = attachment.get('type')
+                else:
+                    # Raw payload (e.g. screenshot bytes queued directly).
+                    payloads.append(attachment)
+                    continue
+                if attachment_type == 'file':
+                    with open(attachment.get('path'), 'rb') as f:
+                        payloads.append(f.read())
+                elif attachment_type == 'image':
+                    payloads.append(attachment.get('data'))
+            except Exception as e:
+                logging.error(f"Error processing attachment for chat/vision: {e}")
+                if not while_streaming:
+                    self.ui.add_error_message(f"Could not process attachment: {e}")
+        return payloads
+
+    def _enqueue_chat_message(self, user_text):
+        """Queues a chat message typed while a reply is streaming."""
+        if len(self.chat_queue) >= self.CHAT_QUEUE_MAX:
+            self.ui.add_message(
+                f"<i>Queue is full ({self.CHAT_QUEUE_MAX}) — wait for the "
+                "current replies to finish, then send again.</i>",
+                force_scroll=True,
+            )
+            try:
+                self.ui.user_input.setPlainText(user_text)
+                self.ui.user_input.setFocus()
+            except Exception:
+                pass
+            return
+
+        attachments = self._collect_chat_attachments(while_streaming=True)
+        self.pending_attachments.clear()
+        self.ui.clear_thumbnails()
+        self._update_attachment_menu()
+
+        label = user_text if user_text.strip() else "(attachment)"
+        raw_html = f"<b>You:</b> {label}"
+        style = self.theme_manager.get_style("QUEUED_MESSAGE_STYLE")
+        display_html = f'<span style="{style}">{raw_html} <i>(queued)</i></span>'
+        handle = self.ui.add_queued_message(raw_html, display_html)
+        self.chat_queue.append({
+            'text': user_text,
+            'attachments': attachments,
+            'ui_handle': handle,
+        })
+        logging.info(f"Chat message queued (position {len(self.chat_queue)}).")
+
+    def _drain_chat_queue(self):
+        """Starts the oldest queued chat message, if any. Returns True if one ran."""
+        if not self.chat_queue:
+            return False
+        item = self.chat_queue.pop(0)
+        try:
+            self.ui.activate_queued_message(item.get('ui_handle'))
+        except Exception as e:
+            logging.warning(f"Could not activate queued chat message: {e}")
+        self.current_handler = self.chat_handler
+        self.conversation_history.append({'role': 'user', 'content': item['text']})
+        logging.info(f"Dequeuing chat message ({len(self.chat_queue)} left).")
+        self.chat_handler.start_chat(item['text'], item.get('attachments') or [])
+        return True
+
+    def _clear_chat_queue(self):
+        """Drops all queued chat messages (used when leaving chat mode)."""
+        while self.chat_queue:
+            item = self.chat_queue.pop(0)
+            try:
+                self.ui.remove_queued_message(item.get('ui_handle'))
+            except Exception:
+                pass
 
     def handle_response_chunk(self, chunk):
         self.ui.stop_retry_countdown()
@@ -792,6 +873,10 @@ class AppController(QObject):
                 self.terminal_handler._set_state(VisionState.IDLE)
             self._set_state(ControllerState.IDLE)
 
+        # Cancelling only stops the current reply; messages queued during it
+        # still run (in order) on the next turn.
+        self._drain_chat_queue()
+
     def _get_current_model_name(self):
         """Gets the simple model name for use inside the chat UI."""
         try:
@@ -930,6 +1015,8 @@ class AppController(QObject):
         else:
             notice = (f"<i>Switched to <b>{title_string}</b> (this session only).</i>")
         self.ui.add_message(notice, force_scroll=True)
+        # The switch cancels the in-flight reply; queued chat messages continue.
+        self._drain_chat_queue()
 
     def _apply_mode_default_model(self, subsection: str):
         """Session-only fallback to the per-mode default model.
@@ -979,6 +1066,9 @@ class AppController(QObject):
             logging.warning(f"Could not apply per-mode default model for '{subsection}': {e}", exc_info=True)
 
     def _cleanup_and_switch_handler(self, new_handler, new_state):
+        # Leaving chat abandons any queued (not yet answered) chat messages.
+        self._clear_chat_queue()
+
         # If a response is streaming, cancel it before switching modes.
         if self.thinking_timer.isActive():
             logging.info(f"Cancelling in-flight request before switching to {new_state.name} mode.")

@@ -70,6 +70,9 @@ class ChatHandler:
         if self.ui.main_window.isActiveWindow():
             self.ui.user_input.setFocus()
 
+        # Answer the next queued message, if the user typed while we streamed.
+        self.controller._drain_chat_queue()
+
     def handle_fatal_error(self, error_message: str):
         """
         Handles an unrecoverable error from the LLM after all retries.
@@ -81,3 +84,6 @@ class ChatHandler:
         # The error_message is already formatted as user-friendly HTML
         self.ui.add_message(error_message, force_scroll=True)
         self.controller._set_state(ControllerState.IDLE)
+
+        # Even after a fatal error, keep the queue draining (don't wedge it).
+        self.controller._drain_chat_queue()

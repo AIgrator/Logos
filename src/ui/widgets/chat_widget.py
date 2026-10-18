@@ -65,6 +65,10 @@ class ChatWidget(QAbstractScrollArea):
         self.messages = []
         self.document_margin = 5
         self.is_streaming = False
+        # The message dict the live stream writes into. Tracked by reference
+        # instead of ``messages[-1]`` so queued user messages appended below the
+        # in-flight answer never become the stream target.
+        self._streaming_msg = None
         self.selection_start = None
         self.selection_end = None
         self.is_selecting = False
@@ -422,6 +426,7 @@ class ChatWidget(QAbstractScrollArea):
     def add_message(self, data, force_scroll=False):
         if self.is_streaming:
             self.is_streaming = False
+        self._streaming_msg = None
 
         was_at_bottom = self._is_at_bottom()
         doc = QTextDocument(self)
@@ -476,6 +481,52 @@ class ChatWidget(QAbstractScrollArea):
 
         self.viewport().update()
 
+    def add_queued_message(self, raw_html: str, display_html: str):
+        """Appends a user message shown as "queued" (dimmed).
+
+        Unlike ``add_message`` this does NOT touch the active stream state, so
+        the in-flight answer keeps streaming into its own message while the
+        queued message sits below it. Returns the message dict (a handle used
+        later to un-dim it, ``activate_queued_message``).
+        """
+        was_at_bottom = self._is_at_bottom()
+        doc = QTextDocument(self)
+        doc.setDocumentMargin(0)
+        doc.setHtml(display_html)
+        msg = {
+            'type': 'simple',
+            'raw_content': raw_html,  # normal (undimmed) HTML, restored on send
+            'doc': doc,
+            'queued': True,
+        }
+        self.messages.append(msg)
+        self._update_scroll_bar()
+        self.viewport().update()
+        self._follow_if_at_bottom(was_at_bottom)
+        return msg
+
+    def activate_queued_message(self, msg):
+        """Un-dims a queued message when its turn to be answered arrives."""
+        if not isinstance(msg, dict) or not msg.get('queued'):
+            return
+        was_at_bottom = self._is_at_bottom()
+        msg['queued'] = False
+        msg['doc'].setHtml(msg.get('raw_content', ''))
+        self._update_scroll_bar()
+        self.viewport().update()
+        self._follow_if_at_bottom(was_at_bottom)
+
+    def remove_message(self, msg):
+        """Removes a specific message by identity (drops an abandoned queue item)."""
+        for i, m in enumerate(self.messages):
+            if m is msg:
+                self.messages.pop(i)
+                if self._streaming_msg is msg:
+                    self._streaming_msg = None
+                    self.is_streaming = False
+                self._update_scroll_bar()
+                self.viewport().update()
+                return
 
     def scroll_to_bottom(self):
         """Public method to scroll the chat to the very bottom."""
@@ -560,8 +611,9 @@ class ChatWidget(QAbstractScrollArea):
         actor_name = actor if actor is not None else self.current_assistant_name
         was_at_bottom = self._is_at_bottom()
         if show:
-            if self.is_streaming and self.messages and "..." in self.messages[-1].get('raw_content', ''):
-                last_message = self.messages[-1]
+            last_message = self._streaming_msg
+            if (self.is_streaming and last_message is not None
+                    and "..." in last_message.get('raw_content', '')):
                 new_content = f"<b>{actor_name}:</b> {status_text}... 0s"
                 last_message['raw_content'] = new_content
                 last_message['doc'].setHtml(new_content)
@@ -573,14 +625,17 @@ class ChatWidget(QAbstractScrollArea):
                 doc = QTextDocument(self)
                 initial_content = f"<b>{actor_name}:</b> {status_text}... 0s"
                 doc.setHtml(initial_content)
-                self.messages.append({'type': 'simple', 'doc': doc,
-                                      'raw_content': initial_content,
-                                      'is_status': True, 'plain': ''})
+                msg = {'type': 'simple', 'doc': doc,
+                       'raw_content': initial_content,
+                       'is_status': True, 'plain': ''}
+                self.messages.append(msg)
+                self._streaming_msg = msg
                 self.is_streaming = True
             self._update_scroll_bar()
             self._follow_if_at_bottom(was_at_bottom)
         else:
             self.is_streaming = False
+            self._streaming_msg = None
 
     def show_retry_countdown(self, attempt_num: int, max_attempts: int, wait_seconds: float):
         """Shows a visible countdown to the next automatic retry in the chat."""
@@ -669,8 +724,9 @@ class ChatWidget(QAbstractScrollArea):
 
     def update_timer(self, seconds: int):
         was_at_bottom = self._is_at_bottom()
-        if self.is_streaming and self.messages and "..." in self.messages[-1].get('raw_content', ''):
-            last_message = self.messages[-1]
+        last_message = self._streaming_msg
+        if (self.is_streaming and last_message is not None
+                and "..." in last_message.get('raw_content', '')):
             content_html = last_message['raw_content']
             try:
                 parts = content_html.split("</b>")
@@ -689,14 +745,16 @@ class ChatWidget(QAbstractScrollArea):
     def append_to_stream(self, text_chunk: str):
         was_at_bottom = self._is_at_bottom()
         prefix = f"<b>{self.current_assistant_name}:</b> "
-        if not self.is_streaming or not self.messages:
+        if not self.is_streaming or self._streaming_msg is None:
             doc = QTextDocument(self)
             doc.setHtml(prefix)
-            self.messages.append({'type': 'simple', 'doc': doc,
-                                  'raw_content': prefix, 'plain': ''})
+            msg = {'type': 'simple', 'doc': doc,
+                   'raw_content': prefix, 'plain': ''}
+            self.messages.append(msg)
+            self._streaming_msg = msg
             self.is_streaming = True
 
-        last_message = self.messages[-1]
+        last_message = self._streaming_msg
 
         # Replace the "Thinking... Ns" placeholder with the real response.
         if last_message.get('is_status'):
@@ -725,13 +783,14 @@ class ChatWidget(QAbstractScrollArea):
         Finalizes a streaming message by replacing its content with the final version.
         """
         was_at_bottom = self._is_at_bottom()
-        if self.is_streaming and self.messages:
-            last_message = self.messages[-1]
+        last_message = self._streaming_msg
+        if last_message is not None:
             last_message['raw_content'] = final_html_content
             last_message['doc'].setHtml(final_html_content)
             self._update_scroll_bar()
             self.viewport().update()
         self.is_streaming = False
+        self._streaming_msg = None
         self._follow_if_at_bottom(was_at_bottom)
 
     def _calculate_content_height(self):
