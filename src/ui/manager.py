@@ -313,6 +313,9 @@ class UIManager(QWidget):
         self.chat_widget.is_compact_fn = lambda: self.is_compact
         self.chat_widget.mode_fn = lambda: getattr(
             self, "_active_mode_key", "chat")
+        # Single source of truth for the column cap so the chat text and the
+        # input/toolbar block always share the exact same width.
+        self.chat_widget.content_max_width_fn = self._content_max_width
         self.chat_widget.retry_requested.connect(self.retry_requested.emit)
         self.chat_widget.continue_requested.connect(self.continue_requested.emit)
         self.layout.addWidget(self.chat_widget, 1)
@@ -481,9 +484,29 @@ class UIManager(QWidget):
         self.bottom_toolbar_layout.addWidget(self.cancel_button)
         self.cancel_button.setVisible(False)
 
-        self.layout.addWidget(self.input_container)
-        self.layout.addWidget(self.bottom_toolbar_container)
-        self.layout.addWidget(self.mode_model_container)
+        # The input + toolbar block lives in a centered, width-capped column so
+        # on wide windows it lines up with the centered chat text instead of
+        # stretching edge-to-edge (opencode-style). Narrow windows: full width.
+        self.bottom_center_column = QWidget()
+        self.bottom_center_column.setMaximumWidth(self._content_max_width())
+        self.bottom_center_layout = QVBoxLayout(self.bottom_center_column)
+        self.bottom_center_layout.setContentsMargins(0, 0, 0, 0)
+        self.bottom_center_layout.setSpacing(0)
+        self.bottom_center_layout.addWidget(self.input_container)
+        self.bottom_center_layout.addWidget(self.bottom_toolbar_container)
+        self.bottom_center_layout.addWidget(self.mode_model_container)
+
+        self.bottom_center_row = QWidget()
+        self.bottom_center_row_layout = QHBoxLayout(self.bottom_center_row)
+        self.bottom_center_row_layout.setContentsMargins(0, 0, 0, 0)
+        self.bottom_center_row_layout.setSpacing(0)
+        # Cap the bottom block (input + toolbars) to the readable column width
+        # and let the surrounding stretches center it, aligned with the chat
+        # text. Only a *maximum* is set, so the window can still shrink freely.
+        self.bottom_center_row_layout.addStretch(1)
+        self.bottom_center_row_layout.addWidget(self.bottom_center_column, 1000)
+        self.bottom_center_row_layout.addStretch(1)
+        self.layout.addWidget(self.bottom_center_row)
 
         self.send_button.clicked.connect(self._on_send_clicked)
         self.user_input.return_pressed.connect(self._on_send_clicked)
@@ -626,11 +649,10 @@ class UIManager(QWidget):
         popup_height = min(ideal_height, self._file_search_popup_max_h)
 
         # Position the popup ABOVE the input field
-        input_pos = self.user_input.pos()
-        container_pos = self.input_container.pos()
+        input_top_left = self.user_input.mapTo(self.central_widget, self.user_input.rect().topLeft())
 
-        x = container_pos.x() + input_pos.x()
-        y = container_pos.y() + input_pos.y() - popup_height - 2
+        x = input_top_left.x()
+        y = input_top_left.y() - popup_height - 2
 
         self.file_search_popup.move(x, y)
         self.file_search_popup.setFixedWidth(self.user_input.width())
@@ -1003,6 +1025,28 @@ class UIManager(QWidget):
         total += margins.left() + margins.right()
         return total + 8  # small buffer so the last widget is never clipped
 
+    def _content_max_width(self) -> int:
+        """Cap of the centered content column, in logical (DPI-independent) px.
+
+        The wider tier (960) kicks in only when the window really fills its own
+        screen — maximised/full-screen, or at least WIDE_CONTENT_SCREEN_RATIO of
+        the screen's available width. Using a *fraction* of the screen (not a
+        fixed pixel number) keeps it correct under any display scaling.
+        """
+        win = self.main_window
+        try:
+            if win.isFullScreen() or win.isMaximized():
+                return ChatWidget.MAX_CONTENT_WIDTH_WIDE
+            screen = win.screen()
+            if screen is not None:
+                avail = screen.availableGeometry().width()
+                if avail > 0 and win.width() >= int(
+                        avail * ChatWidget.WIDE_CONTENT_SCREEN_RATIO):
+                    return ChatWidget.MAX_CONTENT_WIDTH_WIDE
+        except Exception:
+            pass
+        return ChatWidget.MAX_CONTENT_WIDTH
+
     def _schedule_toolbar_reflow(self):
         """Defer a toolbar reflow to the next event-loop tick.
 
@@ -1027,6 +1071,12 @@ class UIManager(QWidget):
             return
         margins = self.layout.contentsMargins()
         available = self.main_window.width() - margins.left() - margins.right()
+        # Two-tier cap for the centered bottom block: 960px on a maximised/very
+        # wide window, 800px otherwise (matches the chat text column). Only a
+        # maximum is set, so the window can still shrink freely.
+        column = getattr(self, "bottom_center_column", None)
+        if column is not None:
+            column.setMaximumWidth(self._content_max_width())
         single = available >= self._preferred_single_row_width()
         if single == self._toolbar_single_row:
             return

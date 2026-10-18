@@ -33,6 +33,29 @@ class ChatWidget(QAbstractScrollArea):
     retry_requested = Signal()
     continue_requested = Signal()
 
+    # Readable, centered text column. On windows wider than this the chat text
+    # stops stretching edge-to-edge and is centered with symmetric margins
+    # (mirrors opencode's ~800px content column); on narrower windows the text
+    # keeps the full available width.
+    MAX_CONTENT_WIDTH = 800
+    # On a maximised/very wide window the column may grow a little wider, but
+    # only once the window is near full-screen width. The trigger is a fraction
+    # of the screen width so it adapts to DPI scaling and monitor size (a fixed
+    # pixel value silently fails at 125%/150% scaling).
+    MAX_CONTENT_WIDTH_WIDE = 960
+    WIDE_CONTENT_SCREEN_RATIO = 0.9
+
+    @classmethod
+    def content_max_width(cls, window_width: int, screen_width=None) -> int:
+        """Pick the column cap for a window of ``window_width`` logical px."""
+        if screen_width is None:
+            app = QApplication.instance()
+            screen = app.primaryScreen() if app is not None else None
+            screen_width = screen.availableGeometry().width() if screen is not None else 0
+        if screen_width > 0 and window_width >= int(screen_width * cls.WIDE_CONTENT_SCREEN_RATIO):
+            return cls.MAX_CONTENT_WIDTH_WIDE
+        return cls.MAX_CONTENT_WIDTH
+
     def __init__(self, theme_manager, parent=None):
         super().__init__(parent)
         self.theme_manager = theme_manager
@@ -66,6 +89,32 @@ class ChatWidget(QAbstractScrollArea):
         if name:
             self.current_assistant_name = name
 
+    def _content_geometry(self):
+        """Return ``(x_offset, text_width)`` of the centered text column.
+
+        Narrow windows keep the full available width (x_offset 0, unchanged
+        behaviour); once the available width exceeds ``MAX_CONTENT_WIDTH`` the
+        column is capped and centered, leaving symmetric side margins.
+        """
+        viewport_width = self.viewport().width()
+        if viewport_width <= 0:
+            return 0, 0
+        margins = self.contentsMargins()
+        available = viewport_width - margins.left() - margins.right()
+        if available <= 0:
+            available = viewport_width
+        fn = getattr(self, "content_max_width_fn", None)
+        cap = fn() if fn is not None else self.content_max_width(self.window().width())
+        if available <= cap:
+            return 0, available
+        width = cap
+        # Center on the full column (viewport + scrollbar) so the text stays
+        # aligned with the centered input/toolbar block and does not jump a few
+        # pixels when the vertical scrollbar appears or disappears.
+        bar = self.verticalScrollBar()
+        extra = bar.width() if bar.isVisible() else 0
+        return (viewport_width + extra - width) // 2, width
+
     # --- Selection and Copying Logic ---
 
     def _get_selection_range(self):
@@ -82,7 +131,8 @@ class ChatWidget(QAbstractScrollArea):
         for i, msg in enumerate(self.messages):
             doc_height = msg['doc'].size().height()
             if current_y <= target_y < current_y + doc_height:
-                relative_pos = pos - QPoint(0, int(current_y - scroll_y))
+                x_offset, _ = self._content_geometry()
+                relative_pos = QPoint(pos.x() - x_offset, pos.y() - int(current_y - scroll_y))
                 layout = msg['doc'].documentLayout()
                 # Set the default text cursor for link interaction
                 self.viewport().setCursor(Qt.CursorShape.ArrowCursor)
@@ -107,7 +157,11 @@ class ChatWidget(QAbstractScrollArea):
                 msg_idx, _ = char_pos_tuple
                 scroll_value = self.verticalScrollBar().value()
                 sum_heights = sum(m['doc'].size().height() + self.document_margin for m in self.messages[:msg_idx])
-                relative_pos = pos_in_viewport - QPoint(0, int(-scroll_value + sum_heights))
+                x_offset, _ = self._content_geometry()
+                relative_pos = QPoint(
+                    pos_in_viewport.x() - x_offset,
+                    pos_in_viewport.y() - int(-scroll_value + sum_heights),
+                )
                 anchor = self.messages[msg_idx]['doc'].documentLayout().anchorAt(relative_pos)
 
                 if anchor and anchor.startswith("toggle:"):
@@ -437,13 +491,13 @@ class ChatWidget(QAbstractScrollArea):
             return
 
         scroll_position = 0
-        viewport_width = self.viewport().width() - (self.contentsMargins().left() + self.contentsMargins().right())
-        if viewport_width <= 0:
+        _, text_width = self._content_geometry()
+        if text_width <= 0:
             return
 
         for i in range(last_user_message_index):
             doc = self.messages[i]['doc']
-            doc.setTextWidth(viewport_width)
+            doc.setTextWidth(text_width)
             scroll_position += doc.size().height() + self.document_margin
 
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(scroll_position))
@@ -454,13 +508,13 @@ class ChatWidget(QAbstractScrollArea):
             return
 
         scroll_position = 0
-        viewport_width = self.viewport().width() - (self.contentsMargins().left() + self.contentsMargins().right())
-        if viewport_width <= 0:
+        _, text_width = self._content_geometry()
+        if text_width <= 0:
             return
 
         for i in range(len(self.messages) - 1):
             doc = self.messages[i]['doc']
-            doc.setTextWidth(viewport_width)
+            doc.setTextWidth(text_width)
             scroll_position += doc.size().height() + self.document_margin
 
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(scroll_position))
@@ -640,11 +694,11 @@ class ChatWidget(QAbstractScrollArea):
 
     def _calculate_content_height(self):
         content_height = 0
-        viewport_width = self.viewport().width() - (self.contentsMargins().left() + self.contentsMargins().right())
-        if viewport_width <= 0:
+        _, text_width = self._content_geometry()
+        if text_width <= 0:
             return 0
         for msg in self.messages:
-            msg['doc'].setTextWidth(viewport_width)
+            msg['doc'].setTextWidth(text_width)
             content_height += msg['doc'].size().height() + self.document_margin
         return content_height
 
@@ -661,12 +715,9 @@ class ChatWidget(QAbstractScrollArea):
             height_of_last_message = 0
             if self.messages:
                 last_msg_doc = self.messages[-1]['doc']
-                viewport_width = (
-                    self.viewport().width()
-                    - (self.contentsMargins().left() + self.contentsMargins().right())
-                )
-                if viewport_width > 0:
-                    last_msg_doc.setTextWidth(viewport_width)
+                _, text_width = self._content_geometry()
+                if text_width > 0:
+                    last_msg_doc.setTextWidth(text_width)
                 height_of_last_message = last_msg_doc.size().height() + self.document_margin
             pinning_scroll_pos = content_height - height_of_last_message
             standard_max_scroll = max(0, content_height - viewport_height)
@@ -683,13 +734,14 @@ class ChatWidget(QAbstractScrollArea):
         scroll_y = self.verticalScrollBar().value()
         start_sel, end_sel = self._get_selection_range()
         current_y = -scroll_y
+        x_offset, text_width = self._content_geometry()
         for i, msg in enumerate(self.messages):
             doc = msg['doc']
             doc_height = doc.size().height()
-            message_rect = QRect(0, int(current_y), self.viewport().width(), int(doc_height))
+            message_rect = QRect(x_offset, int(current_y), text_width, int(doc_height))
             if message_rect.intersects(event.rect()):
                 painter.save()
-                painter.translate(0, current_y)
+                painter.translate(x_offset, current_y)
                 ctx = QAbstractTextDocumentLayout.PaintContext()
                 ctx.palette = self.palette()
                 selections = []
