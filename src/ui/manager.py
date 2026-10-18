@@ -1230,10 +1230,10 @@ class UIManager(QWidget):
         unified pipeline with markdown detection OFF (deterministic escape)."""
         self.add_message(render_text(content, prefix_html, markdown_ok=False))
 
-    def add_message(self, html_content, force_scroll=False):
+    def add_message(self, html_content, force_scroll=False, keep_stream=False):
         if self.is_compact:
             force_scroll = True
-        self.chat_widget.add_message(html_content, force_scroll=force_scroll)
+        self.chat_widget.add_message(html_content, force_scroll=force_scroll, keep_stream=keep_stream)
 
     def add_image_to_history(self, image_bytes: bytes):
         if not image_bytes:

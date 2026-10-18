@@ -699,11 +699,20 @@ class AppController(QObject):
             return False
         logging.info(log_line)
         self.ui.add_message(notice_html, force_scroll=True)
-        self.ui.show_thinking_ui(True, message=thinking_msg)
         user_prompt, attachments, system_prompt, history, schema_name, tag, turn = self._last_llm_request
         if schema_name in ("terminal_tool_code", "browser_tool_code"):
             self._reenter_agent_mode(self.terminal_handler if schema_name == "terminal_tool_code"
                                      else self.browser_handler)
+        elif schema_name is None:
+            # Chat: route the response back to the chat handler and label the
+            # stream with the model doing the work now.
+            self._set_state(ControllerState.CHATTING)
+            self.current_handler = self.chat_handler
+            self.chat_handler._active_actor = self._get_current_model_name()
+        self.ui.show_thinking_ui(True, message=thinking_msg)
+        self.thinking_time = 0
+        self.thinking_timer.start(1000)
+        self._last_llm_error = False
         self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name, tag, turn)
         return True
 
@@ -831,25 +840,18 @@ class AppController(QObject):
     def _can_continue(self) -> bool:
         """Whether a 'Continue' link after a model switch makes sense.
 
-        True when a task is mid-flight: the last request errored, we are
-        chatting, or an agent handler (browser/terminal/vision) is off IDLE.
-        False for a fresh IDLE (e.g. switch after a finished task) to avoid
-        re-firing a completed request.
+        A model switch never aborts the in-flight request (it finishes on the
+        model that started it, and the new model takes over next turn), so
+        nothing needs resuming while a step is running. Continue is therefore
+        only offered when the last request actually stalled — it errored and
+        the thinking timer is no longer running. A fresh IDLE returns False to
+        avoid re-firing a completed request.
         """
         if not self._last_llm_request:
             return False
-        if self._last_llm_error:
-            return True
-        if self.state == ControllerState.CHATTING:
-            return True
-        for handler in (self.browser_handler, self.terminal_handler, self.vision_handler):
-            try:
-                state = getattr(handler, "state", None)
-                if state is not None and getattr(state, "name", "") != "IDLE":
-                    return True
-            except Exception:
-                continue
-        return False
+        if self.thinking_timer.isActive():
+            return False
+        return bool(self._last_llm_error)
 
     def handle_cancel_request(self):
         if self.llm_worker:
@@ -965,9 +967,10 @@ class AppController(QObject):
     def switch_model(self, provider_id: str, model_id: str, custom_notice: str | None = None):
         """Switches the active provider/model for this session only.
 
-        The change is kept in memory (no settings.json write). The in-flight
-        request is cancelled, histories and handler states are preserved, so
-        the new model picks up the task where the old one left off.
+        The change is kept in memory (no settings.json write). Any in-flight
+        request is left to finish on the model that started it; the new model
+        takes over from the next turn (same behaviour as opencode). Histories
+        and handler states are preserved.
         Provider tool schemas are per-mode static files loaded fresh by the
         new provider instance — no regeneration needed on switch.
 
@@ -987,11 +990,10 @@ class AppController(QObject):
                 and target.get("model") == model_id):
             return
         logging.info(f"Switching model (session-only): {all_settings.get('active_provider')} -> {provider_id} / {model_id}")
-        if self.llm_worker:
-            self.llm_worker.cancel()
-        self.thinking_timer.stop()
-        self.ui.stop_retry_countdown()
-        self.ui.show_thinking_ui(False)
+        # Never abort the in-flight request: a running reply/step finishes on
+        # the model that started it, and the new model takes over on the next
+        # turn (same behaviour as opencode). This avoids stranding the worker
+        # on providers whose streaming cannot be cancelled (e.g. Google).
         self.settings_manager.set_many({"active_provider": provider_id}, save=False)
         target["model"] = model_id
         self.settings = self.settings_manager.all()
@@ -1013,10 +1015,13 @@ class AppController(QObject):
             notice = (f"<i>Switched to <b>{title_string}</b> (this session only). "
                       f"Context preserved.</i>{CONTINUE_LINK}")
         else:
-            notice = (f"<i>Switched to <b>{title_string}</b> (this session only).</i>")
-        self.ui.add_message(notice, force_scroll=True)
-        # The switch cancels the in-flight reply; queued chat messages continue.
-        self._drain_chat_queue()
+            notice = (f"<i>Switched to <b>{title_string}</b> (this session only). "
+                      f"The new model takes over from your next message.</i>")
+        self.ui.add_message(notice, force_scroll=True, keep_stream=True)
+        # Only kick the queue when nothing is in flight; an in-flight reply
+        # drains it when it finishes, and start_chat would abort that reply.
+        if not self.thinking_timer.isActive():
+            self._drain_chat_queue()
 
     def _apply_mode_default_model(self, subsection: str):
         """Session-only fallback to the per-mode default model.

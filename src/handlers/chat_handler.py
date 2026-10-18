@@ -12,6 +12,9 @@ class ChatHandler:
         self.settings = controller.settings
         self.conversation_history = controller.conversation_history
         self._chat_seq = 0  # per-message counter for log correlation
+        # Model that started the current reply, so a mid-stream model switch
+        # never relabels an in-flight answer with the new model's name.
+        self._active_actor = None
 
     def start_chat(self, user_text: str, attachments: list):
         """Starts a new chat interaction."""
@@ -25,7 +28,8 @@ class ChatHandler:
             logging.info("New chat message during generation; previous request cancelled.")
         self.controller._set_state(ControllerState.CHATTING)
 
-        self.ui.show_thinking_ui(True, "Thinking")
+        self._active_actor = self.controller._get_current_model_name()
+        self.ui.show_thinking_ui(True, "Thinking", actor=self._active_actor)
         self.controller.thinking_time = 0
         self.controller.thinking_timer.start(1000)
 
@@ -52,7 +56,7 @@ class ChatHandler:
         # Model prose may be Markdown — render it (headings, lists, bold, code)
         # instead of dumping the raw syntax into the chat.
         from src.ui.text_render import render_text
-        model_name = self.controller._get_current_model_name()
+        model_name = self._active_actor or self.controller._get_current_model_name()
         final_html = render_text(
             full_response, prefix_html=f"<b>{model_name}:</b> ", markdown_ok=True)
 

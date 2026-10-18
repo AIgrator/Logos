@@ -425,10 +425,12 @@ class ChatWidget(QAbstractScrollArea):
             bar = self.verticalScrollBar()
             bar.setValue(bar.maximum())
 
-    def add_message(self, data, force_scroll=False):
-        if self.is_streaming:
-            self.is_streaming = False
-        self._streaming_msg = None
+    def add_message(self, data, force_scroll=False, keep_stream=False):
+        streaming_msg = self._streaming_msg
+        if not keep_stream:
+            if self.is_streaming:
+                self.is_streaming = False
+            self._streaming_msg = None
 
         was_at_bottom = self._is_at_bottom()
         doc = QTextDocument(self)
@@ -444,25 +446,33 @@ class ChatWidget(QAbstractScrollArea):
                 state=initial_state
             )
             doc.setHtml(html_content)
-            self.messages.append({
+            msg = {
                 'type': 'collapsible',
                 'id': block_id,
                 'state': initial_state,
                 'title': data.get('title', 'Details'),
                 'full_content': data.get('content', ''),
                 'doc': doc
-            })
+            }
         elif isinstance(data, str):
             html_content = data
             doc.setHtml(html_content)
-            self.messages.append({
+            msg = {
                 'type': 'simple',
                 'raw_content': html_content, # Store original HTML for user message check
                 'doc': doc
-            })
+            }
         else:
             logging.warning(f"ChatWidget received add_message with unknown data type: {type(data)}")
             return
+
+        if keep_stream and streaming_msg is not None and streaming_msg in self.messages:
+            # Insert before the in-flight reply so it keeps streaming into its
+            # own message and stays the last (growing) bubble. Used for notices
+            # shown while a reply is still arriving (e.g. a model switch).
+            self.messages.insert(self.messages.index(streaming_msg), msg)
+        else:
+            self.messages.append(msg)
 
         self._update_scroll_bar()
 
@@ -620,6 +630,7 @@ class ChatWidget(QAbstractScrollArea):
                 last_message['raw_content'] = new_content
                 last_message['doc'].setHtml(new_content)
                 last_message['is_status'] = True
+                last_message['actor'] = actor_name
                 last_message['plain'] = ''
             else:
                 if self.is_streaming:
@@ -629,7 +640,7 @@ class ChatWidget(QAbstractScrollArea):
                 doc.setHtml(initial_content)
                 msg = {'type': 'simple', 'doc': doc,
                        'raw_content': initial_content,
-                       'is_status': True, 'plain': ''}
+                       'is_status': True, 'plain': '', 'actor': actor_name}
                 self.messages.append(msg)
                 self._streaming_msg = msg
                 self.is_streaming = True
@@ -746,12 +757,16 @@ class ChatWidget(QAbstractScrollArea):
 
     def append_to_stream(self, text_chunk: str):
         was_at_bottom = self._is_at_bottom()
-        prefix = f"<b>{self.current_assistant_name}:</b> "
+        if self.is_streaming and self._streaming_msg is not None:
+            actor_name = self._streaming_msg.get('actor') or self.current_assistant_name
+        else:
+            actor_name = self.current_assistant_name
+        prefix = f"<b>{actor_name}:</b> "
         if not self.is_streaming or self._streaming_msg is None:
             doc = QTextDocument(self)
             doc.setHtml(prefix)
             msg = {'type': 'simple', 'doc': doc,
-                   'raw_content': prefix, 'plain': ''}
+                   'raw_content': prefix, 'plain': '', 'actor': actor_name}
             self.messages.append(msg)
             self._streaming_msg = msg
             self.is_streaming = True
@@ -766,8 +781,8 @@ class ChatWidget(QAbstractScrollArea):
         plain = last_message.get('plain', '')
         # The model sometimes echoes its own "Name:" header; drop it.
         stripped = text_chunk.lstrip()
-        if not plain and stripped.lower().startswith(self.current_assistant_name.lower() + ":"):
-            text_chunk = stripped[len(self.current_assistant_name) + 1:].lstrip()
+        if not plain and stripped.lower().startswith(actor_name.lower() + ":"):
+            text_chunk = stripped[len(actor_name) + 1:].lstrip()
 
         plain += text_chunk
         last_message['plain'] = plain
