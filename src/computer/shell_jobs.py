@@ -86,7 +86,13 @@ def build_shell_command(command: str):
                  + inner +
                  "; $__code = $LASTEXITCODE; if ($null -eq $__code) { $__code = 0 }; "
                  "if (($Error.Count -gt 0) -and ($__code -eq 0)) { $__code = 1 }; "
-                 "exit $__code")
+                 # Use $host.SetShouldExit, NOT `exit`: PowerShell renders object
+                 # output (tables) on an async output thread, and `exit` tears the
+                 # runspace down before it flushes — so `Get-ChildItem | Select-Object`
+                 # came back as a single blank line and the agent concluded a
+                 # non-empty folder was empty. SetShouldExit requests the same exit
+                 # code but lets the pipeline drain first.
+                 "$host.SetShouldExit($__code)")
         return (['powershell', '-NoProfile', '-NonInteractive', '-Command', inner],
                 'utf-8', extra)
     if sys.platform == "win32":
