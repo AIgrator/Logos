@@ -862,22 +862,37 @@ class AppController(QObject):
         self.ui.add_message("<i>Request cancelled.</i>", force_scroll=True)
 
         # If we are in vision mode, just reset the vision handler to IDLE
-        # but keep the controller in ASSISTING state. Otherwise, go back to global IDLE.
+        # but keep the controller in ASSISTING state. Otherwise, idle the active
+        # agent handler so a cancelled task does not stay EXECUTING-stalled —
+        # but keep the mode the user still has selected: Stop must NOT silently
+        # drop a Browser/Terminal session into chat (the next message would then
+        # run without tools, while the UI still shows e.g. "Browser").
         if self.state == ControllerState.VISION:
             self.vision_handler._set_state(VisionState.IDLE)
         else:
-            # Also idle agent handlers: otherwise a cancelled browser/terminal
-            # task stays EXECUTING-stalled and the next message would be
-            # misread as mid-task guidance instead of a fresh task.
             if self.state == ControllerState.BROWSER:
                 self.browser_handler._set_state(VisionState.IDLE)
             elif self.state == ControllerState.TERMINAL:
                 self.terminal_handler._set_state(VisionState.IDLE)
-            self._set_state(ControllerState.IDLE)
+            self._set_state(self._selected_mode_state())
 
         # Cancelling only stops the current reply; messages queued during it
         # still run (in order) on the next turn.
         self._drain_chat_queue()
+
+    def _selected_mode_state(self) -> ControllerState:
+        """ControllerState matching the mode currently selected in the UI.
+
+        Used after a cancel so the next message keeps going to the selected
+        handler (Browser/Terminal/Vision) instead of falling through to chat.
+        Plain chat maps to IDLE (chat starts from an idle controller).
+        """
+        mode = getattr(self.ui, "_active_mode_key", None)
+        return {
+            "terminal": ControllerState.TERMINAL,
+            "browser": ControllerState.BROWSER,
+            "vision": ControllerState.VISION,
+        }.get(mode, ControllerState.IDLE)
 
     def _get_current_model_name(self):
         """Gets the simple model name for use inside the chat UI."""
