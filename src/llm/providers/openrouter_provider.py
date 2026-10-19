@@ -152,15 +152,20 @@ class OpenRouterProvider(BaseLLMProvider):
 
         formatted_tools = []
         for name, schema_info in all_schemas.items():
-            params = schema_info.get("schema")
+            strict_schema = schema_info.get("strict_schema")
+            params = strict_schema or schema_info.get("schema")
             if params:
+                function = {
+                    "name": name,
+                    "description": schema_info.get("description", ""),
+                    "parameters": params
+                }
+                if strict_schema:
+                    # OpenRouter forwards `strict` to the upstream endpoint.
+                    function["strict"] = True
                 formatted_tools.append({
                     "type": "function",
-                    "function": {
-                        "name": name,
-                        "description": schema_info.get("description", ""),
-                        "parameters": params
-                    }
+                    "function": function
                 })
         self._tools_cache = formatted_tools
         return formatted_tools
@@ -241,12 +246,13 @@ class OpenRouterProvider(BaseLLMProvider):
                         "properties": {
                             "payload": original_parameters["properties"]["payload"]
                         },
-                        "required": ["payload"]
+                        "required": ["payload"],
+                        "additionalProperties": False
                     }
                     tool_to_send["function"]["parameters"] = corrected_parameters
 
                 request_body["tools"] = [tool_to_send]
-                request_body["tool_choice"] = {"type": "function", "function": {"name": schema_name}}
+                request_body["tool_choice"] = "required"
             else:
                 logging.warning(f"Schema '{schema_name}' requested but not found. Falling back to 'auto'.")
                 use_forced_tool = False

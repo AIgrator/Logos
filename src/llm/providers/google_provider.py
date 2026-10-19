@@ -602,6 +602,28 @@ class GoogleProvider(BaseLLMProvider):
     def _prepare_assistant_contents(self, prompt, attachments=None, history=None):
         return self._prepare_contents(prompt, attachments, history)
 
+    def _load_strict_schema(self, schema_name: str):
+        """Load the strict (constrained-decoding) schema for a response format."""
+        if not schema_name:
+            return None
+        for file_path in (
+            'cache/terminal/response_formats.json',
+            'cache/vision/response_formats.json',
+            'cache/browser/response_formats.json',
+        ):
+            try:
+                with open(file_path, encoding='utf-8') as f:
+                    schemas = json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                continue
+            except Exception as e:
+                logging.error(f"Failed to load '{file_path}' for strict schema: {e}")
+                continue
+            info = schemas.get(schema_name)
+            if info and info.get("strict_schema"):
+                return info["strict_schema"]
+        return None
+
     def _execute_get_response(self, prompt: str, attachments: list = None, system_prompt: str = None, history: list = None, schema_name: str = None):
         """
         Sends a non-streaming request to the Gemini API.
@@ -627,6 +649,11 @@ class GoogleProvider(BaseLLMProvider):
         if use_tool_calling:
             logging.info("Gemini Provider: Using modern structured output with response_mime_type.")
             generation_config_kwargs['response_mime_type'] = "application/json"
+            strict_schema = self._load_strict_schema(schema_name)
+            if strict_schema:
+                from src.computer.schemas.strict import to_google_schema
+                generation_config_kwargs['response_schema'] = to_google_schema(strict_schema)
+                logging.info("Gemini Provider: Enforcing strict response_schema.")
             contents = self._prepare_assistant_contents(prompt, attachments, history)
         else:
             logging.info("Gemini Provider: Using legacy JSON-in-text mode.")

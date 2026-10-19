@@ -182,7 +182,9 @@ class XAIProvider(BaseLLMProvider):
 
         formatted_tools = []
         for name, schema_info in all_schemas.items():
-            params = schema_info.get("schema")
+            # x.ai tool calling is implicitly strict, so feed it the strict
+            # (manifest-driven, fully typed) schema when available.
+            params = schema_info.get("strict_schema") or schema_info.get("schema")
             if params:
                 formatted_tools.append({
                     "type": "function",

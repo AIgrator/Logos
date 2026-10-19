@@ -392,6 +392,21 @@ class AnthropicProvider(BaseLLMProvider):
             action["keys"] = keys
         return action
 
+    # Anthropic compiles strict tool schemas into a grammar with a hard size
+    # budget: a single response envelope containing more than ~12 tool branches
+    # (and any request with too many strict tools) is rejected with a 400. When
+    # the union is too large we fall back to the unconstrained schema instead of
+    # failing the request.
+    ANTHROPIC_STRICT_MAX_BRANCHES = 12
+
+    @classmethod
+    def _strict_grammar_fits(cls, strict_schema: dict) -> bool:
+        try:
+            branches = strict_schema["properties"]["payload"]["properties"]["action"]["anyOf"]
+            return len(branches) <= cls.ANTHROPIC_STRICT_MAX_BRANCHES
+        except Exception:
+            return False
+
     def _get_tools_from_cache(self):
         if self._tools_cache is not None:
             return self._tools_cache
@@ -424,14 +439,33 @@ class AnthropicProvider(BaseLLMProvider):
 
         formatted_tools = []
         for name, schema_info in all_schemas.items():
-            params = schema_info.get("schema")
+            strict_schema = schema_info.get("strict_schema")
+            flat_schema = schema_info.get("strict_schema_flat")
+            params = strict_schema or schema_info.get("schema")
             if params:
+                strict_ok = False
+                from src.computer.schemas.strict import to_anthropic_schema
+                if strict_schema and self._strict_grammar_fits(strict_schema):
+                    # Anthropic rejects the OpenAI `["T","null"]` optional idiom.
+                    params = to_anthropic_schema(strict_schema)
+                    strict_ok = True
+                elif flat_schema:
+                    # The full union is too large for Anthropic's grammar budget
+                    # (e.g. browser/terminal: 17/23 branches). Fall back to the
+                    # single-branch action schema, which fits and keeps tool use
+                    # grammar-constrained instead of degrading to unconstrained.
+                    params = to_anthropic_schema(flat_schema)
+                    strict_ok = True
                 # Anthropic uses 'input_schema' instead of 'parameters'
-                formatted_tools.append({
+                tool = {
                     "name": name,
                     "description": schema_info.get("description", ""),
                     "input_schema": params
-                })
+                }
+                if strict_ok:
+                    # Grammar-constrained tool use: model must match the schema.
+                    tool["strict"] = True
+                formatted_tools.append(tool)
         self._tools_cache = formatted_tools
         return formatted_tools
 

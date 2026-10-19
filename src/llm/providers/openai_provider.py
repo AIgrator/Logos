@@ -340,15 +340,21 @@ class OpenAIProvider(BaseLLMProvider):
 
         formatted_tools = []
         for name, schema_info in all_schemas.items():
-            params = schema_info.get("schema")
+            strict_schema = schema_info.get("strict_schema")
+            params = strict_schema or schema_info.get("schema")
             if params:
                 # Create tool definitions compatible with Responses API (top-level name)
-                formatted_tools.append({
+                tool = {
                     "type": "function",
                     "name": name,
                     "description": schema_info.get("description", ""),
                     "parameters": params
-                })
+                }
+                if strict_schema:
+                    # Grammar-constrained decoding: the model must match the
+                    # schema exactly (tool name + fully typed arguments).
+                    tool["strict"] = True
+                formatted_tools.append(tool)
         self._tools_cache = formatted_tools
         return formatted_tools
 
@@ -450,7 +456,8 @@ class OpenAIProvider(BaseLLMProvider):
                     tool_to_send["parameters"] = {
                         "type": "object",
                         "properties": {"payload": params["properties"]["payload"]},
-                        "required": ["payload"]
+                        "required": ["payload"],
+                        "additionalProperties": False
                     }
 
                 # Validate name exists

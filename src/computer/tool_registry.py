@@ -30,6 +30,11 @@ if project_root not in sys.path:
 
 # Note: no static fallback text; generator writes strictly from src.computer.local_desktop_computer.TOOLS_METADATA
 
+# Bump when the shape of the generated response-format files changes so that
+# stale caches (which are otherwise only invalidated by manifest changes) are
+# rebuilt. v2: added `strict_schema`. v3: added `strict_schema_flat` (browser).
+SCHEMA_GEN_VERSION = 3
+
 
 class ToolRegistry:
     def __init__(self, settings_manager: SettingsManager):
@@ -135,8 +140,31 @@ class ToolRegistry:
                     from src.computer.schemas.terminal import generate_response_formats_dict
 
                 formats_dict = generate_response_formats_dict()
+
+                # Attach a strict (grammar-constrained) variant of the tool-call
+                # envelope, rebuilt from the manifests so the tool name and every
+                # argument is fully typed and closed. Providers that support
+                # constrained tool calling use this instead of `schema`.
+                if mode in ('terminal', 'browser') and formats_dict:
+                    try:
+                        from src.computer.schemas.strict import (
+                            build_strict_schema,
+                            build_strict_schema_flat,
+                        )
+                        meta = self._get_filtered_metadata(mode)
+                        if meta:
+                            for fname, fmt in formats_dict.items():
+                                fmt['strict_schema'] = build_strict_schema(
+                                    fname, meta, description=fmt.get('description'))
+                                # Browser tools all accept **kwargs, so the
+                                # single-branch fallback (which makes the model
+                                # over-fill harmless extras) is safe there.
+                                if mode == 'browser':
+                                    fmt['strict_schema_flat'] = build_strict_schema_flat(
+                                        fname, meta, description=fmt.get('description'))
+                    except Exception as e:
+                        logging.error(f"Failed to build strict schema for mode '{mode}': {e}", exc_info=True)
             except Exception as e:
-                import logging
                 logging.error(f"Failed to generate response formats for mode '{mode}': {e}", exc_info=True)
                 formats_dict = {}
 
@@ -176,6 +204,7 @@ class ToolRegistry:
                 meta = self._get_filtered_metadata(mode)
                 canonical = json.dumps(meta, sort_keys=True, default=str)
                 fingerprint[mode] = {
+                    "gen": SCHEMA_GEN_VERSION,
                     "tools": sorted(meta.keys()),
                     "digest": hashlib.md5(canonical.encode('utf-8')).hexdigest(),
                 }
