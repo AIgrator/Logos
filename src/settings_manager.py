@@ -169,7 +169,13 @@ class SettingsManager(QObject):
             "headless": False,
             "profile_dir": "cache/browser_profile",
             "default_timeout_ms": 30000,
-            "block_ads": True
+            "block_ads": True,
+            "max_steps": 50,
+            "max_task_seconds": 1800,
+            "allowed_domains": [],
+            "block_private_networks": True,
+            "require_approval": True,
+            "approval_timeout_seconds": 300
         },
         "terminal": {
             "shell_timeout_seconds": 60,

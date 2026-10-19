@@ -451,6 +451,29 @@ Cline/Cursor — контекст виден, переносится вмест�
       и click-навигации; `browser_close` чистит factory и pending-состояние
       (§14.2.3–14.2.4).
 
+**Статус: P0 + дешёвая часть P1 реализованы 2026-10-19.** Сделано: generation-
+токены и отмена ожиданий/goto (`stop()` не ждёт зависший Playwright-вызов, но
+старый результат гарантированно отбрасывается); окно approval для рискованных
+кликов/секретных полей/dialog-accept/закрытия вкладки (deny по таймауту и после
+Stop); бюджеты `max_steps`/`max_task_seconds`; `src/browser/policy.py`
+(http/https, резолв IP, private/loopback/metadata, allowlist, проверка каждого
+запроса/редиректа, маскировка URL); правила «контент страницы — данные» +
+обёртка `<untrusted_page_content>` + фильтр скрытого текста; flat-schema
+нормализация `wait_for`/`select_option`; редакция паролей/URL в UI и истории;
+сброс screenshot при навигации/`press`/`select`, обновление URL из фактического
+`page.url`, чистка pending-состояния в `close()`.
+Осталось (не блокирует контекст): SPA-мутация с тем же URL всё ещё может
+оставить stale refs; cross-origin переход и download-политика отдельно не
+подтверждаются; user-entry секретов и скрытие скриншота на password-поле — в
+§5.8/§14.3. Проверено юнит-тестами (policy/worker/approval/flat-schema),
+headless-Playwright (обычный https + отказ localhost/private) и автотестами
+через реальные `BrowserHandler`/`BrowserExecWorker`/`Executor`/`Brain`
+(`stop`, оба бюджета, redirect, dialog deny/allow, smoke, tabs, e2e на
+`gpt-6.1-sol`). Redirect-тест выявил, что `context.route` не видит 302: target
+localhost получал запрос. Добавлен CDP Fetch guard (`Fetch.requestPaused` ->
+`Fetch.failRequest` до соединения); после фикса target не contacted
+(`ERR_BLOCKED_BY_CLIENT`).
+
 *Проверка:* Stop реально останавливает навигацию/ожидание; рискованное действие
 требует подтверждения; пароль не попадает в историю; после `press`/перехода
 нельзя кликнуть по старому ref; нет скрытого ухода на private IP.
@@ -827,6 +850,10 @@ UTF-8, но цвета не снимает.
 > нас **совпадают** с индустрией — ядро не переписываем. Добавляем то, чего у
 > нас нет и что реально снижает риск/повышает устойчивость.
 
+**Статус (2026-10-19):** §14.1.1–14.1.5 и §14.2.1–14.2.4 (минимум) реализованы
+в рабочем дереве; детали и остатки — в статусе Блока 1b (§8). §14.3–14.4 —
+позже (Блок 6).
+
 ### 14.0 Что у нас уже есть (не трогаем)
 
 - **Ref-адресация по DOM**, не координаты (`_INTERACTIVE_SELECTOR`,
@@ -917,6 +944,10 @@ localhost/private IP, metadata-endpoint; редиректы и click-навиг�
 - Опциональный per-task allowlist доменов (как `allowed_domains` в browser-use /
   Playwright MCP); blocklist важнее allowlist (проверять первым).
 - Реализовать в едином `BrowserPolicy` + `context.route`, а не в промпте.
+- **Важно:** `context.route` не перехватывает редиректы (проверено: 302 на
+  `127.0.0.1` доходил до цели). Для каждого http(s)-запроса ставить CDP
+  `Fetch.enable`/`Fetch.requestPaused` и `Fetch.failRequest` до соединения;
+  `context.route` оставить вторым слоем (policy + adblock).
 - Понимать ограничение: allowlist — удобный guardrail, **не** граница
   безопасности; настоящая граница — egress-proxy/sandbox (§14.4.3).
 - Не логировать полный URL с query-токенами (`manager.py:238`) — маскировать

@@ -31,6 +31,7 @@ class ToolExecRelay(QObject):
     web_plan_a_failed = Signal(str)        # provider_display_name
     browser_finished = Signal(int, bool, str)  # ticket, ok, output-or-error text
     browser_error = Signal(int, str)           # ticket, error_message
+    browser_approval_needed = Signal(int, object)  # ticket, checks (list of dicts)
 
     def __init__(self, handler):
         super().__init__()
@@ -43,6 +44,7 @@ class ToolExecRelay(QObject):
         self.web_plan_a_failed.connect(self._forward_plan_a_failed)
         self.browser_finished.connect(self._forward_browser_finished)
         self.browser_error.connect(self._forward_browser_error)
+        self.browser_approval_needed.connect(self._forward_browser_approval)
 
     @Slot(int, object)
     def _forward_finished(self, ticket, result):
@@ -75,6 +77,10 @@ class ToolExecRelay(QObject):
     @Slot(int, str)
     def _forward_browser_error(self, ticket, error_message):
         self._handler._on_browser_error(ticket, error_message)
+
+    @Slot(int, object)
+    def _forward_browser_approval(self, ticket, checks):
+        self._handler._on_browser_approval(ticket, checks)
 
 
 class ToolExecWorker(QObject):

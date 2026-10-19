@@ -1,3 +1,4 @@
+from src.browser.policy import redact_url
 from src.computer.computer import tool_meta
 
 
@@ -44,7 +45,8 @@ def browser_goto(self, **kwargs):
         mgr = factory()
         self.browser_manager = mgr
     mgr.goto(url)
-    return _with_dialog_note(mgr, f"Opened {url}. Page title: '{mgr.title()}'. Take a fresh browser_snapshot before acting.")
+    opened = redact_url(mgr.last_known_url or url)
+    return _with_dialog_note(mgr, f"Opened {opened}. Page title: '{mgr.title()}'. Take a fresh browser_snapshot before acting.")
 
 
 @tool_meta(
@@ -323,4 +325,6 @@ def browser_close(self, **kwargs):
     if mgr is not None:
         mgr.close()
         self.browser_manager = None
+    if hasattr(self, "browser_factory"):
+        self.browser_factory = None
     return "Browser closed."

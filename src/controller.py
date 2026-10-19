@@ -871,6 +871,10 @@ class AppController(QObject):
             self.vision_handler._set_state(VisionState.IDLE)
         else:
             if self.state == ControllerState.BROWSER:
+                try:
+                    self.browser_handler._cleanup_task()
+                except Exception as e:
+                    logging.warning(f"Browser cancel cleanup failed: {e}")
                 self.browser_handler._set_state(VisionState.IDLE)
             elif self.state == ControllerState.TERMINAL:
                 self.terminal_handler._set_state(VisionState.IDLE)

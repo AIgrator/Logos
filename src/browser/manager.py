@@ -7,6 +7,10 @@ become the `dom` GroundingBackend without changing callers.
 """
 import logging
 import time
+from urllib.parse import urlsplit
+
+from .policy import (BrowserCancelledError, is_sensitive_text, redact_url,
+                     validate_url)
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +44,16 @@ class BrowserManager:
 
     def __init__(self, headless: bool = False, profile_dir: str = "cache/browser_profile",
                  timeout_ms: int = 30000, block_ads: bool = True,
-                 easylist_path: str | None = None):
+                 easylist_path: str | None = None, allowed_domains=None,
+                 block_private_networks: bool = True):
         self.headless = headless
         self.profile_dir = profile_dir
         self.timeout_ms = timeout_ms
         self.block_ads = block_ads
         self._easylist_path = easylist_path
+        self.allowed_domains = list(allowed_domains or [])
+        self.block_private_networks = bool(block_private_networks)
+        self._cancel_check = None
         self._ad_engine_obj = None  # lazy EasyListEngine (built on first use)
         self._pw = None
         self._browser = None
@@ -58,7 +66,63 @@ class BrowserManager:
         self._last_dialog = None  # last auto-dismissed dialog note
         self._last_dialog_result = None  # last armed-handling outcome note
         self._dialog_pages = set()  # id(page) with the dialog router installed
+        # CDP Fetch guard: Chromium/Playwright context.route does NOT see
+        # server redirects (verified: a 302 to 127.0.0.1 reached the target).
+        # Fetch.requestPaused sees the redirect request itself, so private/
+        # metadata targets are aborted before any connection is made.
+        self._guard_pages = set()  # id(page) with CDP Fetch enabled
+        self._guard_sessions = {}  # id(page) -> CDPSession
         self.last_known_url = ""  # plain-string URL cache, safe to read from any thread
+
+    # -- cancellation ---------------------------------------------------
+
+    def set_cancel_check(self, check) -> None:
+        """Installs a callable returning True when the current tool is stale.
+
+        Playwright's sync calls cannot be interrupted safely from another
+        thread, so long operations (waits, readiness polling, navigation
+        follow-ups) poll this between short slices instead.
+        """
+        self._cancel_check = check
+
+    def _check_cancel(self) -> None:
+        if self._cancel_check is None:
+            return
+        try:
+            stale = bool(self._cancel_check())
+        except Exception:
+            stale = False
+        if stale:
+            raise BrowserCancelledError("Browser action cancelled.")
+
+    def _sleep(self, seconds: float, slice_seconds: float = 0.1) -> None:
+        remaining = max(0.0, float(seconds))
+        while remaining > 0:
+            self._check_cancel()
+            step = min(slice_seconds, remaining)
+            time.sleep(step)
+            remaining -= step
+
+    def _wait_ready(self, page, timeout_seconds: float) -> None:
+        """Waits for DOMContentLoaded-ish readiness without blocking cancellation."""
+        deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+        while time.monotonic() < deadline:
+            self._check_cancel()
+            try:
+                state = page.evaluate("() => document.readyState")
+            except Exception:
+                state = ""
+            if state in ("interactive", "complete"):
+                return
+            self._sleep(0.1)
+        logger.debug("Page readiness wait timed out; continuing.")
+
+    def _validate(self, url: str) -> str:
+        return validate_url(
+            url,
+            allowed_domains=self.allowed_domains,
+            block_private_networks=self.block_private_networks,
+        )
 
     # -- lifecycle ------------------------------------------------------
 
@@ -73,6 +137,11 @@ class BrowserManager:
             args=["--disable-blink-features=AutomationControlled"],
         )
         pages = self._browser.pages
+        # Popups/new tabs get the CDP guard too, not only the active page.
+        try:
+            self._browser.on("page", self._install_navigation_guard)
+        except Exception as e:
+            logger.warning(f"Could not hook browser page events for URL guard: {e}")
         self._use_page(pages[0] if pages else self._browser.new_page())
         self._apply_ad_routing()
         logger.info(f"Browser launched (headless={self.headless}, block_ads={self.block_ads}).")
@@ -94,34 +163,123 @@ class BrowserManager:
         logger.info(f"Browser ad blocking {'enabled' if self.block_ads else 'disabled'}.")
 
     def _apply_ad_routing(self) -> None:
-        """Routes all requests through the EasyList decision (or removes routing)."""
+        """Routes all requests through URL policy (and EasyList when enabled).
+
+        Routing is always installed: redirects and subresources must not be
+        able to reach loopback/private hosts just because ad blocking is off.
+        """
         try:
             self._browser.unroute_all(behavior="wait")
         except Exception:
             pass
-        if not self.block_ads:
-            return
         try:
             self._browser.route("**/*", self._route_handler)
-            logger.info("Browser ad-request routing installed.")
+            logger.info("Browser request routing installed (policy%s).",
+                        " + adblock" if self.block_ads else "")
         except Exception as e:
-            logger.warning(f"Could not install ad-request routing: {e}")
+            logger.warning(f"Could not install request routing: {e}")
 
-    def _route_handler(self, route) -> None:
+    def _install_navigation_guard(self, page) -> None:
+        """Blocks policy-forbidden URLs at CDP Fetch level.
+
+        Required for redirects: Playwright's context.route() never fires for
+        the redirect target (only page.on("request") sees it, and that event
+        cannot abort). Fetch.requestPaused fires before the request leaves
+        the browser, including redirect hops, so 302 -> localhost/private IP
+        is stopped before any connection is attempted.
+        """
+        if page is None or self._browser is None or id(page) in self._guard_pages:
+            return
         try:
-            request = route.request
-            frame_url = ""
+            cdp = self._browser.new_cdp_session(page)
+            cdp.send("Fetch.enable", {"patterns": [
+                {"urlPattern": "http://*", "requestStage": "Request"},
+                {"urlPattern": "https://*", "requestStage": "Request"},
+            ]})
+
+            def _paused(event):
+                try:
+                    request_id = event.get("requestId")
+                    url = (event.get("request") or {}).get("url") or ""
+                    try:
+                        self._validate(url)
+                    except Exception as e:
+                        logger.warning(
+                            "Blocked browser request by URL policy (CDP): %s (%s)",
+                            redact_url(url)[:160], e)
+                        try:
+                            cdp.send("Fetch.failRequest", {
+                                "requestId": request_id,
+                                "errorReason": "BlockedByClient",
+                            })
+                        except Exception:
+                            pass
+                        return
+                    try:
+                        cdp.send("Fetch.continueRequest",
+                                 {"requestId": request_id})
+                    except Exception:
+                        pass
+                except Exception as e:
+                    logger.warning(f"CDP request guard failed: {e}")
+                    try:
+                        cdp.send("Fetch.continueRequest",
+                                 {"requestId": event.get("requestId")})
+                    except Exception:
+                        pass
+
+            cdp.on("Fetch.requestPaused", _paused)
+            self._guard_pages.add(id(page))
+            self._guard_sessions[id(page)] = cdp
+
+            def _forget_page():
+                self._guard_pages.discard(id(page))
+                self._guard_sessions.pop(id(page), None)
+                self._dialog_pages.discard(id(page))
+
             try:
-                frame_url = (request.frame.url or "") if request.frame else ""
+                page.on("close", _forget_page)
             except Exception:
                 pass
-            if self._ad_engine().should_block(
-                    request.url, request.resource_type, frame_url):
-                logger.debug(f"Blocked ad request: {request.url[:160]}")
-                route.abort()
-                return
+            logger.info("Browser CDP URL guard installed.")
         except Exception as e:
-            logger.warning(f"Ad route handler failed: {e}")
+            logger.warning(f"Could not install CDP URL guard: {e}")
+
+    def _route_handler(self, route) -> None:
+        request = None
+        try:
+            request = route.request
+            url = request.url or ""
+            # Defense in depth: CDP guard handles redirects (route never sees
+            # them), while this route still validates every request it does
+            # see. Both layers fail closed.
+            try:
+                if (urlsplit(url).scheme or "").lower() in ("http", "https"):
+                    self._validate(url)
+            except Exception as e:
+                logger.warning("Blocked browser request by URL policy: %s (%s)",
+                               redact_url(url)[:160], e)
+                try:
+                    route.abort()
+                except Exception:
+                    pass
+                return
+            if self.block_ads:
+                frame_url = ""
+                try:
+                    frame_url = (request.frame.url or "") if request.frame else ""
+                except Exception:
+                    pass
+                if self._ad_engine().should_block(
+                        url, request.resource_type, frame_url):
+                    logger.debug(f"Blocked ad request: {redact_url(url)[:160]}")
+                    try:
+                        route.abort()
+                    except Exception:
+                        pass
+                    return
+        except Exception as e:
+            logger.warning(f"Request route handler failed: {e}")
         try:
             route.continue_()
         except Exception:
@@ -142,6 +300,14 @@ class BrowserManager:
         self._refs = {}
         self._last_snapshot = []
         self._last_screenshot_path = None
+        self._pending_dialog = None
+        self._pending_tabs_note = None
+        self._last_dialog = None
+        self._last_dialog_result = None
+        self._dialog_pages = set()
+        self._guard_pages = set()
+        self._guard_sessions = {}
+        self.last_known_url = ""
 
     def _require_page(self):
         """Active page, launching (or relaunching after a manual close) as needed.
@@ -173,11 +339,12 @@ class BrowserManager:
         """Makes page the active one: timeouts, dialog router, refs expire."""
         self._page = page
         try:
-            self.last_known_url = page.url or ""
+            self.last_known_url = redact_url(page.url or "")
         except Exception:
             pass
         self._page.set_default_timeout(self.timeout_ms)
         self._install_dialog_router(page)
+        self._install_navigation_guard(page)
         self._refs = {}
         self._last_snapshot = []
         self._last_screenshot_path = None  # stale image is worse than none
@@ -233,14 +400,29 @@ class BrowserManager:
     # -- navigation -----------------------------------------------------
 
     def goto(self, url: str, wait: str = "domcontentloaded") -> None:
+        self._check_cancel()
+        url = self._validate(url)
         self.ensure_launched()
         page = self._require_page()
-        logger.info(f"Browser goto: {url}")
+        logger.info("Browser goto: %s", redact_url(url))
         self._refs = {}  # refs expire on every navigation
         self._last_snapshot = []
         self._last_screenshot_path = None
-        page.goto(url, wait_until=wait)
-        self.last_known_url = url
+        page.goto(url, wait_until="commit", timeout=self.timeout_ms)
+        self._check_cancel()
+        if wait == "load":
+            self._wait_ready(page, self.timeout_ms / 1000)
+        elif wait == "networkidle":
+            try:
+                page.wait_for_load_state("networkidle", timeout=self.timeout_ms)
+            except Exception:
+                pass
+        else:
+            self._wait_ready(page, self.timeout_ms / 1000)
+        try:
+            self.last_known_url = redact_url(page.url or url)
+        except Exception:
+            self.last_known_url = redact_url(url)
 
     def title(self) -> str:
         return self._require_page().title()
@@ -250,18 +432,63 @@ class BrowserManager:
 
     def read(self, max_chars: int = 3000) -> str:
         """Page title, URL and visible text (for answering 'what is here')."""
+        self._check_cancel()
         page = self._require_page()
-        try:
-            text = page.locator("body").inner_text(timeout=5000)
-        except Exception:
-            text = ""
+        text = self._visible_text(page)
+        if not text:
+            try:
+                text = page.locator("body").inner_text(timeout=5000)
+            except Exception:
+                text = ""
         text = " ".join(text.split())
-        return f"Title: {page.title()}\nURL: {page.url}\nText: {text[:max_chars]}"
+        return (f"Title: {page.title()}\nURL: {redact_url(page.url)}"
+                f"\nText: {text[:max_chars]}")
+
+    @staticmethod
+    def _visible_text(page) -> str:
+        """Text from rendered, non-hidden nodes (skips CSS-hidden/off-canvas).
+
+        inner_text already ignores display:none, but not visibility:hidden,
+        opacity:0, aria-hidden or elements parked far off-screen — which is
+        exactly where prompt-injection payloads like to hide.
+        """
+        try:
+            return page.evaluate("""() => {
+                const out = [];
+                const walker = document.createTreeWalker(
+                    document.body || document.documentElement,
+                    NodeFilter.SHOW_TEXT);
+                const hidden = (el) => {
+                    for (let p = el, hops = 0; p && hops < 6; p = p.parentElement, hops++) {
+                        const st = getComputedStyle(p);
+                        if (st.display === 'none' || st.visibility === 'hidden' ||
+                            st.visibility === 'collapse' || Number(st.opacity) === 0 ||
+                            p.getAttribute('aria-hidden') === 'true') return true;
+                        const r = p.getBoundingClientRect();
+                        if (r.width <= 0 || r.height <= 0) return true;
+                        if (r.right < -100 || r.left > 20000 || r.bottom < -100 ||
+                            r.top > 100000) return true;
+                    }
+                    return false;
+                };
+                let node;
+                while ((node = walker.nextNode())) {
+                    const t = (node.nodeValue || '').trim();
+                    if (!t) continue;
+                    const el = node.parentElement;
+                    if (!el || hidden(el)) continue;
+                    out.push(t);
+                }
+                return out.join(' ');
+            }""") or ""
+        except Exception:
+            return ""
 
     # -- grounding (ref snapshot) ----------------------------------------
 
     def snapshot(self, max_elements: int = 200) -> list:
         """Visible interactive elements as [{ref, role, name}]. Rebuilds refs."""
+        self._check_cancel()
         page = self._require_page()
         locators = page.locator(_INTERACTIVE_SELECTOR)
         count = min(locators.count(), max_elements)
@@ -295,7 +522,13 @@ class BrowserManager:
                         or "").strip()[:120]
                 ref = len(elements) + 1
                 self._refs[ref] = loc
-                elements.append({"ref": ref, "role": role, "name": name})
+                elements.append({
+                    "ref": ref, "role": role, "name": name,
+                    "type": input_type,
+                    "sensitive": bool(
+                        input_type == "password"
+                        or is_sensitive_text(name, explicit_role)),
+                })
             except Exception:
                 continue
         logger.info(f"Browser snapshot: {len(elements)} interactive elements.")
@@ -405,6 +638,17 @@ class BrowserManager:
         except Exception:
             return ""
 
+    def describe_ref(self, ref) -> dict:
+        """Snapshot metadata for a ref (plain data, safe off the page)."""
+        try:
+            wanted = int(ref)
+        except (TypeError, ValueError):
+            return {}
+        for element in self._last_snapshot:
+            if element.get("ref") == wanted:
+                return dict(element)
+        return {}
+
     def _ref(self, ref: int):
         try:
             return self._refs[int(ref)]
@@ -417,6 +661,7 @@ class BrowserManager:
     # -- actions ----------------------------------------------------------
 
     def click(self, ref: int) -> None:
+        self._check_cancel()
         loc = self._ref(ref)
         logger.info(f"Browser click ref={ref}")
         try:
@@ -435,6 +680,8 @@ class BrowserManager:
             # clicks: every second click died with "unknown ref").
             self._refs = {}
             self._last_snapshot = []
+            self._last_screenshot_path = None
+            self.last_known_url = redact_url(after_url)
         new_pages = [p for p in self._browser.pages if id(p) not in before]
         if new_pages:
             marks = []
@@ -465,7 +712,7 @@ class BrowserManager:
 
     def _tab_mark(self, url: str, title: str, opener_url: str = "") -> str:
         tag = " [AD?]" if self._looks_like_ad(url, title, opener_url) else ""
-        return f"{url[:120]!r} {title[:60]!r}{tag}"
+        return f"{redact_url(url)[:120]!r} {title[:60]!r}{tag}"
 
     def consume_tabs_note(self) -> str:
         """Returns and clears the new-tabs notice (called after actions)."""
@@ -473,6 +720,7 @@ class BrowserManager:
         return note
 
     def fill(self, ref: int, text: str) -> None:
+        self._check_cancel()
         loc = self._ref(ref)
         logger.info(f"Browser fill ref={ref} ({len(text)} chars)")
         loc.fill(text, timeout=self.timeout_ms)
@@ -480,13 +728,24 @@ class BrowserManager:
     def select_option(self, ref: int, value: str | None = None,
                       label: str | None = None, index: int | None = None) -> str:
         """Selects an option in a <select> dropdown (never use fill/click on selects)."""
+        self._check_cancel()
         loc = self._ref(ref)
+
+        def present(candidate):
+            if candidate is None:
+                return False
+            if isinstance(candidate, str) and not candidate.strip():
+                return False
+            return True
+
         kwargs = {}
-        if value is not None:
+        # Flat schemas can fill every branch with an empty string; a non-empty
+        # value must win over a placeholder label/index and vice versa.
+        if present(value):
             kwargs["value"] = value
-        elif label is not None:
+        elif present(label):
             kwargs["label"] = label
-        elif index is not None:
+        elif present(index):
             try:
                 kwargs["index"] = int(index)
             except (TypeError, ValueError) as e:
@@ -497,45 +756,86 @@ class BrowserManager:
         loc.select_option(timeout=self.timeout_ms, **kwargs)
         self._refs = {}  # a selection may submit/navigate: force a fresh snapshot
         self._last_snapshot = []
+        self._last_screenshot_path = None
         return f"Selected option {kwargs} in element ref={ref}."
 
     def hover(self, ref: int) -> None:
+        self._check_cancel()
         loc = self._ref(ref)
         logger.info(f"Browser hover ref={ref}")
         loc.hover(timeout=self.timeout_ms)
 
     def navigate_back(self) -> str:
+        self._check_cancel()
         page = self._require_page()
         logger.info("Browser navigate back")
-        page.go_back(wait_until="domcontentloaded")
+        page.go_back(wait_until="commit")
+        self._check_cancel()
+        self._wait_ready(page, self.timeout_ms / 1000)
         self._refs = {}
         self._last_snapshot = []
         self._last_screenshot_path = None
         try:
-            self.last_known_url = page.url or ""
+            current = redact_url(page.url or "")
+            self.last_known_url = current
         except Exception:
-            pass
-        return f"Went back. URL: {page.url}. Take a fresh browser_snapshot before acting."
+            current = ""
+        return f"Went back. URL: {current}. Take a fresh browser_snapshot before acting."
 
     def wait_for(self, seconds: float | None = None, text: str | None = None,
                  text_gone: str | None = None) -> str:
         """Waits for time (max 30s), text to appear, or text to disappear."""
+        self._check_cancel()
         page = self._require_page()
-        if seconds is not None:
+
+        def present(candidate):
+            if candidate is None:
+                return False
+            return not (isinstance(candidate, str) and not candidate.strip())
+
+        text = text if present(text) else None
+        text_gone = text_gone if present(text_gone) else None
+        # Flat strict schemas emit time=0 plus one text branch; the text
+        # branch is the real intent, so it must win over the time default.
+        if text or text_gone:
+            pass
+        elif seconds is not None:
             try:
                 wait = max(0.0, min(float(seconds), 30.0))
             except (TypeError, ValueError) as e:
                 raise ValueError(f"browser_wait_for: 'time' must be a number, got '{seconds}'.") from e
             logger.info(f"Browser wait {wait}s")
-            time.sleep(wait)
+            self._sleep(wait)
             return f"Waited {wait}s."
+        else:
+            raise ValueError("browser_wait_for needs one of: 'time', 'text', 'text_gone'.")
+
+        deadline = time.monotonic() + self.timeout_ms / 1000
         if text:
-            page.get_by_text(text).first.wait_for(timeout=self.timeout_ms)
-            return f"Text appeared: '{text}'."
-        if text_gone:
-            page.get_by_text(text_gone).first.wait_for(state="hidden", timeout=self.timeout_ms)
-            return f"Text disappeared: '{text_gone}'."
-        raise ValueError("browser_wait_for needs one of: 'time', 'text', 'text_gone'.")
+            logger.info("Browser wait for text: %r", text[:120])
+            while time.monotonic() < deadline:
+                self._check_cancel()
+                try:
+                    loc = page.get_by_text(text).first
+                    if loc.is_visible():
+                        return f"Text appeared: '{text}'."
+                except Exception:
+                    # Execution context can be destroyed by a navigation in
+                    # flight; retry until the deadline instead of failing.
+                    pass
+                self._sleep(0.1)
+            raise TimeoutError(f"Timed out waiting for text: '{text}'.")
+        logger.info("Browser wait for text to disappear: %r", text_gone[:120])
+        while time.monotonic() < deadline:
+            self._check_cancel()
+            try:
+                loc = page.get_by_text(text_gone).first
+                if not loc.is_visible():
+                    return f"Text disappeared: '{text_gone}'."
+            except Exception:
+                return f"Text disappeared: '{text_gone}'."
+            self._sleep(0.1)
+        raise TimeoutError(f"Timed out waiting for text to disappear: '{text_gone}'.")
 
     def handle_dialog(self, accept: bool = True, prompt_text: str | None = None) -> str:
         """Arms policy for the next JS dialog; reports recently seen ones."""
@@ -552,6 +852,7 @@ class BrowserManager:
     def tabs(self, action: str = "list", index: int | None = None,
              url: str | None = None) -> str:
         """Lists, opens, selects, or closes browser tabs. The model manages tabs itself."""
+        self._check_cancel()
         self.ensure_launched()
         action = (action or "list").lower()
         pages = list(self._browser.pages)
@@ -570,14 +871,19 @@ class BrowserManager:
                     purl, title = "", ""
                 ad_tag = " [AD?]" if self._looks_like_ad(purl, title, opener_url) else ""
                 mark = " (current)" if p == self._page else ""
-                lines.append(f"[{i}] {title} — {purl}{ad_tag}{mark}")
+                lines.append(f"[{i}] {title} — {redact_url(purl)}{ad_tag}{mark}")
             return "Open tabs:\n" + "\n".join(lines)
         if action == "new":
+            target_url = self._validate(url) if url else None
             page = self._browser.new_page()
-            if url:
-                page.goto(url, wait_until="domcontentloaded")
+            self._install_navigation_guard(page)
+            if target_url:
+                page.goto(target_url, wait_until="commit", timeout=self.timeout_ms)
+                self._check_cancel()
+                self._wait_ready(page, self.timeout_ms / 1000)
             self._use_page(page)
-            return f"Opened new tab. URL: {self._page.url}. Take a fresh browser_snapshot before acting."
+            return (f"Opened new tab. URL: {redact_url(self._page.url)}. "
+                    f"Take a fresh browser_snapshot before acting.")
         if action == "select":
             if index is None:
                 raise ValueError("browser_tabs select requires 'index'. Call action=list first.")
@@ -587,7 +893,7 @@ class BrowserManager:
                 raise ValueError(f"Unknown tab index '{index}'. Call action=list first.") from e
             self._use_page(page)
             return (f"Switched to tab [{int(index)}]. Title: '{page.title()}'. "
-                    f"URL: {page.url}. Take a fresh browser_snapshot before acting.")
+                    f"URL: {redact_url(page.url)}. Take a fresh browser_snapshot before acting.")
         if action == "close":
             if index is None:
                 target = self._page
@@ -602,14 +908,36 @@ class BrowserManager:
                 self._use_page(self._browser.new_page())
                 return "Closed the tab. No tabs left, opened a blank one."
             self._use_page(remaining[-1])
-            return f"Closed tab. Now on: {self._page.url}. Take a fresh browser_snapshot before acting."
+            return (f"Closed tab. Now on: {redact_url(self._page.url)}. "
+                    f"Take a fresh browser_snapshot before acting.")
         raise ValueError(f"Unknown browser_tabs action '{action}'. Use list/new/select/close.")
 
     def press(self, key: str) -> None:
+        self._check_cancel()
+        page = self._require_page()
         logger.info(f"Browser press key={key}")
-        self._require_page().keyboard.press(key)
+        try:
+            before = page.url
+        except Exception:
+            before = ""
+        page.keyboard.press(key)
+        self._check_cancel()
+        try:
+            after = page.url
+        except Exception:
+            after = ""
+        if after != before or (key or "").strip().lower() == "enter":
+            # Enter can submit a form without changing the URL; refs and the
+            # screenshot describe the pre-submit page and are now unsafe.
+            self._refs = {}
+            self._last_snapshot = []
+            self._last_screenshot_path = None
+            self.last_known_url = redact_url(after or before)
+            if after != before:
+                self._wait_ready(page, self.timeout_ms / 1000)
 
     def type_text(self, text: str) -> None:
+        self._check_cancel()
         logger.info(f"Browser type ({len(text)} chars)")
         self._require_page().keyboard.type(text)
 
@@ -670,6 +998,7 @@ class BrowserManager:
             pass
 
     def screenshot(self, path: str) -> str:
+        self._check_cancel()
         self._require_page()
         self._overlay_ref_badges()
         try:
@@ -680,11 +1009,14 @@ class BrowserManager:
 
     def capture_screenshot(self, prefix: str = "browser") -> str:
         """Saves a viewport screenshot, remembered once for the next LLM request."""
+        self._check_cancel()
         import os
         from datetime import datetime
         self.ensure_launched()
         os.makedirs("screenshots", exist_ok=True)
-        path = os.path.join("screenshots", f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.png")
+        path = os.path.join(
+            "screenshots",
+            f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png")
         self.screenshot(path)
         self._last_screenshot_path = path
         logger.info(f"Browser screenshot saved: {path}")
@@ -707,4 +1039,4 @@ class BrowserManager:
     # -- helpers ------------------------------------------------------------
 
     def wait_seconds(self, seconds: float) -> None:
-        time.sleep(max(0.0, seconds))
+        self._sleep(max(0.0, seconds))

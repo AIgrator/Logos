@@ -394,6 +394,10 @@ class BaseAgentHandler:
     def _cleanup_task(self):
         """Heir hook: release mode resources (browsers, threads, UI containers)."""
 
+    def _history_action(self, action: dict) -> dict:
+        """Heir hook: redact secrets before writing an action to history."""
+        return action
+
     # -- unified single-step loop ----------------------------------------
 
     def cancel_job_wait(self):
@@ -645,7 +649,10 @@ class BaseAgentHandler:
             )
             return
         self._last_action_sig = sig
-        command_str_for_llm = f"`{action_name}({json.dumps(action_args, ensure_ascii=False)})`"
+        history_action = self._history_action(action)
+        command_str_for_llm = (
+            f"`{history_action.get('name')}"
+            f"({json.dumps(history_action.get('arguments') or {}, ensure_ascii=False)})`")
         self.command_history.append(f"**Agent Command:** {command_str_for_llm}")
         try:
             result_text = self.execute_action(action)
