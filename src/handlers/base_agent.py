@@ -41,7 +41,8 @@ def _is_error_output(text) -> bool:
         return True
     if text.startswith("**Command Result:** (Exit Code:"):
         first_line = text.split("\n", 1)[0]
-        return "(Exit Code: 0)" not in first_line
+        match = re.search(r"Exit Code:\s*(-?\d+)", first_line)
+        return bool(match and match.group(1) != "0")
     # A finished background job that failed is a failure observation too —
     # otherwise successful polls keep resetting the streak and escalation
     # never fires while the loop circles a dead job.

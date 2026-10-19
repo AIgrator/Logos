@@ -173,7 +173,9 @@ class SettingsManager(QObject):
         },
         "terminal": {
             "shell_timeout_seconds": 60,
-            "shell_detach_seconds": 25
+            "shell_detach_seconds": 25,
+            "output_cap_chars": 20000,
+            "inactivity_timeout_seconds": 300
         },
         "context": {
             # Agent history compaction (browser mode). All defaults are

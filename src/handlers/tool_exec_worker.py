@@ -85,12 +85,18 @@ class ToolExecWorker(QObject):
         self.computer = computer
         self._relay = relay
         self._cancelled = False
+        self._min_ticket = 0
         self.dispatch.connect(self.run_tool)
 
     @Slot(int, str, dict)
     def run_tool(self, ticket: int, action_name: str, action_args: dict):
-        if self._cancelled:
+        if self._cancelled or ticket < self._min_ticket:
             logging.info(f"ToolExecWorker: ticket {ticket} ({action_name}) dropped, cancelled.")
+            if self._cancelled and ticket >= self._min_ticket:
+                # Never leave the handler with _tool_in_flight stuck: report
+                # the drop back so the loop can move on instead of hanging.
+                self._relay.error.emit(
+                    ticket, "Tool execution was cancelled before it started.")
             return
         logging.info(f"ToolExecWorker: ticket {ticket} running {action_name} "
                      f"on thread '{threading.current_thread().name}'.")
@@ -137,6 +143,11 @@ class ToolExecWorker(QObject):
 
     def cancel(self):
         self._cancelled = True
+
+    def reset(self, min_ticket: int = 0):
+        """Re-arms the worker for a new task and drops older queued tickets."""
+        self._min_ticket = max(self._min_ticket, min_ticket)
+        self._cancelled = False
 
 
 def _summarize(result, limit: int = 200) -> str:

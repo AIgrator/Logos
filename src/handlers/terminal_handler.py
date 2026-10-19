@@ -128,6 +128,8 @@ class TerminalHandler(BaseAgentHandler):
         self._exec_worker.moveToThread(self._exec_thread)
         self._exec_thread.start()
         self._exec_ticket = 0
+        self._exec_thread_restart_pending = False
+        self._abandoned_exec_workers = []
         self._pending_action_name = None
         self._pending_action_args = None
 
@@ -271,6 +273,7 @@ class TerminalHandler(BaseAgentHandler):
         except Exception:
             pass
         self._exec_ticket += 1
+        self._exec_worker.reset(self._exec_ticket)
         logging.info(f"TerminalHandler: dispatching ticket {self._exec_ticket} ({action_name}) to exec thread.")
         self._tool_in_flight = True
         self._exec_worker.dispatch.emit(self._exec_ticket, action_name, action_args)
@@ -370,9 +373,14 @@ class TerminalHandler(BaseAgentHandler):
             output = result.get('output', '')
             if status == 'done':
                 exit_code = result.get('exit_code', '?')
+                total_lines = result.get('total_lines')
+                lines_text = f", {total_lines} lines" if total_lines else ""
+                exit_note = result.get('exit_note')
+                note_text = f"\n**Note:** {exit_note}" if exit_note else ""
                 output_for_llm = (
                     f"**Tool Result:** Background job #{job_id} done (exit {exit_code}) "
-                    f"after {elapsed}s.\n```\n{output or '(no output)'}\n```"
+                    f"after {elapsed}s{lines_text}.{note_text}\n"
+                    f"```\n{output or '(no output)'}\n```"
                 )
                 title = f"Background job #{job_id}: done (exit {exit_code})"
             elif status == 'running':
@@ -402,13 +410,31 @@ class TerminalHandler(BaseAgentHandler):
             stdout = result.get('stdout', '')
             stderr = result.get('stderr', '')
             exit_code = result.get('exit_code', -1)
+            wall_time = result.get('wall_time')
+            total_lines = result.get('total_lines')
+            total_chars = result.get('total_chars')
+            exit_note = result.get('exit_note')
+            meta = []
+            if wall_time is not None:
+                meta.append(f"{wall_time}s")
+            if total_lines is not None:
+                meta.append(f"{total_lines} lines")
+            if total_chars is not None:
+                meta.append(f"{total_chars} chars")
+            meta_text = (", " + ", ".join(meta)) if meta else ""
+            header = f"**Command Result:** (Exit Code: {exit_code}{meta_text})\n"
+            if exit_note:
+                header += f"**Note:** {exit_note}\n"
             output_for_llm = (
-                f"**Command Result:** (Exit Code: {exit_code})\n"
-                f"**STDOUT:**\n```\n{stdout or '(empty)'}\n```\n"
-                f"**STDERR:**\n```\n{stderr or '(empty)'}\n```"
+                header
+                + f"**OUTPUT:**\n```\n{stdout or '(no output)'}\n```"
             )
-            title = f"Shell Command Output (Exit Code: {exit_code})"
-            content = f"STDOUT:\n{stdout}\n\nSTDERR:\n{stderr}"
+            if stderr:
+                output_for_llm += f"\n**SYSTEM:**\n```\n{stderr}\n```"
+            title = f"Shell Command Output (Exit Code: {exit_code}{meta_text})"
+            content = f"EXIT CODE: {exit_code}{meta_text}\n{stdout or '(no output)'}"
+            if stderr:
+                content += f"\n\nSYSTEM:\n{stderr}"
             output_for_ui = {'type': 'collapsible', 'title': title, 'content': content}
 
         elif tool_name in ['write_file', 'replace', 'replace_many']:
@@ -463,8 +489,43 @@ class TerminalHandler(BaseAgentHandler):
         return output_for_llm, output_for_ui
 
     def _ensure_exec_thread(self):
+        if self._exec_thread_restart_pending:
+            # The previous task was stopped while a tool was still running;
+            # quit() only ends the loop after that slot returns. Give it a
+            # bounded chance, then move to a fresh thread so a new task can
+            # never be queued into a loop that is about to exit.
+            if self._exec_thread.isRunning():
+                if not self._exec_thread.wait(3000):
+                    self._spawn_exec_thread()
+                    return
+            self._exec_thread_restart_pending = False
         if not self._exec_thread.isRunning():
             self._exec_thread.start()
+
+    def _spawn_exec_thread(self):
+        old_thread, old_worker = self._exec_thread, self._exec_worker
+        logging.warning("Terminal exec thread did not stop in time; replacing it.")
+        self._exec_thread = QThread()
+        self._exec_worker = ToolExecWorker(self.computer, self._exec_relay)
+        self._exec_worker.moveToThread(self._exec_thread)
+        self._exec_thread.start()
+        self._exec_thread_restart_pending = False
+        self._abandoned_exec_workers.append((old_thread, old_worker))
+        old_thread.finished.connect(
+            lambda t=old_thread, w=old_worker: self._retire_exec_worker(t, w))
+
+    def _retire_exec_worker(self, thread, worker):
+        try:
+            worker.deleteLater()
+        except Exception:
+            pass
+        try:
+            thread.deleteLater()
+        except Exception:
+            pass
+        self._abandoned_exec_workers = [
+            pair for pair in self._abandoned_exec_workers if pair[0] is not thread
+        ]
 
     def _running_jobs_note(self) -> str:
         try:
@@ -625,6 +686,7 @@ class TerminalHandler(BaseAgentHandler):
             self._exec_thread.quit()
             if not self._exec_thread.wait(2000):
                 logging.warning("Terminal exec thread did not stop in 2000ms.")
+                self._exec_thread_restart_pending = True
         if self.active_edit_path:
             self.ui.add_message(self.html_formatter.format_container_end())
             self.active_edit_path = None

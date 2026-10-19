@@ -1,5 +1,10 @@
 from src.computer.computer import tool_meta
-from src.computer.shell_jobs import resolve_shell_timeout, run_shell_command
+from src.computer.shell_jobs import (
+    resolve_inactivity_timeout,
+    resolve_output_cap,
+    resolve_shell_timeout,
+    run_shell_command,
+)
 from src.computer.tools.constants import SHELL_COMMAND_EXAMPLE
 
 @tool_meta(
@@ -11,7 +16,8 @@ from src.computer.tools.constants import SHELL_COMMAND_EXAMPLE
             "tokens {DESKTOP}, {HOME}, {WORKDIR}, {DOCUMENTS}, {DOWNLOADS}, expanded by the executor. "
             "Foreground commands stream live progress and are killed by the shell timeout. For anything that may run "
             "longer than ~30 seconds (large copies, builds, downloads) set run_in_background=true: it returns a job_id "
-            "at once, then alternate wait_seconds and poll_shell_job until status is done. Returns stdout, stderr and exit code."),
+            "at once, then alternate wait_seconds and poll_shell_job until status is done. Returns merged stdout+stderr, "
+            "exit code and timing. Huge output is kept as head+tail; the full text is saved to a file and its path is returned."),
         "arguments": {
             "command": {"type": "STRING", "description": f"The command line to execute (e.g., {SHELL_COMMAND_EXAMPLE}).", "required": True},
             "run_in_background": {"type": "BOOLEAN", "description": "Set true for long-running commands. Returns {job_id, status} immediately instead of blocking.", "required": False}
@@ -20,9 +26,14 @@ from src.computer.tools.constants import SHELL_COMMAND_EXAMPLE
             "type": "OBJECT",
             "description": "A dictionary containing the command's output (foreground) or the background job handle.",
             "properties": {
-                "stdout": {"type": "STRING", "description": "The standard output of the command."},
-                "stderr": {"type": "STRING", "description": "The standard error output. Empty if no errors."},
+                "stdout": {"type": "STRING", "description": "Merged stdout+stderr, with head+tail truncation for huge output."},
+                "stderr": {"type": "STRING", "description": "System diagnostics only (timeout, cancellation, input blocking)."},
                 "exit_code": {"type": "INTEGER", "description": "The exit code of the process. 0 typically means success."},
+                "wall_time": {"type": "NUMBER", "description": "Elapsed seconds."},
+                "total_lines": {"type": "INTEGER", "description": "Line count before truncation."},
+                "total_chars": {"type": "INTEGER", "description": "Character count before truncation."},
+                "output_file": {"type": "STRING", "description": "Path to the full output when it exceeded the inline cap."},
+                "exit_note": {"type": "STRING", "description": "Non-fatal note, e.g. exit 1 from grep/diff."},
                 "job_id": {"type": "INTEGER", "description": "Background job handle (only when run_in_background is true)."},
                 "status": {"type": "STRING", "description": "Background job status (only when run_in_background is true)."}
             }
@@ -40,11 +51,16 @@ def execute_shell(self, command: str, run_in_background: bool = False) -> dict:
 
     settings_manager = getattr(self, "settings_manager", None)
     timeout = resolve_shell_timeout(settings_manager)
+    output_limit = resolve_output_cap(settings_manager)
+    inactivity_timeout = resolve_inactivity_timeout(settings_manager)
     manager = getattr(self, "shell_jobs", None)
     if run_in_background:
         if manager is None:
             raise RuntimeError("Background shell jobs are not available.")
-        return manager.launch(command, self.working_directory, timeout)
+        return manager.launch(
+            command, self.working_directory, timeout,
+            output_limit=output_limit,
+            inactivity_timeout=inactivity_timeout)
 
     if manager is not None:
         # Safety net for misjudged durations: a foreground call that runs
@@ -67,6 +83,8 @@ def execute_shell(self, command: str, run_in_background: bool = False) -> dict:
             # Captured once: a newer run may replace the shared callback, but this
             # run keeps reporting under its own ticket (stale ones are dropped).
             progress_cb=getattr(self, "progress_callback", None),
+            output_limit=output_limit,
+            inactivity_timeout=inactivity_timeout,
         )
 
     return run_shell_command(
@@ -75,4 +93,6 @@ def execute_shell(self, command: str, run_in_background: bool = False) -> dict:
         timeout,
         cancel_event=getattr(self, "cancel_event", None),
         progress_cb=getattr(self, "progress_callback", None),
+        output_limit=output_limit,
+        inactivity_timeout=inactivity_timeout,
     )
