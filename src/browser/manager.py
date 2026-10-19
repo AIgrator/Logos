@@ -144,14 +144,30 @@ class BrowserManager:
         self._last_screenshot_path = None
 
     def _require_page(self):
+        """Active page, launching (or relaunching after a manual close) as needed.
+
+        Every tool funnels through this, so a browser the user closed by hand is
+        transparently brought back here instead of failing on the first action
+        that happens not to call ``ensure_launched`` (e.g. browser_read/title).
+        """
+        self.ensure_launched()
         if self._page is None:
             raise RuntimeError("Browser is not launched. Call launch() first.")
         return self._page
 
     def ensure_launched(self) -> None:
-        """Launch on first use (idempotent). Tools call this, not launch()."""
+        """Launch on first use and recover if the browser was closed by hand."""
         if self._page is None:
             self.launch()
+            return
+        try:
+            if not self._page.is_closed():
+                return
+        except Exception:
+            pass
+        logger.warning("Browser page/context was closed; relaunching a fresh one.")
+        self.close()
+        self.launch()
 
     def _use_page(self, page) -> None:
         """Makes page the active one: timeouts, dialog router, refs expire."""
