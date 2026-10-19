@@ -1148,13 +1148,22 @@ class AppController(QObject):
         self._activate_chat_mode()
 
     def _handle_stop(self):
+        """Stops the running work but keeps the mode the user has selected.
+
+        Stop (title-bar button) is a stronger version of the toolbar Cancel: it
+        also stops the mode's agent (a Vision task, or a frozen Browser/Terminal
+        session). Like Cancel it must NOT silently drop a Browser/Terminal/
+        Vision session into chat — the next message should still run with the
+        selected handler and its tools. So we reuse the cancel path, which idles
+        the active handler and restores ``_selected_mode_state()``.
+        """
         if self.state == ControllerState.VISION:
             self.vision_handler.stop()
         else:
             paused_agent = self._paused_agent()
             if paused_agent is not None:
                 paused_agent.stop()
-        self._activate_chat_mode() # Fallback to chat mode after stopping
+        self.handle_cancel_request()
 
     def _paused_agent(self):
         """Browser/terminal handler frozen in PAUSED, or None.
