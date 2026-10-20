@@ -479,10 +479,34 @@ class SettingsWindow(QDialog):
         scan_button.clicked.connect(self.force_scan_and_populate)
         layout.addWidget(scan_button)
 
+        filter_row = QHBoxLayout()
+        self.show_selected_apps_checkbox = QCheckBox("Show only selected applications")
+        self.show_selected_apps_checkbox.setToolTip(
+            "Hide unselected apps so the checked ones are easy to find. "
+            "Turn this off to browse and select from all installed apps.")
+        self.show_selected_apps_checkbox.toggled.connect(
+            self._apply_apps_filter)
+        filter_row.addWidget(self.show_selected_apps_checkbox)
+        filter_row.addStretch()
+        self.apps_count_label = QLabel()
+        self.apps_count_label.setStyleSheet("color: #9E9E9E;")
+        filter_row.addWidget(self.apps_count_label)
+        layout.addLayout(filter_row)
+
         self.apps_list_widget = QListWidget()
         self.apps_list_widget.setToolTip("Select the applications the assistant may launch directly. Enable the Vision restriction checkbox to also limit interaction to this list.")
         self.apps_list_widget.setFixedHeight(250) # Set a fixed height for the list
+        self.apps_list_widget.itemChanged.connect(self._on_app_item_changed)
         layout.addWidget(self.apps_list_widget)
+
+        self.apps_empty_label = QLabel(
+            "No applications selected. Uncheck 'Show only selected "
+            "applications' to choose from all installed apps.")
+        self.apps_empty_label.setStyleSheet(
+            "color: #9E9E9E; font-style: italic;")
+        self.apps_empty_label.setWordWrap(True)
+        self.apps_empty_label.setVisible(False)
+        layout.addWidget(self.apps_empty_label)
 
         return group
 
@@ -496,18 +520,51 @@ class SettingsWindow(QDialog):
         allowed_apps = self.settings_manager.get('allowed_apps', [])
         allowed_app_ids = {AppScanner._get_unique_app_id(app) for app in allowed_apps}
 
-        self.apps_list_widget.clear()
-        for app in all_apps:
-            item = QListWidgetItem(app['name'])
-            item.setData(Qt.UserRole, app)
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+        self.apps_list_widget.blockSignals(True)
+        try:
+            self.apps_list_widget.clear()
+            for app in all_apps:
+                item = QListWidgetItem(app['name'])
+                item.setData(Qt.UserRole, app)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
 
-            app_id = AppScanner._get_unique_app_id(app)
-            if app_id in allowed_app_ids:
-                item.setCheckState(Qt.Checked)
-            else:
-                item.setCheckState(Qt.Unchecked)
-            self.apps_list_widget.addItem(item)
+                app_id = AppScanner._get_unique_app_id(app)
+                if app_id in allowed_app_ids:
+                    item.setCheckState(Qt.Checked)
+                else:
+                    item.setCheckState(Qt.Unchecked)
+                self.apps_list_widget.addItem(item)
+        finally:
+            self.apps_list_widget.blockSignals(False)
+
+        self.show_selected_apps_checkbox.blockSignals(True)
+        self.show_selected_apps_checkbox.setChecked(False)
+        self.show_selected_apps_checkbox.blockSignals(False)
+        self._apply_apps_filter()
+
+    def _on_app_item_changed(self, _item):
+        """Keeps the selected-only view and counter in sync."""
+        self._apply_apps_filter()
+
+    def _apply_apps_filter(self, _checked=None):
+        """Hides unselected rows without dropping their selection state."""
+        only_selected = self.show_selected_apps_checkbox.isChecked()
+        selected = 0
+        visible = 0
+        for index in range(self.apps_list_widget.count()):
+            item = self.apps_list_widget.item(index)
+            is_selected = item.checkState() == Qt.Checked
+            if is_selected:
+                selected += 1
+            hidden = only_selected and not is_selected
+            item.setHidden(hidden)
+            if not hidden:
+                visible += 1
+
+        total = self.apps_list_widget.count()
+        self.apps_count_label.setText(f"Selected: {selected} / {total}")
+        self.apps_empty_label.setVisible(
+            only_selected and total > 0 and visible == 0)
 
     def load_apps_from_cache(self):
         """Loads applications from cache or settings."""
