@@ -664,12 +664,17 @@ class CuaTurnWorker(QThread):
                 # Re-check with the CURRENT foreground window: a previous
                 # action may have opened a terminal, UAC prompt or payment
                 # page that was not visible when the batch was approved.
+                point_getter = getattr(
+                    self._handler, "cua_screen_point", None)
+                screen_point = (point_getter(action)
+                                if callable(point_getter) else None)
                 now_checks = classify_action(
                     action, self._handler.cua_context(action),
                     allowed_apps=self._handler.cua_gate_apps(),
                     shell_allowed=self._handler._cua_shell_allowed(),
                     system_surfaces_allowed=(
                         self._handler._cua_system_surfaces_allowed()),
+                    screen_point=screen_point,
                     action_index=index)
                 hard_now = [c for c in now_checks if c.get("hard")]
                 if hard_now:
@@ -895,13 +900,20 @@ class VisionHandler(BaseAgent):
         except Exception:
             return float(MAX_WAIT_SECONDS)
 
+    def cua_screen_point(self, action=None):
+        """Screenshot point scaled to real screen coordinates, if any."""
+        point = action_point(action) if action is not None else None
+        if point is None:
+            return None
+        scale = getattr(self, "_shot_scale", 1.0) or 1.0
+        return (point[0] * scale, point[1] * scale)
+
     def cua_context(self, action=None) -> dict:
         """Window context under the action point (or the foreground)."""
         try:
-            point = action_point(action) if action is not None else None
+            point = self.cua_screen_point(action)
             if point is not None:
-                scale = getattr(self, "_shot_scale", 1.0) or 1.0
-                return active_window(point[0] * scale, point[1] * scale)
+                return active_window(*point)
             return active_window()
         except Exception as e:
             logging.warning(f"window context probe failed: {e}")
@@ -930,6 +942,7 @@ class VisionHandler(BaseAgent):
                 action, self.cua_context(action),
                 allowed_apps=allowed, shell_allowed=shell_allowed,
                 system_surfaces_allowed=system_surfaces_allowed,
+                screen_point=self.cua_screen_point(action),
                 action_index=index))
         return checks
 

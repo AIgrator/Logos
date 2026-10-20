@@ -292,6 +292,68 @@ def _app_tokens(app) -> set[str]:
     return tokens
 
 
+def _action_keys(action: dict) -> set[str]:
+    keys = action.get("keys") or action.get("key")
+    if isinstance(keys, str):
+        keys = [keys]
+    out: set[str] = set()
+    for key in keys or []:
+        for part in re.split(r"[+\s]+", str(key).strip().lower()):
+            if part:
+                out.add(part)
+    return out
+
+
+def _is_run_dialog_hotkey(action: dict) -> bool:
+    kind = str(action.get("type") or "").lower()
+    if kind not in ("hotkey", "keypress"):
+        return False
+    keys = _action_keys(action)
+    win = bool(keys & {"win", "meta", "lwin", "rwin", "windows"})
+    return win and "r" in keys
+
+
+def _is_start_button_point(x: float, y: float) -> bool:
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("rcMonitor", wintypes.RECT),
+                ("rcWork", wintypes.RECT),
+                ("dwFlags", wintypes.DWORD),
+            ]
+
+        user32 = ctypes.windll.user32
+        point = wintypes.POINT(int(x), int(y))
+        hmon = user32.MonitorFromPoint(point, 2)  # MONITOR_DEFAULTTONEAREST
+        if not hmon:
+            return False
+        info = MONITORINFO()
+        info.cbSize = ctypes.sizeof(info)
+        if not user32.GetMonitorInfoW(hmon, ctypes.byref(info)):
+            return False
+        mon, work = info.rcMonitor, info.rcWork
+        if not (mon.left <= x < mon.right and mon.top <= y < mon.bottom):
+            return False
+        margin = 120
+        if work.bottom < mon.bottom and y >= work.bottom and x <= work.left + margin:
+            return True
+        if work.top > mon.top and y < work.top and x <= work.left + margin:
+            return True
+        if work.left > mon.left and x < work.left and y <= work.top + margin:
+            return True
+        if work.right < mon.right and x >= work.right and y <= work.top + margin:
+            return True
+    except Exception as e:
+        logging.warning(f"taskbar probe failed: {e}")
+    return False
+
+
 def _app_allowed(context: dict, allowed_apps, *,
                  system_surfaces_allowed: bool = False) -> bool:
     """Whether the foreground app is inside the configured allowlist.
@@ -301,14 +363,14 @@ def _app_allowed(context: dict, allowed_apps, *,
     and use file dialogs; everything else must match a selected app.
     """
     apps = [a for a in (allowed_apps or []) if a]
-    if not apps:
-        return True
     process = _basename(context.get("process"))
     title = str(context.get("title") or "").lower()
     aumid = str(context.get("aumid") or "").strip().lower()
     if context.get("own") or process in ("explorer.exe", "explorer"):
         return True
-    if system_surfaces_allowed and process in _WINDOWS_SHELL_PROCESSES:
+    if process in _WINDOWS_SHELL_PROCESSES:
+        return bool(system_surfaces_allowed)
+    if not apps:
         return True
     if not process and not title and not aumid:
         return False
@@ -389,6 +451,7 @@ def _check(code: str, message: str, *, hard: bool = False,
 def classify_action(action: dict, context: dict | None = None, *,
                     allowed_apps=None, shell_allowed: bool = False,
                     system_surfaces_allowed: bool = False,
+                    screen_point=None,
                     action_index: int = 0) -> list[dict]:
     """Returns hard blocks and approval checks for one structured action."""
     if not isinstance(action, dict):
@@ -400,6 +463,23 @@ def classify_action(action: dict, context: dict | None = None, *,
     title = str(context.get("title") or "")
     text = _action_text(action)
     checks: list[dict] = []
+
+    if not system_surfaces_allowed:
+        if _is_run_dialog_hotkey(action):
+            checks.append(_check(
+                "system_surface_blocked",
+                "Windows Search / Start menu is disabled in Vision settings; "
+                "refusing Win+R.",
+                hard=True, action_index=action_index))
+        if (screen_point is not None
+                and kind in ("click", "double_click", "triple_click",
+                             "left_mouse_down", "left_mouse_up")
+                and _is_start_button_point(*screen_point)):
+            checks.append(_check(
+                "system_surface_blocked",
+                "Windows Search / Start menu is disabled in Vision settings; "
+                "refusing the taskbar Start button.",
+                hard=True, action_index=action_index))
 
     mutating = kind in _APP_LAUNCH_TYPES
     if mutating and not _app_allowed(
