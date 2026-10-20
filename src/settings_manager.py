@@ -161,8 +161,15 @@ class SettingsManager(QObject):
             "post_action_delay_ms": 1000,
             "max_correction_attempts": 3,
             "allow_shell_commands": False,
+            "allow_system_surfaces": False,
+            "restrict_to_allowed_apps": False,
             "grounding_backend": "local",
             "max_turns_per_task": 20,
+            "max_task_seconds": 1800,
+            "max_actions_per_turn": 20,
+            "action_timeout_seconds": 30,
+            "max_wait_seconds": 30,
+            "debug_screenshot_retention_days": 7,
             "screenshot_max_width": 1600
         },
         "browser": {

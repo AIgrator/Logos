@@ -18,23 +18,40 @@ def launch_app(self, **kwargs):
     if not app_name:
         raise ValueError("Action 'launch_app' failed: Missing required 'app_name' argument. Example: {'name': 'launch_app', 'arguments': {'description': 'Open calculator', 'app_name': 'Calculator'}}")
 
-    allowed_apps = kwargs.get('allowed_apps_list')
+    apps = list(kwargs.get('allowed_apps_list') or [])
     launcher = kwargs.get('app_launcher')
+    restrict = False
+    try:
+        config = (self.settings_manager.get("vision", {}) or {}
+                  if self.settings_manager else {})
+        restrict = bool(config.get("restrict_to_allowed_apps", False))
+    except Exception:
+        restrict = False
 
-    if allowed_apps is None or launcher is None:
-        raise ValueError("launch_app requires 'allowed_apps_list' and 'app_launcher' to be provided internally.")
+    if launcher is None:
+        from src.apps.launcher import CrossPlatformAppLauncher
+        launcher = CrossPlatformAppLauncher()
+
+    if not restrict:
+        try:
+            from src.apps.installed_apps import AppScanner
+            apps = AppScanner(self.settings_manager).get_cached_or_scanned_apps()
+        except Exception as e:
+            logging.warning(f"Could not load the application catalog: {e}")
 
     try:
         logging.info(f"Attempting to launch application with exact name: '{app_name}'")
 
-        if not allowed_apps:
-            raise RuntimeError("The list of allowed applications is empty.")
+        if not apps:
+            raise RuntimeError(
+                "No applications are available. Select apps in Applications "
+                "or scan for installed applications.")
 
-        matched_app = next((app for app in allowed_apps if app['name'].lower() == app_name.lower()), None)
+        matched_app = next((app for app in apps if app['name'].lower() == app_name.lower()), None)
 
         if not matched_app:
-            available_apps = [app['name'] for app in allowed_apps]
-            raise FileNotFoundError(f"Application '{app_name}' not found in the allowed list. Available apps: {available_apps}")
+            available_apps = [app['name'] for app in apps]
+            raise FileNotFoundError(f"Application '{app_name}' not found. Available apps: {available_apps}")
 
         launcher.launch(matched_app)
         logging.info(f"Successfully issued launch command for '{app_name}'.")

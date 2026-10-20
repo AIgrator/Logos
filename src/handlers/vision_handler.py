@@ -23,9 +23,13 @@ import time
 from PySide6.QtCore import QThread, Signal
 
 from states import VisionState
+from src.browser.policy import is_sensitive_text
 from src.computer.computer import Computer
 from src.computer.input_access import InputBlockedError
 from src.computer.tools.constants import KEYBOARD_KEYS
+from src.computer.vision_policy import (action_point, active_window,
+                                        classify_action, redact_action,
+                                        redact_answer)
 from src.handlers.base_agent import (
     BaseAgentHandler as BaseAgent,
     _is_error_output,
@@ -40,7 +44,19 @@ from src.handlers.base_agent import (
 # ---------------------------------------------------------------------------
 
 MAX_CUA_TURNS = 20
+MAX_TASK_SECONDS = 1800
+MAX_ACTIONS_PER_TURN = 20
+ACTION_TIMEOUT_SECONDS = 30
+MAX_WAIT_SECONDS = 30
 NETWORK_HINT = "cua-turn"
+
+
+class CuaActionCancelledError(Exception):
+    """Raised inside an action when Stop/Pause superseded it."""
+
+
+class CuaBudgetExceededError(Exception):
+    """Raised when the wall-clock or per-turn action budget is exhausted."""
 
 # The only kwargs computer_use_turn() accepts. The worker request dict may
 # carry extra local meta (tag, turn_no, debug_flags, ...); the allowlist
@@ -113,8 +129,49 @@ def describe_action(action: dict) -> str:
         return f"keypress({','.join(action.get('keys', []))})"
     if kind == "type":
         text = str(action.get("text", ""))
-        return f"type({text[:40]!r})"
+        return f"type(<redacted:{len(text)} chars>)"
     return kind
+
+
+def _action_signature(action: dict) -> str:
+    """Stable, redacted identity used to verify a safety replay."""
+    import json
+    try:
+        clean = {k: v for k, v in (action or {}).items()
+                 if not str(k).startswith("_")}
+        return json.dumps(clean, sort_keys=True, ensure_ascii=False)
+    except Exception:
+        return repr(action)
+
+
+def _actions_signature(actions) -> tuple:
+    return tuple(_action_signature(a) for a in (actions or []))
+
+
+def _turn_call_ids(turn: dict) -> list:
+    ids = turn.get("call_ids")
+    if isinstance(ids, list) and ids:
+        return [cid for cid in ids if cid]
+    cid = turn.get("call_id")
+    return [cid] if cid else []
+
+
+def _ack_outputs(call_ids, checks, shot_b64, function_outs=None) -> list:
+    """Outputs that acknowledge native safety checks for THIS turn's calls.
+
+    The old code acked the previous turn's outbox, so the flagged call was
+    never acknowledged. Materialize the current call ids instead.
+    """
+    ack = [{"id": c.get("id"), "code": c.get("code"),
+            "message": c.get("message")} for c in (checks or [])]
+    outs = list(function_outs or [])
+    for index, cid in enumerate(call_ids or []):
+        item = {"kind": "computer", "call_id": cid,
+                "acknowledged_safety_checks": ack}
+        if index == len(call_ids) - 1 and shot_b64:
+            item["screenshot_b64"] = shot_b64
+        outs.append(item)
+    return outs
 
 
 def comm_log_static(direction: str, payload: dict):
@@ -227,11 +284,13 @@ class CuaTurnWorker(QThread):
     ensure_visible = Signal(float, float)  # point must not hide under us
     progress = Signal(str)
 
-    def __init__(self, handler, provider, turn_request: dict, parent=None):
+    def __init__(self, handler, provider, turn_request: dict, parent=None,
+                 generation: int = 0):
         super().__init__(parent)
         self._handler = handler
         self._provider = provider
         self._request = turn_request
+        self._generation = int(generation)
         self._stop = False
         self._safety_event = threading.Event()
         self._safety_approved = False
@@ -246,8 +305,11 @@ class CuaTurnWorker(QThread):
         self._ask_event.set()
 
     def stop(self):
+        """Wakes EVERY worker wait site, not just safety approval."""
         self._stop = True
         self._safety_event.set()
+        self._ask_event.set()
+        self._visible_event.set()
 
     def resolve_safety(self, approved: bool):
         self._safety_approved = approved
@@ -343,7 +405,9 @@ class CuaTurnWorker(QThread):
                 "outputs": [
                     {"kind": o.get("kind"), "call_id": o.get("call_id"),
                      "screenshot_bytes": len(o.get("screenshot_b64") or ""),
-                     "output_text": (o.get("output_text") or "")[:300],
+                     "output_text": (
+                         "<redacted>" if o.get("kind") == "function"
+                         else (o.get("output_text") or "")[:300]),
                      "ack": bool(o.get("acknowledged_safety_checks"))}
                     for o in outs
                 ],
@@ -357,66 +421,22 @@ class CuaTurnWorker(QThread):
                 "took_seconds": took,
                 "response_id": turn.get("response_id"),
                 "call_id": turn.get("call_id"),
-                "actions": turn.get("actions"),
+                "actions": [redact_action(a)
+                            for a in (turn.get("actions") or [])],
                 "pending_safety_checks": turn.get("pending_safety_checks"),
                 "ask": turn.get("ask"),
                 "done_text": turn.get("done_text"),
             })
 
-            checks = turn.get("pending_safety_checks") or []
-            if checks and not self._stop:
-                self.safety_needed.emit(checks)
-                self._safety_event.wait()
-                if self._stop:
-                    outcome = {"aborted": True}
-                    self.turn_done.emit(outcome)
-                    return
-                if not self._safety_approved:
-                    outcome = {"denied": True, "checks": checks}
-                    self.turn_done.emit(outcome)
-                    return
-                # Re-send the turn output WITH acknowledgements. The model
-                # replays the call; we execute on the replayed actions.
-                self.progress.emit("Safety approved — replaying turn…")
-                ack = [{"id": c.get("id"), "code": c.get("code"),
-                        "message": c.get("message")} for c in checks]
-                follow = dict(protocol)
-                follow["outputs"] = [
-                    dict(o, acknowledged_safety_checks=ack)
-                    if o.get("kind") == "computer" else dict(o)
-                    for o in (follow.get("outputs") or [])
-                ]
-                self._comm_log("REQUEST", {
-                    "turn": turn_no,
-                    "replay_with_ack": True,
-                    "acknowledged_safety_checks": ack,
-                })
-                t0 = time.perf_counter()
-                turn = self._provider.computer_use_turn(**follow)
-                took = round(time.perf_counter() - t0, 1)
-                self._comm_log("RESPONSE", {
-                    "turn": turn_no,
-                    "replay_with_ack": True,
-                    "took_seconds": took,
-                    "response_id": turn.get("response_id"),
-                    "call_id": turn.get("call_id"),
-                    "actions": turn.get("actions"),
-                    "pending_safety_checks": turn.get("pending_safety_checks"),
-                    "ask": turn.get("ask"),
-                    "done_text": turn.get("done_text"),
-                })
-
-            if not self._paused_spin("before execution"):
-                outcome = {"aborted": True}
-                self.turn_done.emit(outcome)
-                return
-
             actions = turn.get("actions") or []
             done_text = turn.get("done_text")
+            if not self._paused_spin("before acting"):
+                self.turn_done.emit({"aborted": True})
+                return
 
-            # Explicit ask_user calls: the model itself decided by meaning
-            # that a human answer is needed. Resolve via GUI dialogs first;
-            # answers ride the NEXT turn as function outputs (same chain).
+            # Explicit ask_user calls: resolve them BEFORE a safety replay so
+            # the same follow-up can answer both the question and the flagged
+            # computer call. The answer rides the next turn as function output.
             asks = turn.get("ask") or []
             function_outs: list = []
             asked_log: list = []
@@ -443,19 +463,120 @@ class CuaTurnWorker(QThread):
                 by_id = {a.get("call_id"): a.get("question", "")
                          for a in asks}
                 for ans in self._ask_answers:
+                    question = by_id.get(ans.get("call_id"), "")
                     function_outs.append({
                         "kind": "function",
                         "call_id": ans.get("call_id"),
                         "output_text": ans.get("answer", ""),
                     })
                     asked_log.append({
-                        "question": by_id.get(ans.get("call_id"), ""),
-                        "answer": ans.get("answer", ""),
+                        "question": question,
+                        "answer": redact_answer(question,
+                                                ans.get("answer", "")),
                     })
                 self._comm_log("CONSUMED", {
                     "turn": turn_no,
                     "asked": asked_log,
                 })
+                if not self._paused_spin("after question"):
+                    self.turn_done.emit({"aborted": True})
+                    return
+
+            checks = turn.get("pending_safety_checks") or []
+            pre_checks = self._handler.classify_cua_actions(actions)
+            hard_blocks = [c for c in pre_checks if c.get("hard")]
+            if hard_blocks:
+                message = "; ".join(c.get("message", "blocked") for c in hard_blocks)
+                outcome = {
+                    "policy_blocked": f"**Blocked:** {message}",
+                    "response_id": turn.get("response_id"),
+                    "executed": [],
+                }
+                self._comm_log("CONSUMED", {
+                    "turn": turn_no,
+                    "status": "policy_blocked",
+                    "checks": hard_blocks,
+                })
+                self.turn_done.emit(outcome)
+                return
+
+            approval = list(checks) + [
+                c for c in pre_checks if not c.get("hard")]
+            if approval and not self._stop:
+                self.safety_needed.emit(approval)
+                self._safety_event.wait()
+                if self._stop:
+                    outcome = {"aborted": True}
+                    self.turn_done.emit(outcome)
+                    return
+                if not self._safety_approved:
+                    outcome = {"denied": True, "checks": approval}
+                    self.turn_done.emit(outcome)
+                    return
+                if checks:
+                    # Native safety replay: ack THIS turn's call ids, not the
+                    # previous outbox. The current actions have not run yet.
+                    shot_ack, _, _ = self._handler.capture_screenshot_b64()
+                    ack_ids = _turn_call_ids(turn)
+                    if not turn.get("response_id") or not ack_ids:
+                        outcome = {
+                            "fatal": "**Error:** safety replay is impossible "
+                                     "(missing response_id/call_id); task paused."
+                        }
+                        self.turn_done.emit(outcome)
+                        return
+                    follow = {
+                        "previous_response_id": turn.get("response_id"),
+                        "outputs": _ack_outputs(
+                            ack_ids, checks, shot_ack, function_outs),
+                    }
+                    self._comm_log("REQUEST", {
+                        "turn": turn_no,
+                        "replay_with_ack": True,
+                        "call_ids": ack_ids,
+                        "acknowledged_safety_checks": checks,
+                    })
+                    t0 = time.perf_counter()
+                    replayed = self._provider.computer_use_turn(**follow)
+                    took = round(time.perf_counter() - t0, 1)
+                    self._comm_log("RESPONSE", {
+                        "turn": turn_no,
+                        "replay_with_ack": True,
+                        "took_seconds": took,
+                        "response_id": replayed.get("response_id"),
+                        "call_id": replayed.get("call_id"),
+                        "actions": [redact_action(a) for a in
+                                    (replayed.get("actions") or [])],
+                        "pending_safety_checks":
+                            replayed.get("pending_safety_checks"),
+                        "ask": replayed.get("ask"),
+                        "done_text": replayed.get("done_text"),
+                    })
+                    if replayed.get("pending_safety_checks"):
+                        outcome = {
+                            "fatal": "**Error:** the provider repeated its safety "
+                                     "check after approval; task paused."
+                        }
+                        self.turn_done.emit(outcome)
+                        return
+                    if replayed.get("ask"):
+                        outcome = {
+                            "fatal": "**Error:** the provider asked a new question "
+                                     "during safety replay; task paused."
+                        }
+                        self.turn_done.emit(outcome)
+                        return
+                    if _actions_signature(replayed.get("actions") or []) != \
+                            _actions_signature(actions):
+                        outcome = {
+                            "fatal": "**Error:** safety replay returned different "
+                                     "actions than the approved ones; refusing to run."
+                        }
+                        self.turn_done.emit(outcome)
+                        return
+                    turn = replayed
+                    actions = turn.get("actions") or []
+                    done_text = turn.get("done_text")
 
             if flags.get("save_pre"):
                 try:
@@ -497,21 +618,114 @@ class CuaTurnWorker(QThread):
                 self.turn_done.emit(outcome)
                 return
 
+            max_actions = self._handler._max_actions_per_turn()
+            if len(actions) > max_actions:
+                outcome = {
+                    "budget_exceeded": (
+                        f"**Stopped:** model returned {len(actions)} actions in "
+                        f"one turn; the limit is {max_actions}. Split the step "
+                        f"into smaller batches."),
+                    "executed": [],
+                    "response_id": turn.get("response_id"),
+                }
+                self._comm_log("CONSUMED", {
+                    "turn": turn_no,
+                    "status": "budget_exceeded",
+                    "actions": len(actions),
+                    "limit": max_actions,
+                })
+                self.turn_done.emit(outcome)
+                return
+
             executed: list = []
             executed_raw: list = []
-            for action in actions:
+            approved_local = {
+                (c.get("action_index"), c.get("code"))
+                for c in pre_checks if not c.get("hard")
+            }
+            for index, action in enumerate(actions):
                 if self._stop:
                     outcome = {"aborted": True}
+                    self.turn_done.emit(outcome)
+                    return
+                if self._handler._cua_wall_clock_exceeded():
+                    outcome = {
+                        "budget_exceeded": "**Stopped:** Vision task time "
+                                            "budget exhausted.",
+                        "executed": executed,
+                    }
                     self.turn_done.emit(outcome)
                     return
                 if not self._paused_spin("between actions"):
                     outcome = {"aborted": True}
                     self.turn_done.emit(outcome)
                     return
+
+                # Re-check with the CURRENT foreground window: a previous
+                # action may have opened a terminal, UAC prompt or payment
+                # page that was not visible when the batch was approved.
+                now_checks = classify_action(
+                    action, self._handler.cua_context(action),
+                    allowed_apps=self._handler.cua_gate_apps(),
+                    shell_allowed=self._handler._cua_shell_allowed(),
+                    system_surfaces_allowed=(
+                        self._handler._cua_system_surfaces_allowed()),
+                    action_index=index)
+                hard_now = [c for c in now_checks if c.get("hard")]
+                if hard_now:
+                    message = "; ".join(
+                        c.get("message", "blocked") for c in hard_now)
+                    outcome = {
+                        "policy_blocked": f"**Blocked:** {message}",
+                        "executed": executed,
+                        "response_id": turn.get("response_id"),
+                    }
+                    self._comm_log("CONSUMED", {
+                        "turn": turn_no,
+                        "status": "policy_blocked",
+                        "checks": hard_now,
+                    })
+                    self.turn_done.emit(outcome)
+                    return
+                for check in now_checks:
+                    if check.get("hard"):
+                        continue
+                    key = (index, check.get("code"))
+                    if key in approved_local:
+                        continue
+                    self.safety_needed.emit([check])
+                    self._safety_event.wait()
+                    if self._stop:
+                        outcome = {"aborted": True}
+                        self.turn_done.emit(outcome)
+                        return
+                    if not self._safety_approved:
+                        outcome = {"denied": True, "checks": [check]}
+                        self.turn_done.emit(outcome)
+                        return
+                    approved_local.add(key)
+
                 try:
+                    started = time.monotonic()
                     self._handler.execute_action(action)
+                    elapsed = time.monotonic() - started
+                    limit = self._handler._action_timeout_seconds()
+                    if limit and elapsed > limit:
+                        raise TimeoutError(
+                            f"action exceeded the {limit:g}s timeout")
                     executed.append(describe_action(action))
                     executed_raw.append(action)
+                except CuaActionCancelledError:
+                    outcome = {"aborted": True}
+                    self.turn_done.emit(outcome)
+                    return
+                except CuaBudgetExceededError as e:
+                    outcome = {
+                        "budget_exceeded": f"**Stopped:** {e}",
+                        "executed": executed,
+                    }
+                    self.turn_done.emit(outcome)
+                    return
                 except InputBlockedError as e:
                     logging.error(f"CUA input blocked: {e}")
                     self._comm_log("CONSUMED", {
@@ -523,15 +737,29 @@ class CuaTurnWorker(QThread):
                     self.turn_done.emit(outcome)
                     return
                 except Exception as e:
-                    logging.warning(f"CUA action failed: {action} -> {e}")
-                    err_b64, _, _ = self._handler.capture_screenshot_b64()
+                    logging.warning(f"CUA action failed: {describe_action(action)} -> {e}")
+                    try:
+                        err_b64, _, _ = self._handler.capture_screenshot_b64()
+                    except Exception:
+                        err_b64 = ""
                     err_outs = list(function_outs)
-                    err_ids = turn.get("call_ids") or (
-                        [turn.get("call_id")] if turn.get("call_id") else [])
+                    err_ids = _turn_call_ids(turn)
                     for i, cid in enumerate(err_ids):
+                        item = {
+                            "kind": "computer",
+                            "call_id": cid,
+                            "result_status": "error",
+                        }
+                        if i == index or len(err_ids) == 1:
+                            item["result_text"] = f"Action failed: {e}"
+                        elif i < index:
+                            item["result_text"] = (
+                                "Executed before a later action failed.")
+                        else:
+                            item["result_text"] = (
+                                "Not executed because a previous action failed.")
                         # Screenshot rides on the last item only (token cost).
-                        item = {"kind": "computer", "call_id": cid}
-                        if i == len(err_ids) - 1:
+                        if i == len(err_ids) - 1 and err_b64:
                             item["screenshot_b64"] = err_b64
                         err_outs.append(item)
                     outcome = {
@@ -564,10 +792,10 @@ class CuaTurnWorker(QThread):
                 except Exception as e:
                     logging.warning(f"post-action shot failed: {e}")
             next_outputs = list(function_outs)
-            ok_ids = turn.get("call_ids") or (
-                [turn.get("call_id")] if turn.get("call_id") else [])
+            ok_ids = _turn_call_ids(turn)
             for i, cid in enumerate(ok_ids):
-                comp_out = {"kind": "computer", "call_id": cid}
+                comp_out = {"kind": "computer", "call_id": cid,
+                            "result_status": "ok"}
                 # Per-call own results (cursor text, zoom/member image)
                 # win over the post shot; matched by position.
                 if i < len(executed_raw) and isinstance(
@@ -582,8 +810,7 @@ class CuaTurnWorker(QThread):
                     comp_out["screenshot_b64"] = shot_b64
                 next_outputs.append(comp_out)
             self._handler.trace_turn(
-                tag, turn_no, executed_raw,
-                bool(turn.get("pending_safety_checks")), shot_file,
+                tag, turn_no, executed_raw, bool(checks), shot_file,
                 asked=asked_log)
             self._comm_log("CONSUMED", {
                 "turn": turn_no,
@@ -621,14 +848,126 @@ class VisionHandler(BaseAgent):
     SCHEMA_NAME = None
     MAX_CUA_TURNS = MAX_CUA_TURNS  # fallback; live value from settings
 
+    def _vision_cfg(self) -> dict:
+        try:
+            return dict(self.settings.get("vision", {}) or {})
+        except Exception:
+            return {}
+
     def _max_turns(self) -> int:
         """Turn cap, read live from Vision settings (default 20)."""
         try:
-            value = int((self.settings.get("vision", {}) or {}).get(
+            value = int(self._vision_cfg().get(
                 "max_turns_per_task", MAX_CUA_TURNS))
             return max(1, value)
         except Exception:
             return MAX_CUA_TURNS
+
+    def _max_task_seconds(self) -> float:
+        try:
+            value = float(self._vision_cfg().get(
+                "max_task_seconds", MAX_TASK_SECONDS))
+            return max(1.0, value)
+        except Exception:
+            return float(MAX_TASK_SECONDS)
+
+    def _max_actions_per_turn(self) -> int:
+        try:
+            value = int(self._vision_cfg().get(
+                "max_actions_per_turn", MAX_ACTIONS_PER_TURN))
+            return max(1, value)
+        except Exception:
+            return MAX_ACTIONS_PER_TURN
+
+    def _action_timeout_seconds(self) -> float:
+        try:
+            value = float(self._vision_cfg().get(
+                "action_timeout_seconds", ACTION_TIMEOUT_SECONDS))
+            return max(1.0, value)
+        except Exception:
+            return float(ACTION_TIMEOUT_SECONDS)
+
+    def _max_wait_seconds(self) -> float:
+        try:
+            value = float(self._vision_cfg().get(
+                "max_wait_seconds", MAX_WAIT_SECONDS))
+            return max(1.0, value)
+        except Exception:
+            return float(MAX_WAIT_SECONDS)
+
+    def cua_context(self, action=None) -> dict:
+        """Window context under the action point (or the foreground)."""
+        try:
+            point = action_point(action) if action is not None else None
+            if point is not None:
+                scale = getattr(self, "_shot_scale", 1.0) or 1.0
+                return active_window(point[0] * scale, point[1] * scale)
+            return active_window()
+        except Exception as e:
+            logging.warning(f"window context probe failed: {e}")
+            return {"title": "", "process": "", "pid": 0, "own": False}
+
+    def cua_allowed_apps(self) -> list:
+        try:
+            apps = self.settings.get("allowed_apps", [])
+            return list(apps or [])
+        except Exception:
+            return []
+
+    def cua_gate_apps(self) -> list:
+        if not self._cua_restrict_allowed_apps():
+            return []
+        return self.cua_allowed_apps()
+
+    def classify_cua_actions(self, actions) -> list:
+        """Gate every action against the window it actually targets."""
+        allowed = self.cua_gate_apps()
+        shell_allowed = self._cua_shell_allowed()
+        system_surfaces_allowed = self._cua_system_surfaces_allowed()
+        checks: list = []
+        for index, action in enumerate(actions or []):
+            checks.extend(classify_action(
+                action, self.cua_context(action),
+                allowed_apps=allowed, shell_allowed=shell_allowed,
+                system_surfaces_allowed=system_surfaces_allowed,
+                action_index=index))
+        return checks
+
+    def _cua_wall_clock_exceeded(self) -> bool:
+        if not self._cua_started_at:
+            return False
+        return (time.monotonic() - self._cua_started_at) >= self._max_task_seconds()
+
+    def _cua_provider_identity(self):
+        try:
+            provider = self._provider()
+            return (provider.get_provider_id(), getattr(provider, "model", None))
+        except Exception:
+            return ("?", None)
+
+    def _cua_restart_chain(self, reason: str) -> None:
+        """Drops the native chain and seeds the next first turn with a note."""
+        self._cua_response_id = None
+        self._cua_outbox = []
+        self._last_shot_file = None
+        self._cua_seed_note = reason
+
+    def _sleep_checked(self, seconds: float) -> None:
+        """Sleep in slices so Stop/Pause/wall-clock interrupt long actions."""
+        deadline = time.monotonic() + max(0.0, float(seconds))
+        while True:
+            if self.state in (VisionState.IDLE, VisionState.PAUSED):
+                raise CuaActionCancelledError("Vision task is no longer running.")
+            worker = self._worker
+            if worker is not None and getattr(worker, "_stop", False):
+                raise CuaActionCancelledError("Vision action cancelled.")
+            if self._cua_wall_clock_exceeded():
+                raise CuaBudgetExceededError(
+                    f"vision task time budget ({self._max_task_seconds():g}s) exhausted")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.1, remaining))
 
     def __init__(self, controller):
         super().__init__(controller)
@@ -641,11 +980,16 @@ class VisionHandler(BaseAgent):
         self._cua_response_id = None
         self._cua_outbox = []  # outputs answered into the next turn
         self._cua_turns = 0
+        self._cua_generation = 0
+        self._cua_identity = None
+        self._cua_seed_note = None
+        self._cua_started_at = 0.0
         self._worker = None
         self._compact_owned = False
         self._visible_box = {}
         self._visible_event = threading.Event()
         self._pause_hist_mark = 0
+        self._paused_turn_inflight = False
         self._input_block_seen = False
         self._capture_block_seen = False
 
@@ -693,6 +1037,7 @@ class VisionHandler(BaseAgent):
                         self.ui.user_input.clear()
                     except Exception:
                         pass
+                self._paused_turn_inflight = False
                 base = self.original_user_request or ""
                 combined = (f"{base}\n\nUser notes written while paused "
                             f"(take into account and continue):\n"
@@ -705,6 +1050,23 @@ class VisionHandler(BaseAgent):
                 self.stop()
                 self.start_task(combined)
                 return
+            if self._paused_turn_inflight:
+                # Resume must not execute a batch approved before the pause:
+                # its screenshot is stale. Drop the native chain, re-observe.
+                self._paused_turn_inflight = False
+                self._set_state(VisionState.EXECUTING)
+                self.controller._reenter_agent_mode(self)
+                self.ui.add_message(
+                    "<i>Execution resumed — discarded the unexecuted batch and "
+                    "will re-check the screen.</i>")
+                self.ui.set_paused(False)
+                self._cua_restart_chain(
+                    "User paused while a turn was in flight. The previous "
+                    "unexecuted actions were discarded. Re-observe the screen "
+                    "and continue the task.")
+                logging.info("Vision CUA resume discarded the in-flight batch.")
+                self._continue_loop()
+                return
         super().pause_or_resume()
         try:
             if self.state == VisionState.PAUSED:
@@ -713,6 +1075,19 @@ class VisionHandler(BaseAgent):
                 # to type guidance. The next turn re-shows thinking.
                 self._pause_hist_mark = len(self.command_history)
                 self._stop_thinking_timer()
+                worker = self._worker
+                if worker is not None:
+                    self._paused_turn_inflight = True
+                    self._cua_generation += 1
+                    self._worker = None
+                    try:
+                        worker.stop()
+                    except Exception:
+                        pass
+                    try:
+                        self._visible_event.set()
+                    except Exception:
+                        pass
                 if getattr(self, "_compact_owned", False):
                     self._exit_compact()
             elif (self.state == VisionState.EXECUTING
@@ -731,11 +1106,19 @@ class VisionHandler(BaseAgent):
         """
         worker = self._worker
         if worker is None:
+            if self.state in (VisionState.IDLE, VisionState.PAUSED):
+                raise CuaActionCancelledError("Vision action cancelled.")
             return self._ensure_visible_do(x, y)
         self._visible_box = {}
-        self._visible_event = threading.Event()
+        event = threading.Event()
+        self._visible_event = event
         worker.ensure_visible.emit(x, y)
-        self._visible_event.wait(timeout=5.0)
+        event.wait(timeout=5.0)
+        if (self._worker is not worker
+                or self.state in (VisionState.IDLE, VisionState.PAUSED)
+                or getattr(worker, "_stop", False)):
+            raise CuaActionCancelledError(
+                "Vision action cancelled while showing the window.")
         return bool(self._visible_box.get("moved"))
 
     def _ensure_visible_do(self, x: float, y: float) -> bool:
@@ -793,6 +1176,13 @@ class VisionHandler(BaseAgent):
         self._cua_turns = 0
         self._cua_tag = time.strftime("%H%M%S")
         self._last_shot_file = None
+        self._cua_generation += 1
+        self._cua_started_at = time.monotonic()
+        self._cua_identity = self._cua_provider_identity()
+        self._cua_seed_note = None
+        self._paused_turn_inflight = False
+        self._cua_system_cache = None
+        self._prune_debug_shots()
         try:
             import mss
             with mss.MSS() as sct:
@@ -841,6 +1231,20 @@ class VisionHandler(BaseAgent):
         except Exception:
             return False
 
+    def _cua_system_surfaces_allowed(self) -> bool:
+        try:
+            cfg = self.settings.get("vision", {}) or {}
+            return bool(cfg.get("allow_system_surfaces", False))
+        except Exception:
+            return False
+
+    def _cua_restrict_allowed_apps(self) -> bool:
+        try:
+            cfg = self.settings.get("vision", {}) or {}
+            return bool(cfg.get("restrict_to_allowed_apps", False))
+        except Exception:
+            return False
+
     def _cua_system_prompt(self) -> str:
         if getattr(self, "_cua_system_cache", None) is None:
             text = ""
@@ -854,10 +1258,27 @@ class VisionHandler(BaseAgent):
                     text = f.read().strip()
             except Exception as e:
                 logging.warning(f"CUA system prompt missing: {e}")
-            self._cua_system_cache = text
+            if text:
+                self._cua_system_cache = text
         base_text = self._cua_system_cache or ""
+        if not base_text:
+            return ""
+        surfaces = ""
+        if self._cua_system_surfaces_allowed():
+            if self._cua_restrict_allowed_apps():
+                surfaces = (
+                    "\n- Windows Search/Start menu may be used to launch "
+                    "applications; the launched app still needs to be in "
+                    "Vision allowed_apps."
+                )
+            else:
+                surfaces = (
+                    "\n- Windows Search/Start menu may be used to launch "
+                    "applications freely. Destructive actions and credential "
+                    "entry still require approval."
+                )
         if self._cua_shell_allowed():
-            return base_text + (
+            return base_text + surfaces + (
                 "\n- Ground-truth verification: when a task needs facts the "
                 "screenshots can't prove (folder sizes, file counts, disk "
                 "state), you may open a terminal yourself (Win+R, type "
@@ -866,7 +1287,7 @@ class VisionHandler(BaseAgent):
                 "commands. Anything modifying or deleting falls under the "
                 "destruction rule above and requires user approval first."
             )
-        return base_text + (
+        return base_text + surfaces + (
             "\n- Work through the graphical interface only. Do not open "
             "terminal or console windows and do not type shell commands."
         )
@@ -926,12 +1347,48 @@ class VisionHandler(BaseAgent):
             self.stop()
             return
 
+        if self._cua_wall_clock_exceeded():
+            self.ui.add_message(
+                f"<i>Stopped: Vision time budget "
+                f"({self._max_task_seconds():g}s) exhausted. Tell me how to "
+                f"proceed.</i>")
+            self._exit_compact()
+            self._set_state(VisionState.PAUSED_ON_ERROR)
+            self._stop_thinking_timer()
+            return
+
+        identity = self._cua_provider_identity()
+        if (self._cua_response_id is not None
+                and self._cua_identity is not None
+                and identity != self._cua_identity):
+            self._cua_restart_chain(
+                "Model/provider changed mid-task; the previous native chain "
+                "cannot be reused. Re-observe the screen and continue.")
+            logging.info("Vision CUA chain reset after model/provider change.")
+        self._cua_identity = identity
+
         self._start_thinking_timer("Thinking (computer use)…")
         debug_flags = self._debug_flags()
         if self._cua_response_id is None:
-            # First turn, or error retry before any response arrived.
-            request = {"task": self.original_user_request,
-                       "instructions": self._cua_system_prompt()}
+            # First turn, or an explicit restart after a failure/steer.
+            task = self.original_user_request or ""
+            if self._cua_seed_note:
+                task = (f"{task}\n\nPrevious attempt: "
+                        f"{self._cua_seed_note}").strip()
+                self._cua_seed_note = None
+            instructions = self._cua_system_prompt()
+            if not (instructions or "").strip():
+                message = (
+                    "**Vision refused to start:** the CUA safety prompt is "
+                    "missing or empty (prompts/vision/cua_system.txt). Restore "
+                    "it and retry; running without it would fail open.")
+                self.ui.add_text(message, prefix_html="<b>Vision:</b> ")
+                logging.error("CUA system prompt missing/empty; refusing to run.")
+                self._exit_compact()
+                self._set_state(VisionState.PAUSED_ON_ERROR)
+                self._stop_thinking_timer()
+                return
+            request = {"task": task, "instructions": instructions}
         else:
             request = {
                 "previous_response_id": self._cua_response_id,
@@ -939,31 +1396,75 @@ class VisionHandler(BaseAgent):
                 "prev_shot_file": getattr(self, "_last_shot_file", None),
             }
         if not request.get("task") and not request.get("outputs"):
-            self._continue_loop(
-                "**Error:** nothing to send (no task, no outputs).")
+            if self._cua_response_id is not None and self.original_user_request:
+                self._cua_restart_chain(
+                    "The previous turn produced no outputs to answer. "
+                    "Re-observe the screen and continue.")
+                self._continue_loop(
+                    "**Error:** the previous turn had no callable outputs; "
+                    "restarted the chain.")
+                return
+            self.ui.add_text(
+                "**Error:** nothing to send (no task, no outputs).",
+                prefix_html="<b>Vision:</b> ")
+            self._exit_compact()
+            self._set_state(VisionState.PAUSED_ON_ERROR)
+            self._stop_thinking_timer()
             return
+        self._cua_turns += 1
         request.update({
             "tag": getattr(self, "_cua_tag", "cua"),
-            "turn_no": self._cua_turns + 1,
+            "turn_no": self._cua_turns,
             "debug_flags": debug_flags,
         })
         self._enter_compact()
-        self._worker = CuaTurnWorker(self, self._provider(), request)
-        self._worker.turn_done.connect(self._on_turn_done)
-        self._worker.safety_needed.connect(self._on_safety_needed)
-        self._worker.ask_needed.connect(self._on_ask_needed)
-        self._worker.ensure_visible.connect(self._on_ensure_visible)
-        self._worker.progress.connect(
+        worker = CuaTurnWorker(self, self._provider(), request,
+                               generation=self._cua_generation)
+        self._worker = worker
+        worker.turn_done.connect(
+            lambda outcome, w=worker: self._on_turn_done(outcome, w))
+        worker.safety_needed.connect(
+            lambda checks, w=worker: self._on_safety_needed(checks, w))
+        worker.ask_needed.connect(
+            lambda asks, w=worker: self._on_ask_needed(asks, w))
+        worker.ensure_visible.connect(self._on_ensure_visible)
+        worker.progress.connect(
             lambda msg: self.ui.add_message(f"<i>{msg}</i>"))
-        self._worker.start()
+        worker.start()
 
     # -- turn outcome (GUI thread) --------------------------------------
 
-    def _on_turn_done(self, outcome: dict):
+    def _on_turn_done(self, outcome: dict, worker=None):
+        if worker is not None:
+            if worker is not self._worker:
+                return  # superseded by Stop/Pause/steer
+            if getattr(worker, "_generation", self._cua_generation) != \
+                    self._cua_generation:
+                return
         self._worker = None
         if self.state == VisionState.IDLE:
             return  # stopped meanwhile; drop the late turn
         if outcome.get("aborted"):
+            return
+        if outcome.get("policy_blocked"):
+            self._stop_thinking_timer()
+            self.ui.add_text(outcome["policy_blocked"],
+                             prefix_html="<b>Vision:</b> ")
+            self._cua_restart_chain(
+                f"Previous attempt was blocked by the safety gate: "
+                f"{outcome['policy_blocked']}")
+            self._exit_compact()
+            self._set_state(VisionState.PAUSED_ON_ERROR)
+            return
+        if outcome.get("budget_exceeded"):
+            self._stop_thinking_timer()
+            self.ui.add_text(outcome["budget_exceeded"],
+                             prefix_html="<b>Vision:</b> ")
+            self._cua_restart_chain(
+                f"Previous attempt stopped by a budget: "
+                f"{outcome['budget_exceeded']}")
+            self._exit_compact()
+            self._set_state(VisionState.PAUSED_ON_ERROR)
             return
         if outcome.get("denied"):
             codes = ", ".join(
@@ -973,18 +1474,26 @@ class VisionHandler(BaseAgent):
                 f"not approved. Tell me how to proceed.",
                 prefix_html="<b>Vision:</b> ",
             )
+            self._cua_restart_chain(
+                f"The user declined a safety check ({codes}); the action was "
+                f"not executed.")
             self._exit_compact()
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()
             return
         if outcome.get("fatal"):
             self._stop_thinking_timer()
+            self._cua_restart_chain(
+                f"Previous attempt paused: {outcome['fatal']} "
+                f"Re-observe the screen before continuing.")
             self._continue_loop(outcome["fatal"])
             return
         if outcome.get("ask_cancelled"):
+            self._paused_turn_inflight = True
             self.ui.add_message(
                 "<i>Question dismissed — paused. Type guidance to steer, "
-                "or Resume to continue.</i>")
+                "or Resume to continue (the unanswered turn will be "
+                "discarded).</i>")
             self._exit_compact()
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()
@@ -1010,11 +1519,20 @@ class VisionHandler(BaseAgent):
             self._stop_thinking_timer()
             self.ui.add_text(outcome["input_blocked"],
                              prefix_html="<b>Vision:</b> ")
+            self._cua_restart_chain(
+                "Previous attempt was stopped by an OS input block.")
             self._exit_compact()
             self._set_state(VisionState.PAUSED_ON_ERROR)
             return
         if outcome.get("action_error"):
             self._stop_thinking_timer()
+            if outcome.get("response_id"):
+                self._cua_response_id = outcome.get("response_id")
+                self._cua_outbox = outcome.get("next_outputs") or []
+                self._last_shot_file = None
+            else:
+                self._cua_restart_chain(
+                    f"Previous action failed: {outcome['action_error']}")
             self._continue_loop(outcome["action_error"])
             return
         executed = outcome.get("executed") or []
@@ -1022,7 +1540,10 @@ class VisionHandler(BaseAgent):
         self._cua_response_id = outcome.get("response_id")
         self._cua_outbox = outcome.get("next_outputs") or []
         self._last_shot_file = outcome.get("shot_file")
-        self._cua_turns += 1
+        if not self._cua_response_id or not self._cua_outbox:
+            self._cua_restart_chain(
+                "The previous turn produced no callable outputs (or no "
+                "response id). Re-observe the screen and continue.")
         parts = list(executed)
         parts += [f"asked: {a.get('question', '')[:80]}"
                   for a in asked]
@@ -1031,26 +1552,41 @@ class VisionHandler(BaseAgent):
         self.ui.add_message(f"<i>👁 {line}</i>")
         self._continue_loop(line)
 
-    def _on_safety_needed(self, checks: list):
-        worker = self._worker
+    def _current_worker(self, worker):
+        if worker is not None:
+            if worker is not self._worker:
+                return None
+            if getattr(worker, "_generation", self._cua_generation) != \
+                    self._cua_generation:
+                return None
+            return worker
+        return self._worker
+
+    def _on_safety_needed(self, checks: list, worker=None):
+        worker = self._current_worker(worker)
+        if worker is None or self.state in (VisionState.IDLE,):
+            return
         try:
             approved = bool(self.controller.ask_safety_approval(checks))
         except Exception as e:
             logging.error(f"Safety approval dialog failed: {e}")
             approved = False
-        if worker is not None:
+        if self._current_worker(worker) is worker:
             worker.resolve_safety(approved)
 
-    def _on_ask_needed(self, asks: list):
+    def _on_ask_needed(self, asks: list, worker=None):
         """One input dialog per question (GUI thread). Cancel pauses."""
-        worker = self._worker
+        worker = self._current_worker(worker)
+        if worker is None or self.state in (VisionState.IDLE,):
+            return
         answers: list | None = []
         try:
             for item in asks or []:
                 question = item.get("question", "")
                 self.ui.add_text(
                     question, prefix_html="<b>Vision asks:</b> ")
-                answer = self.controller.ask_user_text(question)
+                answer = self.controller.ask_user_text(
+                    question, sensitive=is_sensitive_text(question))
                 if answer is None:
                     answers = None
                     break
@@ -1059,7 +1595,7 @@ class VisionHandler(BaseAgent):
         except Exception as e:
             logging.error(f"ask dialog failed: {e}")
             answers = None
-        if worker is not None:
+        if self._current_worker(worker) is worker:
             worker.resolve_ask(answers)
 
     # -- provider / capture / performers ---------------------------------
@@ -1166,6 +1702,41 @@ class VisionHandler(BaseAgent):
             pass
         return d
 
+    def _prune_debug_shots(self) -> None:
+        """Deletes CUA debug screenshots older than the retention window."""
+        try:
+            days = int(self._vision_cfg().get(
+                "debug_screenshot_retention_days", 7))
+        except Exception:
+            days = 7
+        if days <= 0:
+            return
+        import os
+        try:
+            base = self.settings.get("APP_SCREENSHOTS_DIR", "screenshots")
+            cutoff = time.time() - days * 86400
+            for name in os.listdir(base):
+                if not str(name).startswith("cua_"):
+                    continue
+                folder = os.path.join(base, name)
+                if not os.path.isdir(folder):
+                    continue
+                for root, _dirs, files in os.walk(folder):
+                    for fname in files:
+                        path = os.path.join(root, fname)
+                        try:
+                            if os.path.getmtime(path) < cutoff:
+                                os.remove(path)
+                        except Exception:
+                            pass
+                try:
+                    if not os.listdir(folder):
+                        os.rmdir(folder)
+                except Exception:
+                    pass
+        except Exception as e:
+            logging.warning(f"CUA screenshot retention failed: {e}")
+
     def _annotation_style(self) -> dict:
         """Font/size/padding from Vision settings (Annotation Settings)."""
         try:
@@ -1219,7 +1790,7 @@ class VisionHandler(BaseAgent):
             "tag": tag,
             "turn": turn_no,
             "actions": [describe_action(a) for a in (actions or [])],
-            "raw_actions": actions or [],
+            "raw_actions": [redact_action(a) for a in (actions or [])],
             "safety": had_safety,
             "asked": asked or [],
             "screenshot": shot_file,
@@ -1297,7 +1868,8 @@ class VisionHandler(BaseAgent):
             keys = action.get("keys") or ([action.get("key")]
                                           if action.get("key") else [])
             try:
-                duration = min(float(action.get("duration", 1.0)), 30.0)
+                duration = min(float(action.get("duration", 1.0)),
+                               self._max_wait_seconds())
             except Exception:
                 duration = 1.0
             norm = [normalize_key(k) for k in keys] or ["shift"]
@@ -1308,7 +1880,7 @@ class VisionHandler(BaseAgent):
                     key = self._pyn_key(kk)
                     kbd.press(key)
                     pressed.append(key)
-                time.sleep(duration)
+                self._sleep_checked(duration)
             finally:
                 for key in reversed(pressed):
                     try:
@@ -1415,8 +1987,14 @@ class VisionHandler(BaseAgent):
             return describe_action(action)
 
         if kind == "wait":
-            time.sleep(1.0)
-            return "wait"
+            try:
+                seconds = float(action.get("seconds",
+                                           action.get("duration", 1.0)))
+            except Exception:
+                seconds = 1.0
+            seconds = min(max(0.0, seconds), self._max_wait_seconds())
+            self._sleep_checked(seconds)
+            return f"wait({seconds:g}s)"
 
         raise ValueError(f"Unsupported computer action: {kind!r}")
 
@@ -1584,11 +2162,12 @@ class VisionHandler(BaseAgent):
                 hotkey_pynput(["ctrl", "v"])
             time.sleep(0.2)
         finally:
-            if original is not None:
-                try:
-                    pyperclip.copy(original)
-                except Exception:
-                    pass
+            try:
+                # Never leave the agent's text (possibly a secret) on the
+                # clipboard: restore it, or clear it when it was unreadable.
+                pyperclip.copy(original if original is not None else "")
+            except Exception:
+                pass
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -1597,12 +2176,19 @@ class VisionHandler(BaseAgent):
 
     def _cleanup_task(self):
         worker, self._worker = self._worker, None
+        self._cua_generation += 1
+        self._cua_started_at = 0.0
+        self._paused_turn_inflight = False
+        self._cua_seed_note = None
+        self._visible_event.set()
         if worker is not None:
             try:
                 worker.stop()
-                worker.wait(3000)
-            except Exception:
-                pass
+                if not worker.wait(3000):
+                    logging.warning("Vision CUA worker did not stop in 3s; "
+                                    "abandoning it to the generation guard.")
+            except Exception as e:
+                logging.warning(f"Vision CUA worker stop failed: {e}")
         self._exit_compact()
         self._cua_response_id = None
         self._cua_outbox = []
@@ -1617,6 +2203,11 @@ class VisionHandler(BaseAgent):
             self.ui.add_message(error_message, force_scroll=True)
         except Exception:
             pass
+        self._stop_thinking_timer()
+        self._exit_compact()
+        self._cua_generation += 1
+        self._paused_turn_inflight = False
+        self._cua_restart_chain("The previous task ended with a fatal error.")
         self._set_state(VisionState.IDLE)
 
     def pause_for_feedback(self):

@@ -299,6 +299,12 @@ class AppController(QObject):
     def cleanup(self):
         """Stops background processes with per-step guards and time budgets."""
         logging.info("AppController cleanup initiated.")
+        try:
+            vision = getattr(self, "vision_handler", None)
+            if vision is not None:
+                vision.stop()
+        except Exception as e:
+            logging.warning(f"Vision shutdown failed: {e}")
         self._stop_thread(getattr(self, "llm_thread", None), "llm", 2000)
         self._stop_thread(getattr(self, "vision_thread", None), "vision", 2500)
         self._stop_thread(getattr(self, "screenshot_thread", None), "screenshot", 1000)
@@ -766,13 +772,14 @@ class AppController(QObject):
             logging.error(f"Safety approval dialog failed: {e}")
             return False
 
-    def ask_user_text(self, question: str):
+    def ask_user_text(self, question: str, sensitive: bool = False):
         """Modal question with optional free text (Vision ask_user tool).
 
         Width matches the compact window. Yes sends the typed text (or
         "да" when empty — no typing needed for plain confirmations);
         No sends the typed text (or "нет"); closing via X returns None
-        (the task pauses and the user can steer via chat).
+        (the task pauses and the user can steer via chat). Sensitive
+        questions use hidden entry so the value is never echoed.
         GUI thread only.
         """
         from PySide6.QtWidgets import (QDialog, QVBoxLayout, QHBoxLayout,
@@ -796,7 +803,11 @@ class AppController(QObject):
             label.setWordWrap(True)
             layout.addWidget(label)
             edit = QLineEdit(dlg)
-            edit.setPlaceholderText("Дополнение (необязательно)…")
+            if sensitive:
+                edit.setEchoMode(QLineEdit.EchoMode.Password)
+                edit.setPlaceholderText("Секрет (скрытый ввод)…")
+            else:
+                edit.setPlaceholderText("Дополнение (необязательно)…")
             layout.addWidget(edit)
             row = QHBoxLayout()
             row.addStretch()

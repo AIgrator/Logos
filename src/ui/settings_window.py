@@ -258,6 +258,8 @@ class SettingsWindow(QDialog):
         # Vision (agent loop; default OFF)
         vision_cfg = self.settings_manager.get("vision", {})
         self.allow_shell_commands_checkbox.setChecked(bool(vision_cfg.get("allow_shell_commands", False)))
+        self.allow_system_surfaces_checkbox.setChecked(bool(vision_cfg.get("allow_system_surfaces", False)))
+        self.restrict_to_allowed_apps_checkbox.setChecked(bool(vision_cfg.get("restrict_to_allowed_apps", False)))
         self.max_turns_spinbox.setValue(int(vision_cfg.get("max_turns_per_task", 20) or 20))
         self.shot_width_spinbox.setValue(int(vision_cfg.get("screenshot_max_width", 1600) or 0))
 
@@ -360,6 +362,8 @@ class SettingsWindow(QDialog):
         # never silently drops them.
         vision_settings = {
             "allow_shell_commands": self.allow_shell_commands_checkbox.isChecked(),
+            "allow_system_surfaces": self.allow_system_surfaces_checkbox.isChecked(),
+            "restrict_to_allowed_apps": self.restrict_to_allowed_apps_checkbox.isChecked(),
             "max_turns_per_task": self.max_turns_spinbox.value(),
             "screenshot_max_width": self.shot_width_spinbox.value(),
         }
@@ -459,8 +463,9 @@ class SettingsWindow(QDialog):
         layout = QVBoxLayout(group)
 
         description = QLabel(
-            "Applications the assistant is allowed to open. Only the checked "
-            "apps are exposed to the model, and only in Vision mode."
+            "Applications the assistant may launch directly. With 'Restrict "
+            "actions to selected Applications' enabled in Vision settings, "
+            "only the checked apps can also be interacted with."
         )
         description.setWordWrap(True)
         layout.addWidget(description)
@@ -475,7 +480,7 @@ class SettingsWindow(QDialog):
         layout.addWidget(scan_button)
 
         self.apps_list_widget = QListWidget()
-        self.apps_list_widget.setToolTip("Select the applications the assistant is allowed to launch in Vision mode.")
+        self.apps_list_widget.setToolTip("Select the applications the assistant may launch directly. Enable the Vision restriction checkbox to also limit interaction to this list.")
         self.apps_list_widget.setFixedHeight(250) # Set a fixed height for the list
         layout.addWidget(self.apps_list_widget)
 
@@ -683,14 +688,35 @@ class SettingsWindow(QDialog):
         self.allow_shell_commands_checkbox.setToolTip(shell_tooltip)
         vision_layout.addWidget(self.allow_shell_commands_checkbox, 0, 0, 1, 4)
 
+        self.allow_system_surfaces_checkbox = QCheckBox(
+            "Allow Windows Search / Start menu")
+        surfaces_tooltip = ("Lets the agent use Windows Search and the Start "
+                            "menu to launch applications. With the restriction "
+                            "below enabled, launched apps still need to be "
+                            "checked in Applications. UWP windows are resolved "
+                            "to their real process. Off by default.")
+        self.allow_system_surfaces_checkbox.setToolTip(surfaces_tooltip)
+        vision_layout.addWidget(self.allow_system_surfaces_checkbox, 1, 0, 1, 4)
+
+        self.restrict_to_allowed_apps_checkbox = QCheckBox(
+            "Restrict actions to selected Applications")
+        restrict_tooltip = ("When enabled, the agent may only interact with "
+                            "apps checked in Applications (plus Explorer and "
+                            "its own window). Off by default: any window can "
+                            "be used, while destructive actions and credential "
+                            "entry still need approval.")
+        self.restrict_to_allowed_apps_checkbox.setToolTip(restrict_tooltip)
+        vision_layout.addWidget(
+            self.restrict_to_allowed_apps_checkbox, 2, 0, 1, 4)
+
         self.max_turns_spinbox = QSpinBox()
         self.max_turns_spinbox.setRange(5, 200)
         self.max_turns_spinbox.setFixedWidth(80)
         max_turns_tooltip = ("Max computer-use turns per task before pausing. "
                              "Single-action providers burn turns faster.")
-        vision_layout.addWidget(QLabel("Max turns per task:"), 1, 0)
-        vision_layout.addWidget(self._create_help_label(max_turns_tooltip), 1, 1, Qt.AlignLeft)
-        vision_layout.addWidget(self.max_turns_spinbox, 1, 3)
+        vision_layout.addWidget(QLabel("Max turns per task:"), 3, 0)
+        vision_layout.addWidget(self._create_help_label(max_turns_tooltip), 3, 1, Qt.AlignLeft)
+        vision_layout.addWidget(self.max_turns_spinbox, 3, 3)
 
         self.shot_width_spinbox = QSpinBox()
         self.shot_width_spinbox.setRange(0, 3840)
@@ -699,22 +725,22 @@ class SettingsWindow(QDialog):
         shot_width_tooltip = ("Max screenshot width sent to the model "
                               "(0 = native). Vendors normalize anyway; "
                               "1600 saves tokens with no accuracy loss.")
-        vision_layout.addWidget(QLabel("Screenshot max width:"), 2, 0)
-        vision_layout.addWidget(self._create_help_label(shot_width_tooltip), 2, 1, Qt.AlignLeft)
-        vision_layout.addWidget(self.shot_width_spinbox, 2, 3)
+        vision_layout.addWidget(QLabel("Screenshot max width:"), 4, 0)
+        vision_layout.addWidget(self._create_help_label(shot_width_tooltip), 4, 1, Qt.AlignLeft)
+        vision_layout.addWidget(self.shot_width_spinbox, 4, 3)
 
         self.save_trace_log_checkbox = QCheckBox("Save detailed trace log")
         trace_log_tooltip = "Appends one JSON line per computer-use turn (actions, safety, screenshot path) to the app timeline."
-        vision_layout.addWidget(self.save_trace_log_checkbox, 3, 0)
-        vision_layout.addWidget(self._create_help_label(trace_log_tooltip), 3, 1)
+        vision_layout.addWidget(self.save_trace_log_checkbox, 5, 0)
+        vision_layout.addWidget(self._create_help_label(trace_log_tooltip), 5, 1)
         self.save_pre_intent_checkbox = QCheckBox("Save pre-action screenshot")
         pre_intent_tooltip = "Saves a screenshot before each turn's actions (screenshots/cua_<time>/)."
-        vision_layout.addWidget(self.save_pre_intent_checkbox, 4, 0)
-        vision_layout.addWidget(self._create_help_label(pre_intent_tooltip), 4, 1)
+        vision_layout.addWidget(self.save_pre_intent_checkbox, 6, 0)
+        vision_layout.addWidget(self._create_help_label(pre_intent_tooltip), 6, 1)
         self.save_post_checkbox = QCheckBox("Save post-action screenshot")
         post_action_tooltip = "Saves an annotated screenshot after each turn (red marks: clicks, drags)."
-        vision_layout.addWidget(self.save_post_checkbox, 5, 0)
-        vision_layout.addWidget(self._create_help_label(post_action_tooltip), 5, 1)
+        vision_layout.addWidget(self.save_post_checkbox, 7, 0)
+        vision_layout.addWidget(self._create_help_label(post_action_tooltip), 7, 1)
 
         annotation_group = QGroupBox("Annotation Settings")
         annotation_layout = QGridLayout(annotation_group)
@@ -747,7 +773,7 @@ class SettingsWindow(QDialog):
         annotation_layout.addWidget(QLabel("Padding:"), 2, 0)
         annotation_layout.addWidget(self._create_help_label(padding_tooltip), 2, 1, Qt.AlignLeft)
         annotation_layout.addWidget(self.text_padding_spinbox, 2, 3)
-        vision_layout.addWidget(annotation_group, 6, 0, 1, 4)
+        vision_layout.addWidget(annotation_group, 8, 0, 1, 4)
 
         return group
 

@@ -360,7 +360,7 @@ class GoogleProvider(BaseLLMProvider):
                             "result": out.get("output_text", ""),
                         })
                         continue
-                    result_text = {"status": "ok"}
+                    result_text = {"status": out.get("result_status") or "ok"}
                     if out.get("result_text"):
                         result_text["output"] = out["result_text"]
                     if cid in ack_by_call:
