@@ -10,6 +10,9 @@ import html
 from PySide6.QtCore import QBuffer, QIODevice, QSize
 import qtawesome as qta
 
+from .code_highlight import highlight_code
+from .theme_manager import DARK_THEME
+
 class TerminalHtmlFormatter:
     """
     Generates themed HTML for terminal mode UI components by using a ThemeManager.
@@ -42,16 +45,16 @@ class TerminalHtmlFormatter:
 
     def format_container_start(self, path: str) -> str:
         """Returns the starting HTML for a unified file operation block."""
-        icon_color = self._get_style('TERMINAL_HEADER_COLOR')
+        icon_color = self._get_style('COLLAPSIBLE_TITLE')
         icon_data_uri = self._icon_to_data_uri('fa5s.pencil-alt', icon_color, self.ICON_SIZE)
         icon_style = self._get_icon_style(self.ICON_SIZE)
 
         return f"""
-        <div style="background-color: {self._get_style('TERMINAL_CONTAINER_BG')}; border-left: 3px solid {self._get_style('TERMINAL_CONTAINER_BORDER')}; padding: 10px; margin-top: 5px; margin-bottom: 5px;">
+        <div style="background-color: {self._get_style('COLLAPSIBLE_BG')}; border: 1px solid {self._get_style('COLLAPSIBLE_BORDER')}; border-left: 3px solid {icon_color}; padding: 10px; margin-top: 6px; margin-bottom: 6px;">
             <p style="margin: 0; font-weight: bold; color: {icon_color};">
-                <img src="{icon_data_uri}" style="{icon_style}">&nbsp;Modifying File
+                <img src="{icon_data_uri}" style="{icon_style}">&nbsp;Editing File
             </p>
-            <p style="margin: 0; color: {self._get_style('TERMINAL_SUBHEADER_COLOR')};"><b>File:</b> <code>{path}</code></p>
+            <p style="margin: 0; color: {self._get_style('COLLAPSIBLE_META')};">File: <code>{html.escape(str(path))}</code></p>
         """
 
     def format_container_end(self) -> str:
@@ -64,20 +67,175 @@ class TerminalHtmlFormatter:
         icon_data_uri = self._icon_to_data_uri('fa5s.file-alt', icon_color, self.ICON_SIZE)
         icon_style = self._get_icon_style(self.ICON_SIZE)
 
-        lines = content.split('\n')
-        numbered_lines = []
-        for i, line in enumerate(lines, 1):
-            escaped_line = html.escape(line)
-            numbered_lines.append(f'<span style="color: {self._get_style("TERMINAL_LINE_NUM_COLOR")}; -webkit-user-select: none; user-select: none;">{i: >3}</span>&nbsp;&nbsp;{escaped_line}')
-        numbered_content = "\n".join(numbered_lines)
-
         return f"""
         <hr style="border: 1px solid {self._get_style('TERMINAL_DIVIDER_COLOR')}; margin-top: 5px; margin-bottom: 5px;">
         <p style="margin: 0; font-weight: bold; color: {icon_color};">
             <img src="{icon_data_uri}" style="{icon_style}">&nbsp;Writing new file
         </p>
-        <pre style="background-color: {self._get_style('TERMINAL_PRE_BG')}; padding: 8px; border-radius: 4px; color: {self._get_style('TERMINAL_PRE_COLOR')}; white-space: pre-wrap; word-wrap: break-word;"><code>{numbered_content}</code></pre>
+        {self.format_code_content(content)}
         """
+
+    def format_read_files_content(self, result: str) -> str:
+        """Render read_files output as one highlighted section per file.
+
+        The tool returns a plain-text concatenation with marker lines. Those
+        markers are useful for the model/log, but in the UI they become file
+        headers, and each file body is syntax-highlighted separately.
+        """
+        lines = str(result).splitlines()
+        sections = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith('--- START OF FILE: ') and line.endswith(' ---'):
+                path = line[len('--- START OF FILE: '):-len(' ---')]
+                i += 1
+                body = []
+                end_marker = f'--- END OF FILE: {path} ---'
+                while i < len(lines) and lines[i] != end_marker:
+                    body.append(lines[i])
+                    i += 1
+                i += 1
+                body_text = "\n".join(body)
+                line_count = len(body_text.splitlines())
+                header = (f'<div style="color: {self._get_style("COLLAPSIBLE_TITLE")}; '
+                          f'font-weight: 600; margin: 10px 0 4px 0;">'
+                          f'{html.escape(path)} <span style="color: '
+                          f'{self._get_style("COLLAPSIBLE_META")}; font-weight: 400;">'
+                          f'· {line_count} line(s)</span></div>')
+                sections.append(header + self.format_code_content(body_text, path))
+            elif line.startswith('--- ERROR READING FILE: ') and line.endswith(' ---'):
+                path = line[len('--- ERROR READING FILE: '):-len(' ---')]
+                i += 1
+                body = []
+                while i < len(lines) and lines[i] != '--- END OF ERROR ---':
+                    body.append(lines[i])
+                    i += 1
+                i += 1
+                sections.append(
+                    f'<div style="color: {self._get_style("ERROR_COLOR")}; '
+                    'padding: 6px 0;">'
+                    f'{html.escape(path)}: {html.escape(chr(10).join(body))}</div>'
+                )
+            else:
+                i += 1
+
+        if not sections:
+            return self.format_code_content(str(result), "")
+        return "\n".join(sections)
+
+    def format_list_content(self, items, ordered: bool = False,
+                            empty_text: str = "(no items)") -> str:
+        """Render tool result rows as a real list instead of one long block."""
+        rows = [str(item) for item in (items or []) if str(item).strip()]
+        if not rows:
+            return (f'<div style="color: {self._get_style("COLLAPSIBLE_META")};">'
+                    f'{html.escape(empty_text)}</div>')
+        tag = "ol" if ordered else "ul"
+        list_items = "".join(
+            f'<li style="margin: 2px 0;">{html.escape(row)}</li>' for row in rows
+        )
+        return (
+            f'<{tag} style="margin: 0; padding: 8px 12px 8px 28px; '
+            f'background-color: {self._get_style("CODE_BG")}; '
+            f'border: 1px solid {self._get_style("CODE_BORDER")}; '
+            f'color: {self._get_style("TERMINAL_PRE_COLOR")}; '
+            f'line-height: 1.35;">{list_items}</{tag}>'
+        )
+
+    def format_code_content(self, content: str, path: str = "",
+                            color: str | None = None) -> str:
+        """Return syntax-highlighted HTML for file content or a command preview."""
+        dark = self.theme_manager.get_current_theme_name() == DARK_THEME
+        rendered, _truncated = highlight_code(content, path, dark=dark)
+        return (
+            f'<pre style="background-color: {self._get_style("CODE_BG")}; '
+            f'border: 1px solid {self._get_style("CODE_BORDER")}; '
+            'padding: 10px; margin: 0; color: '
+            f'{color or self._get_style("TERMINAL_PRE_COLOR")}; white-space: pre-wrap; '
+            f'word-wrap: break-word;"><code>{rendered}</code></pre>'
+        )
+
+    def format_plain_content(self, content: str, color: str | None = None) -> str:
+        """Plain monospace block for logs and shell output (no lexer guessing)."""
+        return (
+            f'<pre style="background-color: {self._get_style("CODE_BG")}; '
+            f'border: 1px solid {self._get_style("CODE_BORDER")}; '
+            'padding: 10px; margin: 0; color: '
+            f'{color or self._get_style("TERMINAL_PRE_COLOR")}; white-space: pre-wrap; '
+            f'word-wrap: break-word;"><code>{html.escape(str(content))}</code></pre>'
+        )
+
+    def format_shell_block(self, command: str, stdout: str = "", stderr: str = "",
+                           exit_note: str = "", output_file: str = "",
+                           cwd: str = "", show_output: bool = True) -> str:
+        """Render one shell call as command + labelled output, not a raw dump."""
+        meta = self._get_style("COLLAPSIBLE_META")
+        label = (f'color: {meta}; font-size: 90%; font-weight: 600; '
+                 'margin: 10px 0 4px 0;')
+        parts = []
+        if cwd:
+            parts.append(
+                f'<div style="color: {meta}; font-size: 90%; margin-bottom: 6px; '
+                'word-wrap: break-word;">'
+                f'Working directory: <code>{html.escape(str(cwd))}</code></div>'
+            )
+        if exit_note:
+            parts.append(
+                f'<div style="color: {self._get_style("WARNING_COLOR")}; '
+                f'background-color: {self._get_style("ACTION_SUMMARY_BG")}; '
+                f'border-left: 3px solid {self._get_style("WARNING_COLOR")}; '
+                'padding: 6px 8px; '
+                f'margin: 0 0 8px 0;">{html.escape(str(exit_note))}</div>'
+            )
+        parts.append(f'<div style="{label}">Command</div>')
+        parts.append(self.format_code_content(f"$ {command}", "command.sh"))
+        if show_output:
+            clean_stdout = str(stdout or "").replace("\r\n", "\n").replace("\r", "\n").rstrip()
+            parts.append(f'<div style="{label}">Output</div>')
+            parts.append(self.format_plain_content(clean_stdout or "(no output)"))
+        clean_stderr = str(stderr or "").replace("\r\n", "\n").replace("\r", "\n").rstrip()
+        if clean_stderr:
+            parts.append(
+                f'<div style="color: {self._get_style("ERROR_COLOR")}; '
+                'font-size: 90%; font-weight: 600; margin: 10px 0 4px 0;">'
+                'System note</div>'
+            )
+            parts.append(self.format_plain_content(
+                clean_stderr, color=self._get_style("ERROR_COLOR")))
+        if output_file:
+            parts.append(
+                f'<div style="color: {meta}; font-size: 90%; margin-top: 8px; '
+                'word-wrap: break-word;">'
+                f'Full output: <code>{html.escape(str(output_file))}</code></div>'
+            )
+        return "\n".join(parts)
+
+    def format_diff_content(self, old_lines: list[str], new_lines: list[str], start_line: int) -> str:
+        """Return just the coloured diff body, suitable for a collapsible block."""
+        old_lines_html = []
+        if start_line != -1:
+            for i, line in enumerate(old_lines):
+                old_lines_html.append(f'<span style="color: {self._get_style("TERMINAL_LINE_NUM_COLOR")}; -webkit-user-select: none; user-select: none;">{start_line + i: >3}&nbsp;-&nbsp;</span><span style="background-color: {self._get_style("TERMINAL_DIFF_REMOVE_BG")};">{html.escape(line)}</span>')
+        else:
+            for line in old_lines:
+                old_lines_html.append(f'<span style="color: {self._get_style("TERMINAL_LINE_NUM_COLOR")}; -webkit-user-select: none; user-select: none;">-&nbsp;</span><span style="background-color: {self._get_style("TERMINAL_DIFF_REMOVE_BG")};">{html.escape(line)}</span>')
+
+        new_lines_html = []
+        if start_line != -1:
+            for i, line in enumerate(new_lines):
+                new_lines_html.append(f'<span style="color: {self._get_style("TERMINAL_LINE_NUM_COLOR")}; -webkit-user-select: none; user-select: none;">{start_line + i: >3}&nbsp;+&nbsp;</span><span style="background-color: {self._get_style("TERMINAL_DIFF_ADD_BG")};">{html.escape(line)}</span>')
+        else:
+            for line in new_lines:
+                new_lines_html.append(f'<span style="color: {self._get_style("TERMINAL_LINE_NUM_COLOR")}; -webkit-user-select: none; user-select: none;">+&nbsp;</span><span style="background-color: {self._get_style("TERMINAL_DIFF_ADD_BG")};">{html.escape(line)}</span>')
+
+        return (
+            f'<pre style="background-color: {self._get_style("CODE_BG")}; '
+            f'border: 1px solid {self._get_style("CODE_BORDER")}; '
+            'padding: 10px; margin: 0; color: '
+            f'{self._get_style("TERMINAL_PRE_COLOR")}; white-space: pre-wrap; '
+            f'word-wrap: break-word;"><code>{"<br>".join(old_lines_html)}<br>{"<br>".join(new_lines_html)}</code></pre>'
+        )
 
     def format_replace_chunk(self, old_lines: list[str], new_lines: list[str], start_line: int) -> str:
         """Formats the HTML for a file replace (diff) operation."""
@@ -108,7 +266,7 @@ class TerminalHtmlFormatter:
         <div style="background-color: {self._get_style('TERMINAL_CONTAINER_BG')}; border: 1px solid {self._get_style('TERMINAL_READ_FILE_BORDER')}; border-radius: 4px; padding: 10px; margin-top: 5px; margin-bottom: 5px;">
             <p style="margin: 0; color: {self._get_style('TERMINAL_SUBHEADER_COLOR')};">
                 <span style="font-weight: bold; color: {self._get_style('TERMINAL_READ_FILE_ICON')};">✓</span>
-                ReadFile ...<code>{path}</code>
+                ReadFile ...<code>{html.escape(str(path))}</code>
             </p>
         </div>
         """

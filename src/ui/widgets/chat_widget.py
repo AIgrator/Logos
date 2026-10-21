@@ -7,6 +7,7 @@ from PySide6.QtCore import Qt, QPoint, QRect, QSize, QTime, QTimer, Signal
 from PySide6.QtGui import (
     QAbstractTextDocumentLayout,
     QColor,
+    QFont,
     QKeySequence,
     QPainter,
     QTextCharFormat,
@@ -64,7 +65,10 @@ class ChatWidget(QAbstractScrollArea):
         self.theme_manager = theme_manager
         self.collapsible_formatter = CollapsibleBlockFormatter(self.theme_manager)
         self.messages = []
-        self.document_margin = 5
+        self.document_margin = 8
+        self.chat_font = QFont(QApplication.font())
+        if self.chat_font.pointSize() > 0:
+            self.chat_font.setPointSize(self.chat_font.pointSize() + 1)
         self.is_streaming = False
         # The message dict the live stream writes into. Tracked by reference
         # instead of ``messages[-1]`` so queued user messages appended below the
@@ -114,6 +118,12 @@ class ChatWidget(QAbstractScrollArea):
         """Sets the display name for the assistant for subsequent messages."""
         if name:
             self.current_assistant_name = name
+
+    def _new_document(self) -> QTextDocument:
+        doc = QTextDocument(self)
+        doc.setDocumentMargin(0)
+        doc.setDefaultFont(self.chat_font)
+        return doc
 
     def _content_geometry(self):
         """Return ``(x_offset, text_width)`` of the centered text column.
@@ -197,6 +207,12 @@ class ChatWidget(QAbstractScrollArea):
                         self._toggle_collapsible_block(block_id, new_state)
                         return # Stop further processing
 
+                if anchor and anchor.startswith("copy:"):
+                    parts = anchor.split(':', 2)
+                    if len(parts) == 3:
+                        self._copy_collapsible_payload(parts[1], parts[2])
+                        return
+
                 if anchor and anchor.startswith("retry:"):
                     self.retry_requested.emit()
                     return # Stop further processing
@@ -246,6 +262,17 @@ class ChatWidget(QAbstractScrollArea):
     # (copy-all still gives everything).
     MAX_RENDERED_CONTENT = 30000
 
+    def _copy_collapsible_payload(self, block_id: str, label: str) -> bool:
+        """Copy a labelled payload from an expanded collapsible block."""
+        for msg in self.messages:
+            if msg.get('id') == block_id:
+                payload = (msg.get('copy_payloads') or {}).get(label)
+                if payload:
+                    QApplication.clipboard().setText(str(payload))
+                    return True
+                return False
+        return False
+
     def _toggle_collapsible_block(self, block_id: str, new_state: str):
         """Finds a collapsible block by its ID, toggles its state, and re-renders it.
 
@@ -260,24 +287,30 @@ class ChatWidget(QAbstractScrollArea):
                     full = msg.get('full_content') or ''
                     if not isinstance(full, str):
                         full = str(full)
-                    shown = full
-                    if len(shown) > self.MAX_RENDERED_CONTENT:
-                        shown = (shown[:self.MAX_RENDERED_CONTENT]
-                                 + f"\n… [truncated for display, "
-                                   f"{len(full) - self.MAX_RENDERED_CONTENT} chars hidden]")
+                    full_html = msg.get('full_content_html')
+                    if full_html:
+                        content = full_html
+                    else:
+                        content = full
+                        if len(content) > self.MAX_RENDERED_CONTENT:
+                            content = (content[:self.MAX_RENDERED_CONTENT]
+                                       + f"\n… [truncated for display, "
+                                         f"{len(full) - self.MAX_RENDERED_CONTENT} chars hidden]")
                     new_html = self.collapsible_formatter.format_block(
                         title=msg.get('title', 'Details'),
-                        content=shown,
+                        content=content,
                         block_id=msg['id'],
-                        state=msg['state']
+                        state=msg['state'],
+                        title_color=msg.get('title_color'),
+                        content_is_html=bool(full_html),
+                        copy_payloads=msg.get('copy_payloads'),
                     )
                 except Exception as e:
                     logging.warning(f"Collapsible render failed for {block_id}: {e}")
                     return
                 logging.info(f"ChatWidget: toggling {block_id} -> {new_state} "
                              f"(content {len(msg.get('full_content') or '')} chars).")
-                new_doc = QTextDocument(self)
-                new_doc.setDocumentMargin(0)
+                new_doc = self._new_document()
                 new_doc.setHtml(new_html)
                 msg['doc'] = new_doc
                 self._update_scroll_bar()
@@ -425,7 +458,7 @@ class ChatWidget(QAbstractScrollArea):
             bar = self.verticalScrollBar()
             bar.setValue(bar.maximum())
 
-    def add_message(self, data, force_scroll=False, keep_stream=False):
+    def add_message(self, data, force_scroll=False, keep_stream=False, role=None):
         streaming_msg = self._streaming_msg
         if not keep_stream:
             if self.is_streaming:
@@ -433,17 +466,23 @@ class ChatWidget(QAbstractScrollArea):
             self._streaming_msg = None
 
         was_at_bottom = self._is_at_bottom()
-        doc = QTextDocument(self)
-        doc.setDocumentMargin(0) # Let the widget handle margins
+        doc = self._new_document()
 
         if isinstance(data, dict) and data.get('type') == 'collapsible':
             block_id = f"block-{uuid.uuid4()}"
-            initial_state = 'collapsed'
+            initial_state = data.get('state', 'collapsed')
+            if initial_state not in ('collapsed', 'expanded'):
+                initial_state = 'collapsed'
+            content_is_html = bool(data.get('content_is_html'))
+            copy_payloads = data.get('copy_payloads') or {}
             html_content = self.collapsible_formatter.format_block(
                 title=data.get('title', 'Details'),
                 content=data.get('content', ''),
                 block_id=block_id,
-                state=initial_state
+                state=initial_state,
+                title_color=data.get('title_color'),
+                content_is_html=content_is_html,
+                copy_payloads=copy_payloads,
             )
             doc.setHtml(html_content)
             msg = {
@@ -451,7 +490,10 @@ class ChatWidget(QAbstractScrollArea):
                 'id': block_id,
                 'state': initial_state,
                 'title': data.get('title', 'Details'),
-                'full_content': data.get('content', ''),
+                'full_content': data.get('plain_content', data.get('content', '')),
+                'full_content_html': data.get('content') if content_is_html else None,
+                'title_color': data.get('title_color'),
+                'copy_payloads': copy_payloads,
                 'doc': doc
             }
         elif isinstance(data, str):
@@ -459,7 +501,8 @@ class ChatWidget(QAbstractScrollArea):
             doc.setHtml(html_content)
             msg = {
                 'type': 'simple',
-                'raw_content': html_content, # Store original HTML for user message check
+                'raw_content': html_content,
+                'role': role,
                 'doc': doc
             }
         else:
@@ -502,12 +545,12 @@ class ChatWidget(QAbstractScrollArea):
         later to un-dim it, ``activate_queued_message``).
         """
         was_at_bottom = self._is_at_bottom()
-        doc = QTextDocument(self)
-        doc.setDocumentMargin(0)
+        doc = self._new_document()
         doc.setHtml(display_html)
         msg = {
             'type': 'simple',
             'raw_content': raw_html,  # normal (undimmed) HTML, restored on send
+            'role': 'user',
             'doc': doc,
             'queued': True,
         }
@@ -578,7 +621,7 @@ class ChatWidget(QAbstractScrollArea):
         last_user_message_index = -1
         for i in range(len(self.messages) - 1, -1, -1):
             msg = self.messages[i]
-            if msg.get('type') == 'simple' and msg.get('raw_content', '').strip().startswith("<b>You:</b>"):
+            if msg.get('type') == 'simple' and msg.get('role') == 'user':
                 last_user_message_index = i
                 break
 
@@ -635,7 +678,7 @@ class ChatWidget(QAbstractScrollArea):
             else:
                 if self.is_streaming:
                     self.is_streaming = False
-                doc = QTextDocument(self)
+                doc = self._new_document()
                 initial_content = f"<b>{actor_name}:</b> {status_text}... 0s"
                 doc.setHtml(initial_content)
                 msg = {'type': 'simple', 'doc': doc,
@@ -659,7 +702,7 @@ class ChatWidget(QAbstractScrollArea):
         initial = max(1, int(wait_seconds))
         content = (f"<i>Provider busy — automatic retry in {initial}s "
                    f"(attempt {attempt_num}/{max_attempts})...</i>")
-        doc = QTextDocument(self)
+        doc = self._new_document()
         doc.setHtml(content)
         self.messages.append({'type': 'simple', 'doc': doc, 'raw_content': content})
         self._retry_countdown_msg_idx = len(self.messages) - 1
@@ -716,8 +759,7 @@ class ChatWidget(QAbstractScrollArea):
                 self.viewport().update()
                 return
         was_at_bottom = self._is_at_bottom()
-        doc = QTextDocument(self)
-        doc.setDocumentMargin(0)
+        doc = self._new_document()
         doc.setHtml(html_text)
         self.messages.append({'type': 'live', 'live_ticket': ticket, 'doc': doc})
         self._update_scroll_bar()
@@ -763,7 +805,7 @@ class ChatWidget(QAbstractScrollArea):
             actor_name = self.current_assistant_name
         prefix = f"<b>{actor_name}:</b> "
         if not self.is_streaming or self._streaming_msg is None:
-            doc = QTextDocument(self)
+            doc = self._new_document()
             doc.setHtml(prefix)
             msg = {'type': 'simple', 'doc': doc,
                    'raw_content': prefix, 'plain': '', 'actor': actor_name}

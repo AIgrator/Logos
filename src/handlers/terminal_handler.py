@@ -34,6 +34,87 @@ def _running_job_id(result) -> int | None:
             return None
     return None
 
+
+def _shorten_text(value, limit: int = 60) -> str:
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    return text[:limit - 1].rstrip() + "…"
+
+
+def _shorten_command(value, limit: int = 120) -> str:
+    """Keep both the executable and the trailing arguments visible."""
+    text = " ".join(str(value or "").split())
+    if len(text) <= limit:
+        return text
+    tail = min(50, limit // 3)
+    head = max(40, limit - tail - 3)
+    return text[:head].rstrip() + " … " + text[-tail:].lstrip()
+
+
+def _action_summary(action_name: str, action_args: dict) -> str:
+    args = action_args if isinstance(action_args, dict) else {}
+    name = action_name or "action"
+
+    if name == 'execute_shell':
+        command = _shorten_command(args.get('command'), 120)
+        return f"Command · {command}" if command else "Command"
+    if name == 'read_files':
+        paths = args.get('paths')
+        count = len(paths) if isinstance(paths, list) else 0
+        return f"Reading {count} file(s)" if count else "Reading files"
+    if name == 'search_file_content':
+        pattern = _shorten_text(args.get('pattern'))
+        return f"Searching for '{pattern}'" if pattern else "Searching files"
+    if name == 'list_directory':
+        return "Listing directory"
+    if name == 'write_file':
+        return "Writing file"
+    if name == 'replace':
+        return "Editing file"
+    if name == 'replace_many':
+        replacements = args.get('replacements')
+        count = len(replacements) if isinstance(replacements, list) else 0
+        return f"Editing file ({count} replacements)" if count else "Editing file"
+    if name == 'delete_files':
+        paths = args.get('paths')
+        count = len(paths) if isinstance(paths, list) else 0
+        return f"Deleting {count} file(s)" if count else "Deleting files"
+    if name == 'move_files':
+        return "Moving files"
+    if name == 'copy_files':
+        return "Copying files"
+    if name == 'web_search':
+        query = _shorten_text(args.get('query'))
+        return f"Searching the web for '{query}'" if query else "Searching the web"
+    if name == 'web_fetchs':
+        urls = args.get('urls')
+        count = len(urls) if isinstance(urls, list) else 0
+        return f"Opening {count} page(s)" if count else "Opening pages"
+    if name == 'wait_seconds':
+        seconds = args.get('seconds', '?')
+        return f"Waiting {seconds}s"
+    if name in {'poll_shell_job', 'stop_shell_job'}:
+        job_id = args.get('job_id', '?')
+        verb = "Check" if name == 'poll_shell_job' else "Stop"
+        return f"{verb} shell job · #{job_id}"
+    return f"Running {name.replace('_', ' ')}"
+
+
+def _details_title(action_name: str) -> str:
+    if action_name == 'execute_shell':
+        return "Command details"
+    if action_name in {'write_file', 'replace', 'replace_many'}:
+        return "File operation details"
+    if action_name == 'read_files':
+        return "Files to read"
+    if action_name == 'list_directory':
+        return "Directory details"
+    if action_name == 'search_file_content':
+        return "Search details"
+    return f"Details · {action_name}"
+
+
 class WebTaskThread(QThread):
     """ Thread to handle blocking web requests."""
 
@@ -132,6 +213,9 @@ class TerminalHandler(BaseAgentHandler):
         self._abandoned_exec_workers = []
         self._pending_action_name = None
         self._pending_action_args = None
+        self._pending_action_label = None
+        self._job_commands = {}
+        self._job_cwds = {}
 
         self._job_wait_timer = QTimer()
         self._job_wait_timer.setSingleShot(True)
@@ -200,6 +284,88 @@ class TerminalHandler(BaseAgentHandler):
         prefix_len = len(common_prefix)
         return [line[prefix_len:] if line.startswith(common_prefix) else line for line in lines]
 
+    def _format_diff_text(self, old_lines: list[str], new_lines: list[str], start_line: int) -> str:
+        rows = []
+        for i, line in enumerate(old_lines):
+            prefix = f"{start_line + i:>4}" if start_line != -1 else "    "
+            rows.append(f"{prefix} - {line}")
+        for i, line in enumerate(new_lines):
+            prefix = f"{start_line + i:>4}" if start_line != -1 else "    "
+            rows.append(f"{prefix} + {line}")
+        return "\n".join(rows)
+
+    def _theme(self, key: str) -> str:
+        return self.theme_manager.get_style(key)
+
+    def _action_summary_html(self, label: str) -> str:
+        return (
+            f'<div style="background-color: {self._theme("ACTION_SUMMARY_BG")}; '
+            f'border-left: 3px solid {self._theme("ACTION_SUMMARY_BORDER")}; '
+            'padding: 6px 9px; margin: 6px 0 2px 0;">'
+            f'<span style="color: {self._theme("ACTION_SUMMARY_COLOR")}; '
+            f'font-weight: 600;">{html.escape(label)}</span></div>'
+        )
+
+    def _details_block(self, action_name: str, action_args: dict) -> dict:
+        if action_name == 'execute_shell' and action_args.get('command'):
+            command = str(action_args.get('command'))
+            extras = {k: v for k, v in action_args.items() if k != 'command'}
+            html_parts = [self.html_formatter.format_code_content(command, 'command.sh')]
+            plain_parts = [f"$ {command}"]
+            if extras:
+                labels = {
+                    'cwd': 'Working directory',
+                    'timeout': 'Timeout',
+                    'run_in_background': 'Run in background',
+                }
+                meta_lines = []
+                for key, value in extras.items():
+                    label = labels.get(key, key.replace('_', ' ').title())
+                    if isinstance(value, bool):
+                        value = 'yes' if value else 'no'
+                    meta_lines.append(f"{label}: {value}")
+                meta_text = "\n".join(meta_lines)
+                html_parts.append(
+                    f'<div style="color: {self._theme("COLLAPSIBLE_META")}; '
+                    f'margin-top: 6px; white-space: pre-wrap;">'
+                    f'{html.escape(meta_text)}</div>'
+                )
+                plain_parts.append(meta_text)
+            return {
+                'type': 'collapsible',
+                'title': _details_title(action_name),
+                'content': "\n".join(html_parts),
+                'plain_content': "\n\n".join(plain_parts),
+                'content_is_html': True,
+            }
+
+        if action_name == 'read_files':
+            paths = action_args.get('paths') or []
+            if isinstance(paths, str):
+                paths = [paths]
+            content = "\n".join(str(path) for path in paths) or "(no paths)"
+            return {'type': 'collapsible', 'title': _details_title(action_name), 'content': content}
+
+        if action_name == 'list_directory':
+            path = action_args.get('path', '.')
+            recursive = action_args.get('recursive')
+            content = f"Path: {path}"
+            if recursive is not None:
+                content += f"\nRecursive: {recursive}"
+            return {'type': 'collapsible', 'title': _details_title(action_name), 'content': content}
+
+        if action_name == 'search_file_content':
+            pattern = action_args.get('pattern', '')
+            path = action_args.get('path') or action_args.get('directory') or '.'
+            content = f"Pattern: {pattern}\nPath: {path}"
+            return {'type': 'collapsible', 'title': _details_title(action_name), 'content': content}
+
+        return {
+            'type': 'collapsible',
+            'title': _details_title(action_name),
+            'content': json.dumps(action_args, ensure_ascii=False, indent=2),
+        }
+
     def execute_action(self, action: dict) -> str | None:
         """
         Executes the action (tool call) requested by the LLM.
@@ -220,6 +386,8 @@ class TerminalHandler(BaseAgentHandler):
 
         path = action_args.get('path')
         is_file_op = action_name in ['write_file', 'replace', 'replace_many']
+        action_label = _action_summary(action_name, action_args)
+        self._pending_action_label = action_label
 
         if self.active_edit_path and (not is_file_op or path != self.active_edit_path):
             self.ui.add_message(self.html_formatter.format_container_end())
@@ -232,7 +400,15 @@ class TerminalHandler(BaseAgentHandler):
 
             if action_name == 'write_file':
                 content = action_args.get('content', '')
-                self.ui.add_message(self.html_formatter.format_write_chunk(content))
+                line_count = len(content.splitlines())
+                self.ui.add_text(f"Writing {line_count} line(s)")
+                self.ui.add_message({
+                    'type': 'collapsible',
+                    'title': f'File content · {path}',
+                    'content': self.html_formatter.format_code_content(content or '', str(path or '')),
+                    'plain_content': content or '(empty)',
+                    'content_is_html': True,
+                })
 
             elif action_name in ['replace', 'replace_many']:
                 replacements = [action_args] if action_name == 'replace' else action_args.get('replacements', [])
@@ -242,6 +418,8 @@ class TerminalHandler(BaseAgentHandler):
                 except Exception:
                     full_content = ""
 
+                diff_chunks = []
+                diff_html_chunks = []
                 for replacement in replacements:
                     old_string = replacement.get('old_string', '')
                     new_string = replacement.get('new_string', '')
@@ -250,19 +428,27 @@ class TerminalHandler(BaseAgentHandler):
                     dedented_old, dedented_new = dedented_all[:len(old_lines)], dedented_all[len(old_lines):]
                     index = full_content.find(old_string)
                     start_line = full_content.count('\n', 0, index) + 1 if index != -1 else -1
-                    self.ui.add_message(self.html_formatter.format_replace_chunk(dedented_old, dedented_new, start_line))
+                    diff_chunks.append(self._format_diff_text(dedented_old, dedented_new, start_line))
+                    diff_html_chunks.append(self.html_formatter.format_diff_content(dedented_old, dedented_new, start_line))
+
+                if diff_chunks:
+                    self.ui.add_text(f"Changed {len(diff_chunks)} replacement(s)")
+                    self.ui.add_message({
+                        'type': 'collapsible',
+                        'title': f'Diff · {action_name} · {path}',
+                        'content': "\n".join(diff_html_chunks),
+                        'plain_content': "\n\n".join(diff_chunks),
+                        'content_is_html': True,
+                    })
         else:
-            # Handle extensive arguments for UI for non-file-op commands
-            if len(json.dumps(action_args)) > 100: # Arbitrary threshold for 'extensive'
-                self.ui.add_message(f"<b>Executing:</b> {action_name}")
-                self.ui.add_message({
-                    'type': 'collapsible',
-                    'title': "Arguments",
-                    'content': json.dumps(action_args, indent=2)
-                })
-            else:
-                command_str_for_ui = f"`{action_name}({json.dumps(action_args)})`"
-                self.ui.add_message(f"<b>Executing:</b> {command_str_for_ui}")
+            self.ui.add_message(self._action_summary_html(action_label))
+            # Shell commands and self-describing file results get one combined
+            # block when their result arrives. A separate pre-execution details
+            # block only duplicated the command/path/pattern.
+            if action_args and action_name not in {
+                    'execute_shell', 'poll_shell_job', 'stop_shell_job',
+                    'read_files', 'list_directory', 'search_file_content'}:
+                self.ui.add_message(self._details_block(action_name, action_args))
         # ---------------------------------------------
 
         self._ensure_exec_thread()
@@ -355,12 +541,38 @@ class TerminalHandler(BaseAgentHandler):
 
         job_id = _running_job_id(result)
         if tool_name == 'execute_shell' and job_id is not None:
+            command = str(args.get('command') or '')
+            cwd = str(args.get('cwd') or '')
+            if not cwd:
+                computer = getattr(self, 'computer', None)
+                cwd = str(getattr(computer, 'working_directory', '') or '')
+            job_commands = getattr(self, '_job_commands', None)
+            if job_commands is not None:
+                job_commands[job_id] = command
+                if len(job_commands) > 100:
+                    job_commands.pop(next(iter(job_commands)))
+            job_cwds = getattr(self, '_job_cwds', None)
+            if job_cwds is not None and cwd:
+                job_cwds[job_id] = cwd
+                if len(job_cwds) > 100:
+                    job_cwds.pop(next(iter(job_cwds)))
+            note = (f"Started in background as job #{job_id}. Use poll_shell_job "
+                    "to check progress, stop_shell_job to abort.")
             output_for_llm = (
                 f"**Tool Result:** Background shell job #{job_id} started and is running.\n"
                 f"Poll it with poll_shell_job, pacing polls with wait_seconds.\n"
                 f"```\n{result}\n```"
             )
-            output_for_ui = f"<i>Background shell job #{job_id} started.</i>"
+            output_for_ui = {
+                'type': 'collapsible',
+                'title': f"Shell · running in background · job #{job_id}",
+                'content': self.html_formatter.format_shell_block(
+                    command, exit_note=note, show_output=False, cwd=cwd),
+                'plain_content': f"$ {command}\n\n{note}",
+                'content_is_html': True,
+                'title_color': self._theme("WARNING_COLOR"),
+                'copy_payloads': {'command': command},
+            }
             return output_for_llm, output_for_ui
 
         if tool_name in ('poll_shell_job', 'stop_shell_job') and isinstance(result, dict) \
@@ -371,32 +583,129 @@ class TerminalHandler(BaseAgentHandler):
             status = result.get('status', '?')
             elapsed = result.get('elapsed_seconds', '?')
             output = result.get('output', '')
+            job_commands = getattr(self, '_job_commands', {}) or {}
+            try:
+                command = job_commands.get(int(job_id), '')
+            except (TypeError, ValueError):
+                command = job_commands.get(job_id, '')
+            job_cwds = getattr(self, '_job_cwds', {}) or {}
+            try:
+                cwd = job_cwds.get(int(job_id), '')
+            except (TypeError, ValueError):
+                cwd = job_cwds.get(job_id, '')
+            cwd = str(cwd or args.get('cwd') or '')
+            if not cwd:
+                computer = getattr(self, 'computer', None)
+                cwd = str(getattr(computer, 'working_directory', '') or '')
+
+            if status == 'done' and command:
+                shell_result = {
+                    'stdout': output,
+                    'stderr': '',
+                    'exit_code': result.get('exit_code', -1),
+                    'wall_time': result.get('wall_time', elapsed),
+                    'total_lines': result.get('total_lines'),
+                    'total_chars': result.get('total_chars'),
+                    'timed_out': result.get('timed_out', False),
+                    'cancelled': result.get('cancelled', False),
+                    'inactivity_timeout': result.get('inactivity_timeout', False),
+                    'exit_note': result.get('exit_note'),
+                    'output_file': result.get('output_file'),
+                }
+                llm, ui = self._format_result_for_llm_and_ui(
+                    'execute_shell', shell_result,
+                    {'command': command, 'job_id': job_id, 'cwd': cwd})
+                verb = ('stopped' if tool_name == 'stop_shell_job'
+                        and result.get('cancelled') else 'finished')
+                return f"**Background job #{job_id} {verb}.**\n{llm}", ui
+
+            if status == 'running' and command:
+                content = self.html_formatter.format_shell_block(
+                    command, stdout=output, cwd=cwd)
+                output_for_llm = (
+                    f"**Tool Result:** Background job #{job_id} running after {elapsed}s.\n"
+                    f"```\n{output or '(no new output)'}\n```"
+                )
+                output_for_ui = {
+                    'type': 'collapsible',
+                    'title': f"Shell · job #{job_id} · running · {elapsed}s",
+                    'content': content,
+                    'plain_content': f"$ {command}\n\n{output or '(no new output)'}",
+                    'content_is_html': True,
+                    'title_color': self._theme("WARNING_COLOR"),
+                    'copy_payloads': {'command': command, 'output': output or '(no new output)'},
+                    'state': 'expanded',
+                }
+                return output_for_llm, output_for_ui
+
+            if status == 'not_found' and command:
+                output_for_llm = (
+                    f"**Tool Result:** Background job #{job_id} has already finished "
+                    "and was reaped; no action is needed."
+                )
+                output_for_ui = {
+                    'type': 'collapsible',
+                    'title': f"Background job #{job_id} · already finished",
+                    'content': self.html_formatter.format_plain_content(
+                        "This job has already finished. No action is needed."),
+                    'plain_content': "This job has already finished. No action is needed.",
+                    'content_is_html': True,
+                }
+                return output_for_llm, output_for_ui
+
             if status == 'done':
                 exit_code = result.get('exit_code', '?')
-                total_lines = result.get('total_lines')
-                lines_text = f", {total_lines} lines" if total_lines else ""
-                exit_note = result.get('exit_note')
-                note_text = f"\n**Note:** {exit_note}" if exit_note else ""
+                title = f"Background job #{job_id} finished · exit {exit_code}"
+                title_color = self._theme(
+                    "SUCCESS_COLOR" if exit_code == 0 else "ERROR_COLOR")
                 output_for_llm = (
                     f"**Tool Result:** Background job #{job_id} done (exit {exit_code}) "
-                    f"after {elapsed}s{lines_text}.{note_text}\n"
-                    f"```\n{output or '(no output)'}\n```"
+                    f"after {elapsed}s.\n```\n{output or '(no output)'}\n```"
                 )
-                title = f"Background job #{job_id}: done (exit {exit_code})"
-            elif status == 'running':
+                output_for_ui = {
+                    'type': 'collapsible',
+                    'title': title,
+                    'content': self.html_formatter.format_plain_content(
+                        output or '(no output)'),
+                    'plain_content': output or '(no output)',
+                    'content_is_html': True,
+                    'title_color': title_color,
+                    'copy_payloads': {'output': output or '(no output)'},
+                    'state': 'expanded' if exit_code != 0 else 'collapsed',
+                }
+                return output_for_llm, output_for_ui
+
+            if status == 'running':
                 output_for_llm = (
-                    f"**Tool Result:** Background job #{job_id} running after {elapsed}s.\n```\n"
-                    f"{output or '(no new output)'}\n```"
+                    f"**Tool Result:** Background job #{job_id} running after {elapsed}s.\n"
+                    f"```\n{output or '(no new output)'}\n```"
                 )
-                title = f"Background job #{job_id}: running"
-            else:
-                output_for_llm = (
-                    f"**Tool Result:** Background job #{job_id} not found "
-                    f"(already reaped after finishing, or wrong id)."
-                )
-                title = f"Background job #{job_id}: not found"
-            content = output if status in ('done', 'running') else output_for_llm
-            output_for_ui = {'type': 'collapsible', 'title': title, 'content': content or '(empty)'}
+                output_for_ui = {
+                    'type': 'collapsible',
+                    'title': f"Background job #{job_id} · running",
+                    'content': self.html_formatter.format_plain_content(
+                        output or '(no new output)'),
+                    'plain_content': output or '(no new output)',
+                    'content_is_html': True,
+                    'title_color': self._theme("WARNING_COLOR"),
+                    'copy_payloads': {'output': output or '(no new output)'},
+                    'state': 'expanded',
+                }
+                return output_for_llm, output_for_ui
+
+            output_for_llm = (
+                f"**Tool Result:** Background job #{job_id} not found "
+                f"(already reaped after finishing, or wrong id)."
+            )
+            output_for_ui = {
+                'type': 'collapsible',
+                'title': f"Background job #{job_id} · not found",
+                'content': self.html_formatter.format_plain_content(
+                    "Unknown job id. It may have been reaped, or the id is wrong."),
+                'plain_content': "Unknown job id. It may have been reaped, or the id is wrong.",
+                'content_is_html': True,
+                'title_color': self._theme("ERROR_COLOR"),
+            }
             return output_for_llm, output_for_ui
 
         if tool_name == 'wait_seconds' and isinstance(result, dict):
@@ -407,6 +716,7 @@ class TerminalHandler(BaseAgentHandler):
             return output_for_llm, output_for_ui
 
         if tool_name == 'execute_shell':
+            command = str(args.get('command') or '')
             stdout = result.get('stdout', '')
             stderr = result.get('stderr', '')
             exit_code = result.get('exit_code', -1)
@@ -414,14 +724,19 @@ class TerminalHandler(BaseAgentHandler):
             total_lines = result.get('total_lines')
             total_chars = result.get('total_chars')
             exit_note = result.get('exit_note')
+            output_file = result.get('output_file')
+            timed_out = bool(result.get('timed_out'))
+            cancelled = bool(result.get('cancelled'))
+            inactive = bool(result.get('inactivity_timeout'))
             meta = []
             if wall_time is not None:
                 meta.append(f"{wall_time}s")
             if total_lines is not None:
-                meta.append(f"{total_lines} lines")
+                meta.append(f"{total_lines} line(s)")
             if total_chars is not None:
                 meta.append(f"{total_chars} chars")
             meta_text = (", " + ", ".join(meta)) if meta else ""
+            ui_meta = (" · " + " · ".join(meta)) if meta else ""
             header = f"**Command Result:** (Exit Code: {exit_code}{meta_text})\n"
             if exit_note:
                 header += f"**Note:** {exit_note}\n"
@@ -431,11 +746,62 @@ class TerminalHandler(BaseAgentHandler):
             )
             if stderr:
                 output_for_llm += f"\n**SYSTEM:**\n```\n{stderr}\n```"
-            title = f"Shell Command Output (Exit Code: {exit_code}{meta_text})"
-            content = f"EXIT CODE: {exit_code}{meta_text}\n{stdout or '(no output)'}"
+            job_id_arg = args.get('job_id')
+            prefix = f"Shell · job #{job_id_arg}" if job_id_arg else "Shell"
+            if timed_out:
+                title = f"{prefix} · timed out{ui_meta}"
+            elif cancelled:
+                title = f"{prefix} · stopped{ui_meta}"
+            elif inactive:
+                title = f"{prefix} · stopped (inactive){ui_meta}"
+            elif exit_code == 0:
+                title = f"{prefix} · exit 0{ui_meta}"
+            else:
+                title = f"{prefix} · exit {exit_code}{ui_meta}"
+            cwd = str(args.get('cwd') or '')
+            if not cwd:
+                computer = getattr(self, 'computer', None)
+                cwd = str(getattr(computer, 'working_directory', '') or '')
+            display_stdout = str(stdout or '')
+            if output_file:
+                display_stdout = re.sub(
+                    r"\n*\[Full output saved to: .*?\]", "", display_stdout).rstrip()
+            content_html = self.html_formatter.format_shell_block(
+                command, stdout=display_stdout, stderr=stderr,
+                exit_note=exit_note or '', output_file=output_file or '',
+                cwd=cwd)
+            plain_parts = [f"$ {command}", "", display_stdout or '(no output)']
             if stderr:
-                content += f"\n\nSYSTEM:\n{stderr}"
-            output_for_ui = {'type': 'collapsible', 'title': title, 'content': content}
+                plain_parts += ["", f"System note: {stderr}"]
+            if exit_note:
+                plain_parts += ["", f"Note: {exit_note}"]
+            if output_file:
+                plain_parts += ["", f"Full output: {output_file}"]
+            if timed_out or cancelled or inactive:
+                title_color = self._theme("ERROR_COLOR")
+            elif exit_code == 0:
+                title_color = self._theme("SUCCESS_COLOR")
+            elif exit_note:
+                title_color = self._theme("WARNING_COLOR")
+            else:
+                title_color = self._theme("ERROR_COLOR")
+            output_for_ui = {
+                'type': 'collapsible',
+                'title': title,
+                'content': content_html,
+                'plain_content': "\n".join(plain_parts),
+                'content_is_html': True,
+                'title_color': title_color,
+                'copy_payloads': {
+                    'command': command,
+                    'output': display_stdout or '(no output)',
+                },
+                # Failures open by default so the error is not hidden behind
+                # another click; successful calls stay compact.
+                'state': ('expanded' if (exit_code != 0 or timed_out
+                                         or cancelled or inactive)
+                          else 'collapsed'),
+            }
 
         elif tool_name in ['write_file', 'replace', 'replace_many']:
             output_for_llm = f"**Tool Result:**\n```\n{result}\n```"
@@ -443,40 +809,62 @@ class TerminalHandler(BaseAgentHandler):
 
         elif tool_name == 'read_files':
             paths = args.get('paths', [])
-            title = f"Content of {len(paths)} file(s)"
+            title = f"Read {len(paths)} file(s)"
             output_for_llm = f"**Tool Result:**\n```\n{result}\n```"
             output_for_ui = {
                 'type': 'collapsible',
                 'title': title,
-                'content': str(result)
+                'content': self.html_formatter.format_read_files_content(str(result)),
+                'plain_content': str(result),
+                'content_is_html': True,
+                'copy_payloads': {'output': str(result)},
             }
 
         elif tool_name in ['delete_files', 'move_files', 'copy_files']:
             output_for_llm = f"**Tool Result:**\n```\n{result}\n```"
             output_for_ui = {
                 'type': 'collapsible',
-                'title': f"Operation Result: {tool_name.replace('_', ' ').title()}",
+                'title': "File operation result",
                 'content': str(result)
             }
 
         elif tool_name == 'search_file_content':
             query = args.get('pattern', 'N/A')
-            path = args.get('path', '.')
-            title = f"Search Results for '{query}' in '{path}'"
-            content = "\n".join(result) if isinstance(result, list) else str(result)
+            path = args.get('path') or args.get('directory') or '.'
+            title = f"Search results · '{query}' in '{path}'"
+            items = result if isinstance(result, list) else str(result).splitlines()
+            content = "\n".join(str(item) for item in items)
             output_for_llm = f"**Tool Result:**\n```\n{content}\n```"
             if result:
-                 output_for_ui = {'type': 'collapsible', 'title': title, 'content': content}
+                output_for_ui = {
+                    'type': 'collapsible',
+                    'title': title,
+                    'content': self.html_formatter.format_list_content(
+                        items, empty_text="(No results found)"),
+                    'plain_content': content,
+                    'content_is_html': True,
+                    'copy_payloads': {'output': content},
+                }
             else:
-                 output_for_ui = "<i>(No results found)</i>"
+                output_for_ui = "<i>(No results found)</i>"
 
         elif tool_name == 'list_directory':
             path = args.get('path', '.')
-            title = f"Directory Listing for: {path}"
-            content = "\n".join(result) if isinstance(result, list) else str(result)
+            title = f"Directory contents · {path}"
+            items = result if isinstance(result, list) else str(result).splitlines()
+            items = sorted((str(item) for item in items), key=str.casefold)
+            content = "\n".join(items)
             output_for_llm = f"**Tool Result:**\n```\n{content}\n```"
             if result:
-                output_for_ui = {'type': 'collapsible', 'title': title, 'content': content}
+                output_for_ui = {
+                    'type': 'collapsible',
+                    'title': title,
+                    'content': self.html_formatter.format_list_content(
+                        items, empty_text=f"(Directory '{path}' is empty or not found)"),
+                    'plain_content': content,
+                    'content_is_html': True,
+                    'copy_payloads': {'output': content},
+                }
             else:
                 output_for_ui = f"<i>(Directory '{path}' is empty or not found)</i>"
 
@@ -484,7 +872,7 @@ class TerminalHandler(BaseAgentHandler):
             # Generic fallback for any other tool
             str_result = str(result)
             output_for_llm = f"**Tool Result:**\n```\n{str_result}\n```"
-            output_for_ui = {'type': 'collapsible', 'title': tool_name, 'content': str_result}
+            output_for_ui = {'type': 'collapsible', 'title': f"Result · {tool_name}", 'content': str_result}
 
         return output_for_llm, output_for_ui
 
@@ -549,9 +937,10 @@ class TerminalHandler(BaseAgentHandler):
             pass
         tail = html.escape((last_line or "")[-200:]).strip()
         tail_html = f"<br><code>{tail}</code>" if tail else ""
+        label = self._pending_action_label or self._pending_action_name
         self.ui.show_tool_progress(
             ticket,
-            f"⏳ <b>{html.escape(str(self._pending_action_name))}</b>{pct} · {elapsed:.0f}s{tail_html}"
+            f"⏳ <b>{html.escape(str(label))}</b>{pct} · {elapsed:.0f}s{tail_html}"
         )
 
     @Slot(int, object)

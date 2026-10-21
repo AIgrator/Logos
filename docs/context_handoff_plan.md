@@ -1770,3 +1770,108 @@ raw_log_ref
 - `src/handlers/browser_handler.py`, `src/handlers/vision_handler.py` — будущее
   единое представление.
 - `logs/app.log` — сырой аудит; не заменяется UI.
+
+### 17.10 Visual language (P0.5)
+
+Implemented after the first manual website test. The functional terminal UX was
+already close to the target, but the visual layer was still flat black/white and
+the user prompt was rendered as raw HTML with collapsed line breaks.
+
+Decisions:
+- Chat canvas uses a soft dark surface (`#0d1117` in dark mode) instead of pure
+  black, with tokenised colors for user cards, action rows, code, diffs and
+  success/error states.
+- User prompts use `render_user_message` / `UIManager.add_user_message`:
+  HTML-escaped, newline-preserving (`white-space: pre-wrap`), accent left border,
+  label, card background, `role="user"` for scroll/copy semantics.
+- Action summaries are compact accent rows. `execute_shell` includes a
+  middle-truncated command snippet; the shell block carries the full command,
+  working directory, status and output.
+- Shell details no longer start with raw JSON; the command is shown as a code
+  block and only extra arguments are shown as JSON.
+- File content is syntax-highlighted with Pygments (`src/ui/code_highlight.py`),
+  capped at 600 lines for rendering; copy-all still uses the plain text.
+- Diffs use red/green line backgrounds. Collapsibles gained
+  `content_is_html` + `plain_content`, so HTML bodies can be shown safely while
+  clipboard output remains plain text.
+- Result titles are colored green for success, red for real failures, and
+  warning for expected non-zero exits with an `exit_note`; background jobs use
+  warning color while running.
+- Model names and "Task Finished" use accent/success colors.
+- Model prose lists are normalized before Markdown: inline `1. ... 2. ...`
+  becomes separate items, a blank line is inserted before a list that follows a
+  paragraph, and `nl2br` preserves intentional line breaks. Fenced code is left
+  untouched.
+- `list_directory` and `search_file_content` results render as real `<ul>`
+  lists; directory names are sorted for display while the model still receives
+  the original tool output.
+- A shell call is one inspectable block, not a command/details block followed by
+  a separate raw result. The header carries status, exit code, duration, line
+  count and character count; the body labels `Command` and `Output` separately,
+  keeps the full-output path and system notes visible, and never dumps the
+  literal `EXIT CODE:`/`SYSTEM:` text. Failed/timed-out commands open
+  automatically; successful ones stay compact. Expanded blocks expose
+  `Copy command` / `Copy output` links separated by a dot; list and read-file
+  blocks expose `Copy output`.
+- Background job launch, completion, polling and stopping reuse the same shell
+  block. A launch says `Shell · running in background · job #N`; completion says
+  `Shell · job #N · exit ...` with the command and output. Stopping a job whose
+  handle was already reaped says `Background job #N · already finished` in
+  neutral color instead of a red `not found` error.
+- `poll_shell_job` / `stop_shell_job` action rows say `Check shell job · #N` /
+  `Stop shell job · #N`; their raw argument details block is omitted.
+  `read_files`, `list_directory` and `search_file_content` also omit the
+  pre-execution details block because their result block already carries the
+  paths/pattern and path.
+- `search_file_content` skips cache/VCS/dependency directories and binary or
+  oversized files, and its title uses the actual `path` argument instead of a
+  hardcoded `.`. `list_directory` hides generated cache entries such as
+  `__pycache__` and `.pytest_cache`.
+- Silent-failure notes are factual (`exited with code N ... produced no output`);
+  timeout speculation is only added when the process ran close to its limit.
+  Expected-exit notes do not show literal Markdown backticks.
+- Expected non-zero exits (`grep`/`findstr` no match, `diff` differences)
+  suppress the generic "silent crash" diagnostic; only the normal-exit note is
+  shown, in warning color.
+- The pre-execution action row says `Command · ...` rather than `Running
+  command`, because it stays in the transcript after the command finishes.
+- Research basis: Warp blocks group prompt/input/output/exit metadata and expose
+  copy actions; Claude Code and opencode collapse long tool output with a
+  meaningful preview and expand failures; current agent UIs treat each tool call
+  as a status row with human title, timing, input and output on demand. Raw JSON
+  and unlabelled terminal dumps are the anti-pattern.
+- Raw tool arguments and raw logs remain in `logs/app.log`; the UI never
+  pretends they do not exist.
+
+Acceptance for this sub-step:
+- A multi-line prompt containing `<` / `>` renders as separate readable lines.
+- Model summaries such as `Сделано: 1. ... 2. ... 3. ...` render as an ordered
+  list, including when the model writes all items on one line.
+- Directory/search results render as list rows, not a single paragraph.
+- A shell block shows `Command` and `Output` as separate labelled sections, with
+  exit code/timing in the header and no raw `EXIT CODE:` line.
+- A failed or timed-out shell command is expanded automatically; a successful
+  one is collapsed but opens on click.
+- Expected non-zero exits with an `exit_note` use warning color; real failures,
+  timeouts, cancellations and inactive stops use error color.
+- A `findstr`/`grep` no-match result shows the normal-exit note without the
+  contradictory "process exited with code 1 ... likely crashed" diagnostic.
+- Expanded shell blocks offer `Copy command` and `Copy output`, visibly
+  separated; list/read-file blocks offer `Copy output` without selecting text
+  manually.
+- A finished background job with a known command renders as a shell block with
+  its command and output, not as a raw `Background job #N finished` line.
+- Stopping an already-finished/reaped job shows a neutral `already finished`
+  title, not a red error.
+- Search results contain no `.pycache`/binary noise and the title shows the
+  requested path; directory listings omit generated cache entries.
+- List/search/read show one result block instead of a redundant details block
+  followed by the result.
+- A deliberate non-zero exit with no output shows a factual note, not the
+  "killed at the timeout" speculation.
+- Long shell commands keep both their executable/start and trailing arguments
+  visible in the compact action row (middle truncation, not end truncation).
+- File content is visibly syntax-highlighted; diffs show red and green lines.
+- Expanding a collapsible does not show escaped HTML tags in the UI.
+- Copy-all from a highlighted block returns plain code/diff text.
+- `ruff` and `compileall` pass.

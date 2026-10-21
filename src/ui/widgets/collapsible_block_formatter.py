@@ -36,12 +36,15 @@ class CollapsibleBlockFormatter:
         """Returns a standardized CSS style string for icons."""
         return f"vertical-align: middle; height: {size}px; width: {size}px;"
 
-    def format_block(self, title: str, content: str, block_id: str, state: str) -> str:
+    def format_block(self, title: str, content: str, block_id: str, state: str,
+                     title_color: str | None = None, content_is_html: bool = False,
+                     copy_payloads: dict | None = None) -> str:
         """
         Generates the HTML for a collapsible block in either a collapsed or expanded state.
         """
         escaped_title = html.escape(title)
-        icon_color = self._get_style('TERMINAL_HEADER_COLOR')
+        icon_color = title_color or self._get_style('COLLAPSIBLE_TITLE')
+        border_color = title_color or self._get_style('COLLAPSIBLE_TITLE')
         icon_size = 12
 
         if state == 'collapsed':
@@ -51,37 +54,60 @@ class CollapsibleBlockFormatter:
         else:  # expanded
             arrow_icon_uri = self._icon_to_data_uri('fa5s.caret-down', icon_color, icon_size)
             href = f"toggle:{block_id}:collapsed"
-            escaped_content = html.escape(content)
-            content_html = f"""
-            <div>
-                <pre style="
-                    background-color: {self._get_style('TERMINAL_PRE_BG')};
-                    padding: 8px;
-                    border-radius: 4px;
-                    color: {self._get_style('TERMINAL_CODE_COLOR')};
-                    white-space: pre-wrap;
-                    word-wrap: break-word;
-                    margin-top: 5px;
-                "><code>{escaped_content}</code></pre>
-            </div>
-            """
+            if content_is_html:
+                content_html = f'<div style="margin-top: 6px;">{content}</div>'
+            else:
+                escaped_content = html.escape(content)
+                content_html = f"""
+                <div>
+                    <pre style="
+                        background-color: {self._get_style('CODE_BG')};
+                        border: 1px solid {self._get_style('CODE_BORDER')};
+                        padding: 10px;
+                        color: {self._get_style('TERMINAL_PRE_COLOR')};
+                        white-space: pre-wrap;
+                        word-wrap: break-word;
+                        margin-top: 6px;
+                        margin-bottom: 0;
+                    "><code>{escaped_content}</code></pre>
+                </div>
+                """
+
+        copy_html = ''
+        if state == 'expanded' and copy_payloads:
+            links = []
+            for label, payload in copy_payloads.items():
+                if not payload:
+                    continue
+                safe_label = html.escape(str(label), quote=True)
+                links.append(
+                    f'<a href="copy:{block_id}:{safe_label}" '
+                    f'style="color: {self._get_style("COLLAPSIBLE_META")}; '
+                    'text-decoration: none;">'
+                    f'Copy {html.escape(str(label))}</a>'
+                )
+            if links:
+                copy_html = (f'<div style="margin-top: 8px; font-size: 90%;">'
+                             f'{"&nbsp;&nbsp;&middot;&nbsp;&nbsp;".join(links)}</div>')
 
         icon_style = self._get_icon_style(icon_size)
         arrow_html = f'<img src="{arrow_icon_uri}" style="{icon_style}">'
 
         return f"""
         <div style="
-            background-color: {self._get_style('TERMINAL_CONTAINER_BG')};
-            border-left: 3px solid {self._get_style('TERMINAL_CONTAINER_BORDER')};
+            background-color: {self._get_style('COLLAPSIBLE_BG')};
+            border: 1px solid {self._get_style('COLLAPSIBLE_BORDER')};
+            border-left: 3px solid {border_color};
             padding: 10px;
-            margin-top: 5px;
-            margin-bottom: 5px;
+            margin-top: 6px;
+            margin-bottom: 6px;
         ">
             <div style="font-weight: bold;">
                 <a href="{href}" style="text-decoration: none; color: {icon_color};">
                     {arrow_html}&nbsp;{escaped_title}
                 </a>
             </div>
+            {copy_html}
             {content_html}
         </div>
         """

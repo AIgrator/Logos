@@ -17,6 +17,7 @@ watchdog
 trafilatura
 ddgs
 markdown
+pygments
 sumy
 nltk
 rapidfuzz

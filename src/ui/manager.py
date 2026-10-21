@@ -23,7 +23,7 @@ from states import ControllerState
 from . import styles
 from .utils import CustomToolTipManager, IconHoverFilter
 from .widgets.attachment_chip import AttachmentChip
-from .text_render import render_text
+from .text_render import render_text, render_user_message
 from .widgets.chat_widget import ChatWidget
 from .widgets.model_switch_popup import ModelSwitchPopup
 from .widgets.custom_title_bar import CustomTitleBar
@@ -1214,6 +1214,25 @@ class UIManager(QWidget):
         self.add_file_action.setEnabled(can_add_files)
         self.add_folder_action.setEnabled(can_add_files)
 
+    def build_user_message_html(self, content: str, queued: bool = False) -> str:
+        """Build a safe, line-preserving user prompt card."""
+        theme = self.controller.theme_manager
+        return render_user_message(
+            content,
+            background=theme.get_style("USER_MESSAGE_BG"),
+            border=theme.get_style("USER_MESSAGE_BORDER"),
+            text_color=theme.get_style("USER_MESSAGE_TEXT"),
+            label_color=(theme.get_style("COLLAPSIBLE_META") if queued
+                         else theme.get_style("USER_LABEL_COLOR")),
+            queued=queued,
+            queued_color=theme.get_style("COLLAPSIBLE_META"),
+        )
+
+    def add_user_message(self, content: str, queued: bool = False):
+        """Add the user's own prompt as a safe, readable card."""
+        self.add_message(self.build_user_message_html(content, queued=queued),
+                         force_scroll=True, role='user')
+
     def add_error_message(self, message, force_scroll=True):
         error_style = self.controller.theme_manager.get_style("ERROR_MESSAGE_STYLE")
         self.add_message(f'<span style="{error_style}">{message}</span>', force_scroll=force_scroll)
@@ -1232,10 +1251,10 @@ class UIManager(QWidget):
         unified pipeline with markdown detection OFF (deterministic escape)."""
         self.add_message(render_text(content, prefix_html, markdown_ok=False))
 
-    def add_message(self, html_content, force_scroll=False, keep_stream=False):
+    def add_message(self, html_content, force_scroll=False, keep_stream=False, role=None):
         if self.is_compact:
             force_scroll = True
-        self.chat_widget.add_message(html_content, force_scroll=force_scroll, keep_stream=keep_stream)
+        self.chat_widget.add_message(html_content, force_scroll=force_scroll, keep_stream=keep_stream, role=role)
 
     def add_image_to_history(self, image_bytes: bytes):
         if not image_bytes:

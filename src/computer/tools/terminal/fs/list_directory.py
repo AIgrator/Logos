@@ -3,6 +3,12 @@ import os
 
 from src.computer.computer import tool_meta
 
+_SKIP_ENTRIES = {
+    '__pycache__', '.pytest_cache', '.mypy_cache', '.ruff_cache',
+    '.tox', '.eggs', '.DS_Store', 'Thumbs.db',
+}
+
+
 @tool_meta(
     tool={
         "name": "list_directory",
@@ -28,7 +34,8 @@ def list_directory(self, path: str) -> list:
     try:
         absolute_path = self._resolve_path(path)
         logging.info(f"Listing directory: {absolute_path}")
-        return os.listdir(absolute_path)
+        return [entry for entry in os.listdir(absolute_path)
+                if entry not in _SKIP_ENTRIES]
     except Exception as e:
         logging.error(f"Error listing directory '{path}': {e}")
         return [f"Error: {e}"]

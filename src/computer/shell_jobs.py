@@ -291,8 +291,8 @@ def _exit_code_note(command: str, exit_code: int) -> str | None:
     lowered = " ".join(command.strip().lower().split())
     for prefix in _EXIT1_NORMAL:
         if lowered == prefix or lowered.startswith(prefix + " "):
-            return (f"Exit code 1 from `{prefix}` usually means no matches / "
-                    "no differences / condition false — not a tool failure.")
+            return (f"Exit code 1 from {prefix} usually means no matches / "
+                    "no differences / condition false - not a tool failure.")
     return None
 
 
@@ -333,10 +333,15 @@ def _mute_diagnostic(exit_code: int, stdout: str, stderr: str,
     """
     if exit_code == 0 or stdout.strip() or stderr.strip():
         return stderr
-    verdict = (f"\n(Process exited with code {exit_code} after {elapsed:.0f}s "
-               f"of {timeout:.0f}s allowed with no output at all. Likely: it was "
-               f"killed right at the timeout, terminated externally, ran out of "
-               f"memory, or crashed silently.)")
+    limit = f"{timeout:.0f}s allowed" if timeout and timeout > 0 else "no timeout"
+    near_timeout = bool(timeout and timeout > 0 and elapsed >= timeout * 0.9)
+    if near_timeout:
+        verdict = (f"\n(Process exited with code {exit_code} after {elapsed:.0f}s "
+                   f"with {limit} and no output at all. It may have been killed "
+                   f"at the timeout or crashed silently.)")
+    else:
+        verdict = (f"\n(Process exited with code {exit_code} after {elapsed:.0f}s "
+                   f"with {limit} and produced no output.)")
     return (stderr + verdict).strip()
 
 
@@ -379,7 +384,10 @@ def pump_shell(proc: subprocess.Popen, timeout: float, cancel_event,
         if cancel_event is not None and cancel_event.is_set():
             cancelled = True
             break
-        if elapsed >= timeout:
+        # timeout <= 0 means "no shell timeout" (background jobs). They are
+        # stopped explicitly via stop_shell_job instead of being killed just
+        # because they are long-lived, e.g. a dev server.
+        if timeout and timeout > 0 and elapsed >= timeout:
             timed_out = True
             break
         if (inactivity_timeout > 0
@@ -466,6 +474,10 @@ def run_shell_command(command: str, working_directory, timeout: float,
             return _build_result(command, -1, full_output, note, run_elapsed,
                                  output_limit, timed_out=True)
         note = _mute_diagnostic(exit_code, full_output, "", run_elapsed, timeout)
+        if _exit_code_note(command, exit_code):
+            # Expected non-zero (grep/findstr no match, diff differences) is
+            # not a silent crash; the normal-exit note below explains it.
+            note = ""
         return _build_result(command, exit_code, full_output, note,
                              run_elapsed, output_limit)
     except Exception as e:
@@ -574,6 +586,8 @@ class ShellJobManager:
                 else:
                     note = _mute_diagnostic(exit_code, full_output, "",
                                             wall_time, timeout)
+                    if _exit_code_note(command, exit_code):
+                        note = ""
                     job.result = _build_result(
                         command, exit_code, full_output, note, wall_time,
                         job.output_limit)
@@ -590,8 +604,11 @@ class ShellJobManager:
     def launch(self, command: str, working_directory, timeout: float,
                output_limit: int = POLL_OUTPUT_CAP,
                inactivity_timeout: float = 0) -> dict:
-        job = self._register(command, timeout, output_limit=output_limit,
-                             inactivity_timeout=inactivity_timeout)
+        # A background job is meant to outlive the shell timeout. Do not pass
+        # the foreground timeout/inactivity limit here: a dev server produces
+        # no output after startup and would otherwise be killed as "idle".
+        job = self._register(command, 0, output_limit=output_limit,
+                             inactivity_timeout=0)
         self._start_job_thread(job, working_directory)
         return {"job_id": job.job_id, "status": "running",
                 "hint": "Use poll_shell_job to check progress, stop_shell_job to abort."}

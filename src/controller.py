@@ -469,7 +469,7 @@ class AppController(QObject):
             self._enqueue_chat_message(user_text)
             return
 
-        self.ui.add_message(f"<b>You:</b> {user_text}")
+        self.ui.add_user_message(user_text)
         self.conversation_history.append({'role': 'user', 'content': user_text})
 
         # Process attachments based on the current mode
@@ -578,9 +578,8 @@ class AppController(QObject):
         self._update_attachment_menu()
 
         label = user_text if user_text.strip() else "(attachment)"
-        raw_html = f"<b>You:</b> {label}"
-        style = self.theme_manager.get_style("QUEUED_MESSAGE_STYLE")
-        display_html = f'<span style="{style}">{raw_html} <i>(queued)</i></span>'
+        raw_html = self.ui.build_user_message_html(label)
+        display_html = self.ui.build_user_message_html(label, queued=True)
         handle = self.ui.add_queued_message(raw_html, display_html)
         self.chat_queue.append({
             'text': user_text,

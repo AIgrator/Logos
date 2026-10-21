@@ -1043,7 +1043,7 @@ class VisionHandler(BaseAgent):
             texts = notes + ([f"**User note (paused):** {draft}"] if draft else [])
             if texts:
                 if draft:
-                    self.ui.add_message(f"<b>You:</b> {draft}")
+                    self.ui.add_user_message(draft)
                     self.command_history.append(
                         f"**User note (paused):** {draft}")
                     try:

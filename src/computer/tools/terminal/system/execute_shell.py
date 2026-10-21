@@ -57,10 +57,13 @@ def execute_shell(self, command: str, run_in_background: bool = False) -> dict:
     if run_in_background:
         if manager is None:
             raise RuntimeError("Background shell jobs are not available.")
+        # Background jobs are deliberately not bound to the foreground shell
+        # timeout or inactivity limit: a server can run indefinitely and is
+        # stopped explicitly with stop_shell_job.
         return manager.launch(
-            command, self.working_directory, timeout,
+            command, self.working_directory, 0,
             output_limit=output_limit,
-            inactivity_timeout=inactivity_timeout)
+            inactivity_timeout=0)
 
     if manager is not None:
         # Safety net for misjudged durations: a foreground call that runs
