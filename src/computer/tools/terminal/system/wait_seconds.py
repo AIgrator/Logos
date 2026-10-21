@@ -9,8 +9,9 @@ MAX_WAIT_SECONDS = 600
     tool={
         "name": "wait_seconds",
         "description": ("Waits the given number of seconds without blocking the chat, letting a background "
-            "shell job progress. Use between poll_shell_job calls (e.g. launch in background, wait 60, "
-            "poll, repeat). Interruptible via Stop. Max 600 seconds per call — chain calls for longer waits."),
+            "shell job progress. Use between poll_shell_job calls for finite work (e.g. launch in background, "
+            "wait 60, poll, repeat). Do not use it to wait for a server/daemon to exit: verify the server with "
+            "an HTTP request instead. Interruptible via Stop. Max 600 seconds per call — chain calls for longer waits."),
         "arguments": {
             "seconds": {"type": "INTEGER", "description": "How many seconds to wait (1-600).", "required": False}
         },

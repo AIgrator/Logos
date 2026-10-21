@@ -17,12 +17,19 @@ from src.computer.computer import Computer
 from .base_agent import BaseAgentHandler
 from .tool_exec_worker import ToolExecRelay, ToolExecWorker
 
-# Background-job await: after a launch the loop waits handler-side instead
-# of asking the model immediately (it would act NOW, e.g. relaunch). Cheap
-# status polls run on this timer; the model is called back only when the
-# job finishes or after MAX rounds with fresh state.
-JOB_WAIT_INTERVAL_MS = 15000
-JOB_WAIT_MAX_ROUNDS = 20
+# Background-job await: after a launch, give the job a short startup window
+# so quick failures are reported without an extra model turn. If it is still
+# running after that (a server/daemon or a long build), hand control back:
+# waiting for a server to exit would block the task for minutes. The model
+# can then poll, or verify a server with an HTTP request.
+JOB_WAIT_INTERVAL_MS = 5000
+JOB_WAIT_MAX_ROUNDS = 2
+
+_RUNNING_JOB_HINT = (
+    "If this is a server/daemon, verify it with an HTTP request "
+    "(e.g. `curl -I http://127.0.0.1:PORT/`) instead of waiting for it to exit. "
+    "Use `stop_shell_job` when done."
+)
 
 
 def _running_job_id(result) -> int | None:
@@ -624,7 +631,8 @@ class TerminalHandler(BaseAgentHandler):
                     command, stdout=output, cwd=cwd)
                 output_for_llm = (
                     f"**Tool Result:** Background job #{job_id} running after {elapsed}s.\n"
-                    f"```\n{output or '(no new output)'}\n```"
+                    f"```\n{output or '(no new output)'}\n```\n"
+                    f"**System note:** {_RUNNING_JOB_HINT}"
                 )
                 output_for_ui = {
                     'type': 'collapsible',
@@ -678,7 +686,8 @@ class TerminalHandler(BaseAgentHandler):
             if status == 'running':
                 output_for_llm = (
                     f"**Tool Result:** Background job #{job_id} running after {elapsed}s.\n"
-                    f"```\n{output or '(no new output)'}\n```"
+                    f"```\n{output or '(no new output)'}\n```\n"
+                    f"**System note:** {_RUNNING_JOB_HINT}"
                 )
                 output_for_ui = {
                     'type': 'collapsible',
@@ -777,8 +786,12 @@ class TerminalHandler(BaseAgentHandler):
                 plain_parts += ["", f"Note: {exit_note}"]
             if output_file:
                 plain_parts += ["", f"Full output: {output_file}"]
-            if timed_out or cancelled or inactive:
+            if timed_out:
                 title_color = self._theme("ERROR_COLOR")
+            elif cancelled or inactive:
+                # A user stop / idle kill is an intentional outcome, not a
+                # failed command. Red made a clean stop look like a crash.
+                title_color = self._theme("WARNING_COLOR")
             elif exit_code == 0:
                 title_color = self._theme("SUCCESS_COLOR")
             elif exit_note:
@@ -798,8 +811,8 @@ class TerminalHandler(BaseAgentHandler):
                 },
                 # Failures open by default so the error is not hidden behind
                 # another click; successful calls stay compact.
-                'state': ('expanded' if (exit_code != 0 or timed_out
-                                         or cancelled or inactive)
+                'state': ('expanded' if (timed_out or (exit_code != 0
+                                         and not cancelled and not inactive))
                           else 'collapsed'),
             }
 
@@ -1038,7 +1051,7 @@ class TerminalHandler(BaseAgentHandler):
         if self._job_wait_rounds >= JOB_WAIT_MAX_ROUNDS:
             self._awaiting_job_id = None
             logging.info(f"TerminalHandler: job #{job_id} still running after "
-                         f"{JOB_WAIT_MAX_ROUNDS} waits; handing control back.")
+                         f"{JOB_WAIT_MAX_ROUNDS} startup checks; handing control back.")
             try:
                 current = manager.poll(job_id)
             except Exception as e:

@@ -4,7 +4,8 @@ from src.computer.computer import tool_meta
     tool={
         "name": "stop_shell_job",
         "description": ("Aborts a background shell job started with run_in_background=true. "
-            "Kills the whole process tree. Returns the job's final status."),
+            "Kills the whole process tree. Returns the job's final status; cancelled=true means "
+            "the stop took effect."),
         "arguments": {
             "job_id": {"type": "INTEGER", "description": "The job handle returned by execute_shell.", "required": True}
         },

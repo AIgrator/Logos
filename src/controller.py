@@ -300,6 +300,14 @@ class AppController(QObject):
         """Stops background processes with per-step guards and time budgets."""
         logging.info("AppController cleanup initiated.")
         try:
+            computer = getattr(getattr(self, "terminal_handler", None),
+                               "computer", None)
+            manager = getattr(computer, "shell_jobs", None)
+            if manager is not None:
+                manager.kill_all()
+        except Exception as e:
+            logging.warning(f"Shell job shutdown failed: {e}")
+        try:
             vision = getattr(self, "vision_handler", None)
             if vision is not None:
                 vision.stop()

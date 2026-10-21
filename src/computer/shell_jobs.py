@@ -15,9 +15,12 @@ import sys
 import tempfile
 import threading
 import time
+from collections import deque
+from itertools import islice
 
 POLL_OUTPUT_CAP = 20000
 OUTPUT_FILE_LIMIT = 64 * 1024 * 1024
+OUTPUT_MEMORY_LIMIT = 2 * 1024 * 1024
 DEFAULT_INACTIVITY_TIMEOUT = 300
 
 _ANSI_RE = re.compile(
@@ -137,8 +140,14 @@ def build_shell_command(command: str):
                  "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
                  "$OutputEncoding = [System.Text.Encoding]::UTF8; "
                  + inner +
-                 "; $__code = $LASTEXITCODE; if ($null -eq $__code) { $__code = 0 }; "
-                 "if (($Error.Count -gt 0) -and ($__code -eq 0)) { $__code = 1 }; "
+                 "; $__ok = $?; "
+                 "$__code = $LASTEXITCODE; if ($null -eq $__code) { $__code = 0 }; "
+                 # Trust the final command's success flag, not $Error.Count:
+                 # a caught exception (try/catch -> Write-Output 'CLOSED') still
+                 # leaves an entry in $Error and made successful probes look
+                 # like failures. Non-terminating errors on the last command
+                 # still set $? to false, so real failures keep their exit 1.
+                 "if ((-not $__ok) -and ($__code -eq 0)) { $__code = 1 }; "
                  # Use $host.SetShouldExit, NOT `exit`: PowerShell renders object
                  # output (tables) on an async output thread, and `exit` tears the
                  # runspace down before it flushes — so `Get-ChildItem | Select-Object`
@@ -208,12 +217,17 @@ def _terminate_tree(proc: subprocess.Popen):
             pass
 
 
-def _drain_stream(stream, sink: list, lock=None, activity=None):
+def _drain_stream(stream, sink, lock=None, activity=None, log_writer=None):
     try:
         for line in iter(stream.readline, ""):
             if activity is not None:
                 activity[0] = time.monotonic()
             line = _ANSI_RE.sub("", line)
+            if log_writer is not None:
+                try:
+                    log_writer.write(line)
+                except Exception:
+                    pass
             if lock is not None:
                 with lock:
                     sink.append(line)
@@ -252,14 +266,123 @@ def _cap(text: str, limit: int = POLL_OUTPUT_CAP) -> str:
             + text[-tail:])
 
 
+def _shell_temp_dir() -> str:
+    directory = os.path.join(tempfile.gettempdir(), "logos-shell")
+    os.makedirs(directory, exist_ok=True)
+    return directory
+
+
+def _new_shell_output_path(prefix: str, suffix: str = ".txt") -> str:
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    name = f"{prefix}-{stamp}-{os.getpid()}-{time.time_ns() % 1_000_000}{suffix}"
+    return os.path.join(_shell_temp_dir(), name)
+
+
+def _new_job_log_path(job_id: int) -> str:
+    return _new_shell_output_path(f"job-{job_id}", ".log")
+
+
+class JobOutputBuffer:
+    """Bounded in-memory tail of a job's output.
+
+    Long-running servers can log for hours; keeping every line in RAM was an
+    unbounded leak. The full stream goes to the per-job log file instead, so
+    memory keeps only a recent tail while every consumer still sees the true
+    ``total_chars``/``total_lines``.
+    """
+
+    def __init__(self, max_chars: int = OUTPUT_MEMORY_LIMIT):
+        self.max_chars = max(1000, max_chars)
+        self._parts = deque()
+        self._chars = 0
+        self.total_chars = 0
+        self.total_lines = 0
+        self.dropped_chars = 0
+        self.dropped_lines = 0
+
+    def append(self, line: str) -> None:
+        self._parts.append(line)
+        size = len(line)
+        self._chars += size
+        self.total_chars += size
+        self.total_lines += 1
+        while self._chars > self.max_chars and len(self._parts) > 1:
+            removed = self._parts.popleft()
+            removed_size = len(removed)
+            self._chars -= removed_size
+            self.dropped_chars += removed_size
+            self.dropped_lines += 1
+
+    def __iter__(self):
+        return iter(self._parts)
+
+    def __len__(self) -> int:
+        return len(self._parts)
+
+    def text(self) -> str:
+        return "".join(self._parts)
+
+    def render(self) -> str:
+        """Tail text with a note when older lines were dropped from memory."""
+        text = self.text()
+        if not self.dropped_chars:
+            return text
+        return (f"[... {self.dropped_chars} earlier chars omitted from memory; "
+                "the full output is in the job log ...]\n" + text)
+
+    def read_since(self, absolute_line_offset: int) -> tuple:
+        """Returns (new_text, new_absolute_line_offset) for polling."""
+        start = max(0, absolute_line_offset - self.dropped_lines)
+        chunk = "".join(islice(self._parts, start, None))
+        if absolute_line_offset < self.dropped_lines:
+            omitted = self.dropped_lines - absolute_line_offset
+            chunk = (f"[... {omitted} earlier lines omitted from memory; see "
+                     "the job log for the full output ...]\n" + chunk)
+        return chunk, self.dropped_lines + len(self._parts)
+
+
+class JobLogWriter:
+    """Line-buffered, size-capped log file for one background job."""
+
+    def __init__(self, path: str, limit: int = OUTPUT_FILE_LIMIT):
+        self.path = path
+        self.limit = limit
+        self.written = 0
+        self.truncated = False
+        self._fh = open(path, "w", encoding="utf-8", errors="replace",
+                        buffering=1)
+
+    def header(self, command: str, working_directory) -> None:
+        text = (f"$ {command}\n"
+                f"[cwd: {working_directory or os.getcwd()}]\n"
+                f"[started: {time.strftime('%Y-%m-%d %H:%M:%S')}]\n\n")
+        self._fh.write(text)
+        self.written += len(text)
+
+    def write(self, line: str) -> None:
+        if self.truncated:
+            return
+        remaining = self.limit - self.written
+        if len(line) > remaining:
+            if remaining > 0:
+                self._fh.write(line[:remaining])
+            self._fh.write(f"\n[log truncated at {self.limit} chars]\n")
+            self.truncated = True
+        else:
+            self._fh.write(line)
+            self.written += len(line)
+
+    def close(self) -> None:
+        try:
+            self._fh.close()
+        except Exception:
+            pass
+
+
 def _persist_output(text: str) -> str | None:
     """Writes the full output under %TEMP%/logos-shell and returns the path."""
     try:
-        directory = os.path.join(tempfile.gettempdir(), "logos-shell")
-        os.makedirs(directory, exist_ok=True)
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        name = f"shell-{stamp}-{os.getpid()}-{time.time_ns() % 1_000_000}.txt"
-        path = os.path.join(directory, name)
+        path = _new_shell_output_path("shell")
         data = text
         if len(data) > OUTPUT_FILE_LIMIT:
             data = data[:OUTPUT_FILE_LIMIT] + (
@@ -285,25 +408,57 @@ def _format_output(text: str, limit: int) -> tuple:
     return body, path
 
 
+def _expected_exit1(command: str) -> str | None:
+    """The pipeline stage whose exit 1 means "no match", if any."""
+    for segment in re.split(r"\|\||&&|\|", command.lower()):
+        segment = " ".join(segment.strip().split())
+        for prefix in _EXIT1_NORMAL:
+            if segment == prefix or segment.startswith(prefix + " "):
+                return prefix
+    return None
+
+
 def _exit_code_note(command: str, exit_code: int) -> str | None:
+    lowered = " ".join(command.strip().lower().split())
+    if lowered == "robocopy" or lowered.startswith("robocopy "):
+        # Robocopy uses bits: 0-7 are success variants (1 = files copied,
+        # 2 = extra files seen, 3 = both), 8+ is a real failure. Quiet
+        # invocations produce no output, so exit 1 otherwise looks like a
+        # crash even though the copy succeeded.
+        if 0 <= exit_code < 8:
+            return (f"Exit code {exit_code} from robocopy is success "
+                    "(0-7 = no failure; 8+ = failure).")
+        return None
     if exit_code != 1:
         return None
-    lowered = " ".join(command.strip().lower().split())
-    for prefix in _EXIT1_NORMAL:
-        if lowered == prefix or lowered.startswith(prefix + " "):
-            return (f"Exit code 1 from {prefix} usually means no matches / "
-                    "no differences / condition false - not a tool failure.")
+    prefix = _expected_exit1(command)
+    if prefix:
+        return (f"Exit code 1 from {prefix} usually means no matches / "
+                "no differences / condition false - not a tool failure.")
     return None
 
 
 def _build_result(command: str, exit_code: int, full_output: str,
                   system_note: str, wall_time: float, output_limit: int,
                   timed_out: bool = False, cancelled: bool = False,
-                  inactive: bool = False) -> dict:
-    total_chars = len(full_output)
-    total_lines = full_output.count("\n") + (
-        1 if full_output and not full_output.endswith("\n") else 0)
-    stdout, output_file = _format_output(full_output, output_limit)
+                  inactive: bool = False, log_path: str | None = None,
+                  total_chars: int | None = None,
+                  total_lines: int | None = None) -> dict:
+    if total_chars is None:
+        total_chars = len(full_output)
+    if total_lines is None:
+        total_lines = full_output.count("\n") + (
+            1 if full_output and not full_output.endswith("\n") else 0)
+    if log_path:
+        # Background jobs stream their full output to a log file, so the
+        # in-memory tail is never re-persisted and the log path is always
+        # reported even when the inline preview fit under the cap.
+        output_file = log_path
+        stdout = _cap(full_output, output_limit) if full_output else "(no output)"
+        if total_chars > output_limit:
+            stdout += f"\n\n[Full output saved to: {log_path}]"
+    else:
+        stdout, output_file = _format_output(full_output, output_limit)
     result = {
         "stdout": stdout,
         "stderr": (system_note or "").strip(),
@@ -351,8 +506,8 @@ NO_RESULT_TEXT = ("No result was recorded (the worker ended without storing one)
 
 
 def pump_shell(proc: subprocess.Popen, timeout: float, cancel_event,
-               progress_cb, out_sink: list, lock=None,
-               inactivity_timeout: float = 0):
+               progress_cb, out_sink, lock=None,
+               inactivity_timeout: float = 0, log_writer=None):
     """Runs the pump loop; returns (timed_out, cancelled, inactive).
 
     stdout carries stderr too (`stderr=STDOUT`), so a single reader keeps
@@ -364,6 +519,7 @@ def pump_shell(proc: subprocess.Popen, timeout: float, cancel_event,
     readers = [
         threading.Thread(target=_drain_stream,
                          args=(proc.stdout, out_sink, lock, activity),
+                         kwargs={"log_writer": log_writer},
                          daemon=True),
     ]
     for t in readers:
@@ -401,6 +557,12 @@ def pump_shell(proc: subprocess.Popen, timeout: float, cancel_event,
                 pass
         time.sleep(0.2)
 
+    # stop() sets the cancel event and then kills the tree immediately. The
+    # process can be gone before the loop observes the flag, so check it once
+    # more: without this a user-stopped job looked like a crash/exit instead
+    # of "Stopped by user." in poll/stop results and the UI.
+    if cancel_event is not None and cancel_event.is_set():
+        cancelled = True
     if timed_out or cancelled or inactive:
         _terminate_tree(proc)
     try:
@@ -496,10 +658,11 @@ class ShellJob:
         self.output_limit = output_limit
         self.inactivity_timeout = inactivity_timeout
         self.lock = threading.Lock()
-        self.stdout_parts: list = []
-        self.stderr_parts: list = []
+        self.stdout_parts = JobOutputBuffer()
+        self.stderr_parts = JobOutputBuffer()
         self.stdout_offset = 0
         self.stderr_offset = 0
+        self.log_path = ""
         self.proc = None
         self.cancel_event = threading.Event()
         self.done = threading.Event()
@@ -523,6 +686,7 @@ class ShellJobManager:
             job_id = self._counter
             job = ShellJob(job_id, command, timeout, output_limit,
                            inactivity_timeout)
+            job.log_path = _new_job_log_path(job_id)
             if cancel_event is not None:
                 job.cancel_event = cancel_event
             self._jobs[job_id] = job
@@ -533,7 +697,14 @@ class ShellJobManager:
         timeout = job.timeout
 
         def _target():
+            log_writer = None
             try:
+                try:
+                    log_writer = JobLogWriter(job.log_path)
+                    log_writer.header(command, working_directory)
+                except Exception as e:
+                    logging.warning(f"Could not open log for job #{job.job_id}: {e}")
+                    log_writer = None
                 argv, encoding, extra = build_shell_command(command)
                 logging.info(f"Background shell job #{job.job_id} started: {command}")
                 try:
@@ -552,50 +723,53 @@ class ShellJobManager:
                 except FileNotFoundError:
                     job.result = {"stdout": "",
                                   "stderr": f"Error: Command not found: {command.split()[0]}",
-                                  "exit_code": 127}
-                    job.done.set()
+                                  "exit_code": 127,
+                                  "output_file": job.log_path}
                     return
                 with job.lock:
                     job.proc = proc
                 timed_out, cancelled, inactive = pump_shell(
                     proc, timeout, job.cancel_event, None,
-                    job.stdout_parts, job.lock, job.inactivity_timeout)
-                full_output = "".join(job.stdout_parts)
+                    job.stdout_parts, job.lock, job.inactivity_timeout,
+                    log_writer=log_writer)
+                full_output = job.stdout_parts.render()
                 exit_code = proc.returncode if proc.returncode is not None else -1
                 wall_time = time.monotonic() - job.started
+
+                def _result(code, note, **kwargs):
+                    return _build_result(
+                        command, code, full_output, note, wall_time,
+                        job.output_limit, log_path=job.log_path,
+                        total_chars=job.stdout_parts.total_chars,
+                        total_lines=job.stdout_parts.total_lines, **kwargs)
+
                 if cancelled:
-                    note = "Stopped by user."
-                    job.result = _build_result(
-                        command, -2, full_output, note, wall_time,
-                        job.output_limit, cancelled=True)
+                    job.result = _result(-2, "Stopped by user.", cancelled=True)
                 elif inactive:
                     note = (f"Error: job produced no output for "
                             f"{job.inactivity_timeout:.0f} seconds and was "
                             "TERMINATED as likely waiting for interactive input.")
-                    job.result = _build_result(
-                        command, -1, full_output, note, wall_time,
-                        job.output_limit, inactive=True)
+                    job.result = _result(-1, note, inactive=True)
                 elif timed_out:
                     note = (f"Error: job timed out after {timeout} seconds and "
                             "was TERMINATED. One varied retry at most — a second "
                             "timeout death means the limit is the wall: report "
                             "to the user.")
-                    job.result = _build_result(
-                        command, -1, full_output, note, wall_time,
-                        job.output_limit, timed_out=True)
+                    job.result = _result(-1, note, timed_out=True)
                 else:
                     note = _mute_diagnostic(exit_code, full_output, "",
                                             wall_time, timeout)
                     if _exit_code_note(command, exit_code):
                         note = ""
-                    job.result = _build_result(
-                        command, exit_code, full_output, note, wall_time,
-                        job.output_limit)
+                    job.result = _result(exit_code, note)
                 logging.info(f"Background shell job #{job.job_id} finished with exit code {exit_code}.")
             except Exception as e:
                 logging.error(f"Background shell job #{job.job_id} failed: {e}", exc_info=True)
-                job.result = {"stdout": "", "stderr": f"Job failed: {e}", "exit_code": -1}
+                job.result = {"stdout": "", "stderr": f"Job failed: {e}",
+                              "exit_code": -1, "output_file": job.log_path}
             finally:
+                if log_writer is not None:
+                    log_writer.close()
                 job.done.set()
 
         threading.Thread(target=_target, daemon=True,
@@ -611,7 +785,9 @@ class ShellJobManager:
                              inactivity_timeout=0)
         self._start_job_thread(job, working_directory)
         return {"job_id": job.job_id, "status": "running",
-                "hint": "Use poll_shell_job to check progress, stop_shell_job to abort."}
+                "output_file": job.log_path,
+                "hint": "Use poll_shell_job to check progress, stop_shell_job to abort. "
+                        "Full output streams to output_file."}
 
     def launch_and_wait(self, command: str, working_directory, timeout: float,
                         detach_after: float, cancel_event=None,
@@ -636,8 +812,9 @@ class ShellJobManager:
                 logging.info(f"Foreground command detached into background job "
                              f"#{job.job_id} after {elapsed:.1f}s.")
                 return {"job_id": job.job_id, "status": "running", "detached": True,
+                        "output_file": job.log_path,
                         "hint": "Still running in background. Use poll_shell_job to check, "
-                                "stop_shell_job to abort."}
+                                "stop_shell_job to abort. Full output streams to output_file."}
             if progress_cb is not None:
                 with job.lock:
                     snapshot = list(job.stdout_parts)
@@ -695,11 +872,11 @@ class ShellJobManager:
 
     def _pop_new_output(self, job: ShellJob):
         with job.lock:
-            new_out = "".join(job.stdout_parts[job.stdout_offset:])
-            new_err = "".join(job.stderr_parts[job.stderr_offset:])
-            job.stdout_offset = len(job.stdout_parts)
-            job.stderr_offset = len(job.stderr_parts)
-            total_out = sum(len(p) for p in job.stdout_parts)
+            new_out, job.stdout_offset = job.stdout_parts.read_since(
+                job.stdout_offset)
+            new_err, job.stderr_offset = job.stderr_parts.read_since(
+                job.stderr_offset)
+            total_out = job.stdout_parts.total_chars
         return new_out, new_err, total_out
 
     def status(self, job_id: int) -> dict:
@@ -710,7 +887,8 @@ class ShellJobManager:
             return {"job_id": job_id, "status": "not_found"}
         state = "done" if job.done.is_set() else "running"
         return {"job_id": job_id, "status": state,
-                "elapsed_seconds": round(time.monotonic() - job.started, 1)}
+                "elapsed_seconds": round(time.monotonic() - job.started, 1),
+                "output_file": job.log_path}
 
     def poll(self, job_id: int) -> dict:
         with self._lock:
@@ -742,7 +920,7 @@ class ShellJobManager:
                             f"timed out after {m.group(1) if m else '?'}s, TERMINATED]")
             elif "Stopped by user." in stored_err:
                 new_out += "\n[system: this job was stopped by the user]"
-            if res.get("output_file"):
+            if res.get("output_file") and total > job.output_limit:
                 new_out += f"\n[Full output saved to: {res['output_file']}]"
             return {"job_id": job_id, "status": "done",
                     "exit_code": res.get("exit_code", -1),
@@ -754,12 +932,13 @@ class ShellJobManager:
                     "cancelled": res.get("cancelled", False),
                     "inactivity_timeout": res.get("inactivity_timeout", False),
                     "exit_note": res.get("exit_note"),
-                    "output_file": res.get("output_file"),
+                    "output_file": res.get("output_file") or job.log_path,
                     "output": _cap(new_out + (("\n" + new_err) if new_err else ""),
                                    job.output_limit),
                     "total_stdout_chars": total}
         return {"job_id": job_id, "status": "running",
                 "elapsed_seconds": elapsed,
+                "output_file": job.log_path,
                 "output": _cap(new_out + (("\n" + new_err) if new_err else ""),
                                job.output_limit)}
 
