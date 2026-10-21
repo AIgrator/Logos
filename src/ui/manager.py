@@ -258,6 +258,7 @@ class UIManager(QWidget):
     model_selected = Signal(str, str)  # provider_id, model_id (session-only switch)
     continue_requested = Signal()
     retry_requested = Signal()
+    job_stop_requested = Signal(int)
     attachment_removed = Signal(int)
     cancel_requested = Signal()
     toggle_fullscreen_button_clicked = Signal()
@@ -318,6 +319,7 @@ class UIManager(QWidget):
         self.chat_widget.content_max_width_fn = self._content_max_width
         self.chat_widget.retry_requested.connect(self.retry_requested.emit)
         self.chat_widget.continue_requested.connect(self.continue_requested.emit)
+        self.chat_widget.job_stop_requested.connect(self.job_stop_requested.emit)
         self.layout.addWidget(self.chat_widget, 1)
 
         self.attachment_scroll_area = NonScrollableScrollArea()
@@ -1255,6 +1257,9 @@ class UIManager(QWidget):
         if self.is_compact:
             force_scroll = True
         self.chat_widget.add_message(html_content, force_scroll=force_scroll, keep_stream=keep_stream, role=role)
+
+    def update_job_block(self, job_id: int, data: dict) -> bool:
+        return self.chat_widget.update_job_block(job_id, data)
 
     def add_image_to_history(self, image_bytes: bytes):
         if not image_bytes:

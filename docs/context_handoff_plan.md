@@ -1875,3 +1875,116 @@ Acceptance for this sub-step:
 - Expanding a collapsible does not show escaped HTML tags in the UI.
 - Copy-all from a highlighted block returns plain code/diff text.
 - `ruff` and `compileall` pass.
+
+---
+
+## 18. Terminal background jobs: план следующего этапа
+
+Статус: текущий этап закоммичен (`eb4a16d`). Ниже — порядок работ, чтобы не
+уходить в бесконечную «кроличью нору». Сверяться с этим разделом перед каждым
+следующим коммитом.
+
+Статус P0 (2026-10-21): реализовано — события `started/finished/stopped`,
+wake-up/pending-note, кнопка `Stop` и `Open log` в running-job блоке,
+retention логов. Следующий этап — P1 readiness probe.
+
+### 18.0 Принцип
+
+Не копировать фичи конкурентов ради галочки. В opencode нет отдельной панели
+`/tasks`; он полагается на tool-output и отмену. Для Logos GUI-минимум — это
+**Stop прямо в существующем shell-блоке running-job**, а не отдельный
+task manager. Полная панель задач остаётся необязательным P2.
+
+Сейчас уже работает: `run_in_background`, `job_id`, `poll_shell_job`,
+`stop_shell_job`, process-tree kill, 10-секундное окно старта, persistent
+`output_file`, bounded memory, корректные `stopped`/`findstr` статусы.
+
+### 18.1 P0 — делать сейчас
+
+1. **Job event layer (backend).**
+   `ShellJobManager` отдаёт события `started` / `finished` / `stopped` через
+   простой listener/callback без Qt-зависимостей. Событие содержит `job_id`,
+   `status`, `exit_code`, `elapsed`, `output_file`.
+   Зачем: один источник правды для wake-up, UI и будущей панели.
+
+2. **Completion wake-up / pending result.**
+   Handler подписывается на события:
+   - если модель сейчас ждёт этот job — продолжить turn автоматически;
+   - если нет — сохранить результат как pending-note для следующего turn.
+   Доставка ровно один раз; `poll_shell_job` остаётся fallback-ом.
+   Зачем: перестать тратить turns на `wait_seconds` + `poll_shell_job`.
+
+3. **Кнопка Stop в running-job shell-блоке.**
+   В заголовке/теле блока `Shell · job #N · running` добавить действие
+   `Stop job #N`, которое вызывает тот же `manager.stop(job_id)`.
+   После остановки блок обновляется через событие из P0.1, а не через новый
+   poll. Отдельный `/tasks` не делать.
+   Зачем: пользователь сам управляет сервером из чата.
+
+4. **Retention логов.**
+   При старте чистить `%TEMP%\logos-shell` по возрасту/общему размеру
+   (например, 7 дней или 512 МБ), не удаляя логи активных job. Добавить
+   `Open log` рядом с `output_file`.
+   Зачем: логи теперь пишутся всегда и иначе будут копиться.
+
+### 18.2 P1 — после P0
+
+1. **Readiness probe.**
+   Универсальный `wait_for_http(url, timeout)` или `ready_url` у
+   `execute_shell`: ждать порт/HTTP до таймаута и возвращать `ready` +
+   последний статус. Не хардкодить `npm start`/`http.server`.
+   Зачем: убрать гадание «сервер поднялся или ещё нет» после 10 секунд.
+
+2. **Гибкий startup window.**
+   Если readiness probe есть, 10 секунд становятся fallback-ом, а не
+   единственным критерием. Для finite jobs можно возвращать управление
+   раньше при первом output/завершении.
+
+3. **Единый формат статусов job.**
+   `starting / running / ready / finished / failed / stopped` в UI и в
+   tool-result. Это упростит и панель, и диагностику.
+
+### 18.3 P2 — отложено, вернуться при реальной необходимости
+
+1. **Полноценная панель `/tasks`.**
+   Список всех job, фильтры, история, массовый Stop. Делать только если
+   минимальной кнопки Stop и running-job блока реально не хватает.
+
+2. **Per-job hard limit / unattended policy.**
+   Отдельный лимит для «брошенных» серверов и автозавершение при выходе.
+   Сейчас есть ручной Stop и `kill_all` при shutdown.
+
+3. **Persistence job-реестра между перезапусками приложения.**
+   Сейчас реестр in-memory: после restart старый `job_id` = `not_found`.
+   Это нормально; если понадобится — хранить метаданные и переподключаться.
+
+### 18.4 P3 — не делать сейчас
+
+1. **PTY / интерактивный stdin.**
+   Текущий non-interactive режим (`stdin=DEVNULL`) — правильный дефолт для
+   агента. PTY нужен только для REPL/интерактивных CLI; это отдельный
+   большой проект.
+
+2. **Полный терминальный эмулятор.**
+   Не превращать Logos в terminal emulator. Наша задача — управляемые
+   процессы и читаемый вывод, а не ANSI-экран.
+
+3. **Автоматическое определение серверов по имени команды.**
+   Хрупко. Предпочитаем явный `run_in_background` + readiness probe.
+
+### 18.5 Acceptance для P0
+
+- Запуск сервера → `job #N running`; в блоке есть рабочая кнопка Stop.
+- Нажатие Stop убивает process tree, блок становится `stopped`, порт закрыт.
+- Завершение finite job будит handler без ручного `wait_seconds`/`poll`.
+- Если turn уже закончился, результат появляется как pending-note один раз.
+- Старые логи чистятся, активные логи не трогаются.
+- `ruff`, `compileall`, background matrix и PowerShell exit-тест проходят.
+
+### 18.6 Файлы
+
+- `src/computer/shell_jobs.py` — события, метаданные job, retention.
+- `src/handlers/terminal_handler.py` — wake-up/pending, форматирование статусов.
+- `src/ui/terminal_html_formatter.py` — Stop/Open log в shell-блоке.
+- `src/ui/widgets/chat_widget.py` — обновление running-job блока по job id.
+- `docs/context_handoff_plan.md` — этот план; обновлять статус после этапа.

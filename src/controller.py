@@ -172,6 +172,7 @@ class AppController(QObject):
         self.ui.browser_mode_selected.connect(self._activate_browser_mode)
         self.ui.retry_requested.connect(self._handle_retry_request)
         self.ui.continue_requested.connect(self._handle_continue_request)
+        self.ui.job_stop_requested.connect(self._handle_job_stop)
         self.ui.model_selected.connect(self.switch_model)
         self.ui.cancel_requested.connect(self.handle_cancel_request)
         self.ui.pause_resume_clicked.connect(self._handle_pause_resume)
@@ -1168,6 +1169,16 @@ class AppController(QObject):
         """Switches back to chat mode. Maintained for compatibility."""
         logging.info("Deactivating vision mode and switching to chat mode.")
         self._activate_chat_mode()
+
+    def _handle_job_stop(self, job_id: int):
+        """User clicked Stop on a running shell job in the transcript."""
+        handler = getattr(self, "terminal_handler", None)
+        if handler is None:
+            return
+        try:
+            handler.request_stop_job(job_id)
+        except Exception as e:
+            logging.warning(f"Could not stop shell job #{job_id} from UI: {e}")
 
     def _handle_stop(self):
         """Stops the running work but keeps the mode the user has selected.

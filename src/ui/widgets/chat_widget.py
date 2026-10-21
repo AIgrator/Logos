@@ -3,10 +3,11 @@ import logging
 import sys
 import uuid
 
-from PySide6.QtCore import Qt, QPoint, QRect, QSize, QTime, QTimer, Signal
+from PySide6.QtCore import Qt, QPoint, QRect, QSize, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAbstractTextDocumentLayout,
     QColor,
+    QDesktopServices,
     QFont,
     QKeySequence,
     QPainter,
@@ -36,6 +37,7 @@ class ChatWidget(QAbstractScrollArea):
     """
     retry_requested = Signal()
     continue_requested = Signal()
+    job_stop_requested = Signal(int)
 
     # Readable, centered text column. On windows wider than this the chat text
     # stops stretching edge-to-edge and is centered with symmetric margins
@@ -213,6 +215,12 @@ class ChatWidget(QAbstractScrollArea):
                         self._copy_collapsible_payload(parts[1], parts[2])
                         return
 
+                if anchor and anchor.startswith("action:"):
+                    parts = anchor.split(':', 2)
+                    if len(parts) == 3:
+                        self._run_collapsible_action(parts[1], parts[2])
+                        return
+
                 if anchor and anchor.startswith("retry:"):
                     self.retry_requested.emit()
                     return # Stop further processing
@@ -262,6 +270,81 @@ class ChatWidget(QAbstractScrollArea):
     # (copy-all still gives everything).
     MAX_RENDERED_CONTENT = 30000
 
+    def _format_collapsible_message(self, msg: dict) -> str:
+        full = msg.get('full_content') or ''
+        if not isinstance(full, str):
+            full = str(full)
+        full_html = msg.get('full_content_html')
+        if full_html:
+            content = full_html
+        else:
+            content = full
+            if len(content) > self.MAX_RENDERED_CONTENT:
+                content = (content[:self.MAX_RENDERED_CONTENT]
+                           + f"\n… [truncated for display, "
+                             f"{len(full) - self.MAX_RENDERED_CONTENT} chars hidden]")
+        return self.collapsible_formatter.format_block(
+            title=msg.get('title', 'Details'),
+            content=content,
+            block_id=msg['id'],
+            state=msg.get('state', 'collapsed'),
+            title_color=msg.get('title_color'),
+            content_is_html=bool(full_html),
+            copy_payloads=msg.get('copy_payloads'),
+            actions=msg.get('actions'),
+        )
+
+    def _run_collapsible_action(self, block_id: str, action: str) -> bool:
+        for msg in self.messages:
+            if msg.get('id') != block_id:
+                continue
+            if action == 'stop_job':
+                try:
+                    self.job_stop_requested.emit(int(msg.get('job_id')))
+                except (TypeError, ValueError):
+                    return False
+                return True
+            if action == 'open_log':
+                path = msg.get('open_log_path')
+                if path:
+                    QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+                    return True
+            return False
+        return False
+
+    def update_job_block(self, job_id: int, data: dict) -> bool:
+        """Replace a running job's launch/poll block with its final result."""
+        target = None
+        for msg in self.messages:
+            if msg.get('type') != 'collapsible' or msg.get('job_id') != job_id:
+                continue
+            if msg.get('job_role') == 'launch':
+                target = msg
+                break
+            if target is None:
+                target = msg
+        if target is None:
+            return False
+        target['title'] = data.get('title', target.get('title', 'Details'))
+        target['state'] = data.get('state', target.get('state', 'collapsed'))
+        target['full_content'] = data.get('plain_content', data.get('content', ''))
+        target['full_content_html'] = (
+            data.get('content') if data.get('content_is_html') else None)
+        target['title_color'] = data.get('title_color')
+        target['copy_payloads'] = data.get('copy_payloads') or {}
+        target['actions'] = data.get('actions') or {}
+        target['open_log_path'] = data.get('open_log_path')
+        try:
+            new_doc = self._new_document()
+            new_doc.setHtml(self._format_collapsible_message(target))
+            target['doc'] = new_doc
+        except Exception as e:
+            logging.warning(f"Job block update failed for #{job_id}: {e}")
+            return False
+        self._update_scroll_bar()
+        self.viewport().update()
+        return True
+
     def _copy_collapsible_payload(self, block_id: str, label: str) -> bool:
         """Copy a labelled payload from an expanded collapsible block."""
         for msg in self.messages:
@@ -284,27 +367,7 @@ class ChatWidget(QAbstractScrollArea):
             if msg.get('id') == block_id:
                 msg['state'] = new_state
                 try:
-                    full = msg.get('full_content') or ''
-                    if not isinstance(full, str):
-                        full = str(full)
-                    full_html = msg.get('full_content_html')
-                    if full_html:
-                        content = full_html
-                    else:
-                        content = full
-                        if len(content) > self.MAX_RENDERED_CONTENT:
-                            content = (content[:self.MAX_RENDERED_CONTENT]
-                                       + f"\n… [truncated for display, "
-                                         f"{len(full) - self.MAX_RENDERED_CONTENT} chars hidden]")
-                    new_html = self.collapsible_formatter.format_block(
-                        title=msg.get('title', 'Details'),
-                        content=content,
-                        block_id=msg['id'],
-                        state=msg['state'],
-                        title_color=msg.get('title_color'),
-                        content_is_html=bool(full_html),
-                        copy_payloads=msg.get('copy_payloads'),
-                    )
+                    new_html = self._format_collapsible_message(msg)
                 except Exception as e:
                     logging.warning(f"Collapsible render failed for {block_id}: {e}")
                     return
@@ -474,17 +537,6 @@ class ChatWidget(QAbstractScrollArea):
             if initial_state not in ('collapsed', 'expanded'):
                 initial_state = 'collapsed'
             content_is_html = bool(data.get('content_is_html'))
-            copy_payloads = data.get('copy_payloads') or {}
-            html_content = self.collapsible_formatter.format_block(
-                title=data.get('title', 'Details'),
-                content=data.get('content', ''),
-                block_id=block_id,
-                state=initial_state,
-                title_color=data.get('title_color'),
-                content_is_html=content_is_html,
-                copy_payloads=copy_payloads,
-            )
-            doc.setHtml(html_content)
             msg = {
                 'type': 'collapsible',
                 'id': block_id,
@@ -493,9 +545,15 @@ class ChatWidget(QAbstractScrollArea):
                 'full_content': data.get('plain_content', data.get('content', '')),
                 'full_content_html': data.get('content') if content_is_html else None,
                 'title_color': data.get('title_color'),
-                'copy_payloads': copy_payloads,
-                'doc': doc
+                'copy_payloads': data.get('copy_payloads') or {},
+                'actions': data.get('actions') or {},
+                'open_log_path': data.get('open_log_path'),
+                'job_id': data.get('job_id'),
+                'job_role': data.get('job_role'),
+                'doc': doc,
             }
+            html_content = self._format_collapsible_message(msg)
+            doc.setHtml(html_content)
         elif isinstance(data, str):
             html_content = data
             doc.setHtml(html_content)

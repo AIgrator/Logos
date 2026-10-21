@@ -22,6 +22,8 @@ POLL_OUTPUT_CAP = 20000
 OUTPUT_FILE_LIMIT = 64 * 1024 * 1024
 OUTPUT_MEMORY_LIMIT = 2 * 1024 * 1024
 DEFAULT_INACTIVITY_TIMEOUT = 300
+JOB_LOG_RETENTION_DAYS = 7
+JOB_LOG_TOTAL_LIMIT = 512 * 1024 * 1024
 
 _ANSI_RE = re.compile(
     r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"      # OSC ... BEL/ST
@@ -280,6 +282,60 @@ def _new_shell_output_path(prefix: str, suffix: str = ".txt") -> str:
 
 def _new_job_log_path(job_id: int) -> str:
     return _new_shell_output_path(f"job-{job_id}", ".log")
+
+
+def cleanup_old_job_logs(max_age_days: int = JOB_LOG_RETENTION_DAYS,
+                         max_total_bytes: int = JOB_LOG_TOTAL_LIMIT) -> int:
+    """Delete stale per-job logs, keeping this process's active logs.
+
+    Background jobs now always write a full log. Without a cap the temp
+    directory grows forever, so prune old files and then the oldest survivors
+    until the total fits. Files from the current process are skipped: another
+    manager in the same process (tests, mode switches) may still be writing.
+    """
+    directory = _shell_temp_dir()
+    try:
+        with os.scandir(directory) as scan:
+            entries = list(scan)
+    except OSError:
+        return 0
+
+    now = time.time()
+    current_pid = f"-{os.getpid()}-"
+    kept = []
+    removed = 0
+    for entry in entries:
+        try:
+            if not entry.is_file():
+                continue
+            if not entry.name.startswith("job-") or not entry.name.endswith(".log"):
+                continue
+            if current_pid in entry.name:
+                continue
+            stat = entry.stat()
+            if max_age_days > 0 and now - stat.st_mtime > max_age_days * 86400:
+                os.remove(entry.path)
+                removed += 1
+                continue
+            kept.append((stat.st_mtime, stat.st_size, entry.path))
+        except OSError:
+            continue
+
+    if max_total_bytes <= 0:
+        return removed
+    total = sum(size for _, size, _ in kept)
+    for _, size, path in sorted(kept):
+        if total <= max_total_bytes:
+            break
+        try:
+            os.remove(path)
+            total -= size
+            removed += 1
+        except OSError:
+            continue
+    if removed:
+        logging.info(f"Shell job log retention removed {removed} old log file(s).")
+    return removed
 
 
 class JobOutputBuffer:
@@ -677,6 +733,57 @@ class ShellJobManager:
         self._lock = threading.Lock()
         self._jobs: dict = {}
         self._counter = 0
+        self._listeners_lock = threading.Lock()
+        self._listeners = []
+        try:
+            cleanup_old_job_logs()
+        except Exception as e:
+            logging.warning(f"Shell job log retention failed: {e}")
+
+    def add_listener(self, callback):
+        """Register a job-event callback; returns it for later removal."""
+        if callback is None:
+            return None
+        with self._listeners_lock:
+            if callback not in self._listeners:
+                self._listeners.append(callback)
+        return callback
+
+    def remove_listener(self, callback):
+        with self._listeners_lock:
+            try:
+                self._listeners.remove(callback)
+            except ValueError:
+                pass
+
+    def _emit(self, event: dict):
+        with self._listeners_lock:
+            listeners = list(self._listeners)
+        for callback in listeners:
+            try:
+                callback(event)
+            except Exception as e:
+                logging.warning(f"Shell job listener failed: {e}")
+
+    def _emit_finished(self, job: ShellJob):
+        result = job.result or {
+            "stdout": "",
+            "stderr": NO_RESULT_TEXT,
+            "exit_code": -1,
+        }
+        elapsed = round(time.monotonic() - job.started, 1)
+        event_type = "stopped" if result.get("cancelled") else "finished"
+        self._emit({
+            "type": event_type,
+            "job_id": job.job_id,
+            "command": job.command,
+            "status": "done",
+            "exit_code": result.get("exit_code", -1),
+            "elapsed_seconds": elapsed,
+            "output_file": result.get("output_file") or job.log_path,
+            "cancelled": bool(result.get("cancelled")),
+            "result": dict(result),
+        })
 
     def _register(self, command: str, timeout: float, cancel_event=None,
                   output_limit: int = POLL_OUTPUT_CAP,
@@ -728,6 +835,14 @@ class ShellJobManager:
                     return
                 with job.lock:
                     job.proc = proc
+                self._emit({
+                    "type": "started",
+                    "job_id": job.job_id,
+                    "command": command,
+                    "status": "running",
+                    "elapsed_seconds": 0,
+                    "output_file": job.log_path,
+                })
                 timed_out, cancelled, inactive = pump_shell(
                     proc, timeout, job.cancel_event, None,
                     job.stdout_parts, job.lock, job.inactivity_timeout,
@@ -771,6 +886,11 @@ class ShellJobManager:
                 if log_writer is not None:
                     log_writer.close()
                 job.done.set()
+                try:
+                    self._emit_finished(job)
+                except Exception as e:
+                    logging.warning(f"Could not emit finish event for job "
+                                    f"#{job.job_id}: {e}")
 
         threading.Thread(target=_target, daemon=True,
                          name=f"shell-job-{job.job_id}").start()
@@ -941,6 +1061,22 @@ class ShellJobManager:
                 "output_file": job.log_path,
                 "output": _cap(new_out + (("\n" + new_err) if new_err else ""),
                                job.output_limit)}
+
+    def request_stop(self, job_id: int) -> dict:
+        """Ask a job to stop without blocking the caller (for the UI).
+
+        The pump sees the cancel event within ~200 ms and terminates the
+        process tree itself; a later ``finished``/``stopped`` event carries
+        the result. ``stop`` remains the synchronous model-tool variant.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return {"job_id": job_id, "status": "not_found"}
+        if job.done.is_set():
+            return {"job_id": job_id, "status": "done"}
+        job.cancel_event.set()
+        return {"job_id": job_id, "status": "stopping"}
 
     def stop(self, job_id: int) -> dict:
         with self._lock:

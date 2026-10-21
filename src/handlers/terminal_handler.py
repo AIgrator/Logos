@@ -8,7 +8,7 @@ import platform
 import html
 import json
 import re
-from PySide6.QtCore import Slot, QThread, QTimer
+from PySide6.QtCore import QObject, Slot, QThread, QTimer, Signal
 
 from states import VisionState
 from ui.terminal_html_formatter import TerminalHtmlFormatter
@@ -40,6 +40,15 @@ def _running_job_id(result) -> int | None:
         except Exception:
             return None
     return None
+
+
+class JobEventRelay(QObject):
+    """Queues ShellJobManager callbacks from worker threads onto the GUI thread."""
+
+    event_received = Signal(dict)
+
+    def publish(self, event: dict):
+        self.event_received.emit(event)
 
 
 def _shorten_text(value, limit: int = 60) -> str:
@@ -223,6 +232,13 @@ class TerminalHandler(BaseAgentHandler):
         self._pending_action_label = None
         self._job_commands = {}
         self._job_cwds = {}
+        self._handled_job_ids = set()
+
+        self._job_event_relay = JobEventRelay()
+        self._job_event_relay.event_received.connect(self._on_job_event)
+        manager = getattr(self.computer, "shell_jobs", None)
+        if manager is not None:
+            manager.add_listener(self._job_event_relay.publish)
 
         self._job_wait_timer = QTimer()
         self._job_wait_timer.setSingleShot(True)
@@ -570,15 +586,25 @@ class TerminalHandler(BaseAgentHandler):
                 f"Poll it with poll_shell_job, pacing polls with wait_seconds.\n"
                 f"```\n{result}\n```"
             )
+            output_file = result.get('output_file')
+            actions = {f"Stop job #{job_id}": "stop_job"}
+            if output_file:
+                actions["Open log"] = "open_log"
             output_for_ui = {
                 'type': 'collapsible',
                 'title': f"Shell · running in background · job #{job_id}",
                 'content': self.html_formatter.format_shell_block(
-                    command, exit_note=note, show_output=False, cwd=cwd),
+                    command, exit_note=note, show_output=False, cwd=cwd,
+                    output_file=output_file),
                 'plain_content': f"$ {command}\n\n{note}",
                 'content_is_html': True,
                 'title_color': self._theme("WARNING_COLOR"),
                 'copy_payloads': {'command': command},
+                'job_id': job_id,
+                'job_role': 'launch',
+                'actions': actions,
+                'open_log_path': output_file,
+                'state': 'expanded',
             }
             return output_for_llm, output_for_ui
 
@@ -634,6 +660,10 @@ class TerminalHandler(BaseAgentHandler):
                     f"```\n{output or '(no new output)'}\n```\n"
                     f"**System note:** {_RUNNING_JOB_HINT}"
                 )
+                output_file = result.get('output_file')
+                actions = {f"Stop job #{job_id}": "stop_job"}
+                if output_file:
+                    actions["Open log"] = "open_log"
                 output_for_ui = {
                     'type': 'collapsible',
                     'title': f"Shell · job #{job_id} · running · {elapsed}s",
@@ -642,6 +672,10 @@ class TerminalHandler(BaseAgentHandler):
                     'content_is_html': True,
                     'title_color': self._theme("WARNING_COLOR"),
                     'copy_payloads': {'command': command, 'output': output or '(no new output)'},
+                    'job_id': job_id,
+                    'job_role': 'poll',
+                    'actions': actions,
+                    'open_log_path': output_file,
                     'state': 'expanded',
                 }
                 return output_for_llm, output_for_ui
@@ -689,6 +723,10 @@ class TerminalHandler(BaseAgentHandler):
                     f"```\n{output or '(no new output)'}\n```\n"
                     f"**System note:** {_RUNNING_JOB_HINT}"
                 )
+                output_file = result.get('output_file')
+                actions = {f"Stop job #{job_id}": "stop_job"}
+                if output_file:
+                    actions["Open log"] = "open_log"
                 output_for_ui = {
                     'type': 'collapsible',
                     'title': f"Background job #{job_id} · running",
@@ -698,6 +736,10 @@ class TerminalHandler(BaseAgentHandler):
                     'content_is_html': True,
                     'title_color': self._theme("WARNING_COLOR"),
                     'copy_payloads': {'output': output or '(no new output)'},
+                    'job_id': job_id,
+                    'job_role': 'poll',
+                    'actions': actions,
+                    'open_log_path': output_file,
                     'state': 'expanded',
                 }
                 return output_for_llm, output_for_ui
@@ -1004,6 +1046,85 @@ class TerminalHandler(BaseAgentHandler):
         self._awaiting_job_id = None
         self._job_wait_rounds = 0
 
+    def _mark_job_handled(self, job_id: int):
+        self._handled_job_ids.add(job_id)
+        if len(self._handled_job_ids) > 200:
+            self._handled_job_ids = set(list(self._handled_job_ids)[-100:])
+
+    @Slot(dict)
+    def _on_job_event(self, event):
+        """Wake the loop (or leave a note) when a background job ends."""
+        if not isinstance(event, dict):
+            return
+        if event.get('type') not in ('finished', 'stopped'):
+            return
+        try:
+            job_id = int(event.get('job_id'))
+        except (TypeError, ValueError):
+            return
+
+        res = dict(event.get('result') or {})
+        elapsed = event.get('elapsed_seconds', 0)
+        final = {
+            'job_id': job_id,
+            'status': 'done',
+            'exit_code': res.get('exit_code', -1),
+            'elapsed_seconds': elapsed,
+            'wall_time': res.get('wall_time', elapsed),
+            'total_lines': res.get('total_lines'),
+            'total_chars': res.get('total_chars'),
+            'timed_out': bool(res.get('timed_out')),
+            'cancelled': bool(res.get('cancelled')),
+            'inactivity_timeout': bool(res.get('inactivity_timeout')),
+            'exit_note': res.get('stderr') or res.get('exit_note'),
+            'output_file': res.get('output_file') or event.get('output_file'),
+            'output': str(res.get('stdout') or ''),
+        }
+        tool_name = ('stop_shell_job' if event.get('type') == 'stopped'
+                     else 'poll_shell_job')
+        try:
+            output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
+                tool_name, final, {'job_id': job_id})
+        except Exception as e:
+            logging.warning(f"Could not format job event #{job_id}: {e}")
+            output_for_llm, output_for_ui = "", None
+        if not output_for_llm:
+            output_for_llm = (
+                f"**Tool Result:** Background job #{job_id} finished "
+                f"(exit {final['exit_code']}).")
+
+        if output_for_ui:
+            update = getattr(self.ui, 'update_job_block', None)
+            if update is None or not update(job_id, output_for_ui):
+                self.ui.add_message(output_for_ui)
+
+        if job_id in self._handled_job_ids:
+            return
+        self._mark_job_handled(job_id)
+
+        if (self._awaiting_job_id == job_id
+                and self.state == VisionState.EXECUTING
+                and not self._tool_in_flight):
+            self.cancel_job_wait()
+            logging.info(f"TerminalHandler: job #{job_id} finished; waking loop.")
+            self._continue_loop(output_for_llm, from_job_wait=True)
+            return
+
+        if output_for_llm:
+            self.command_history.append(
+                f"**Background job #{job_id} finished while you were not "
+                f"waiting for it.**\n{output_for_llm}")
+
+    def request_stop_job(self, job_id: int):
+        """Non-blocking stop for the transcript's Stop action."""
+        manager = getattr(self.computer, "shell_jobs", None)
+        if manager is None:
+            return
+        result = manager.request_stop(job_id)
+        if result.get('status') == 'not_found':
+            self.ui.add_message(
+                f"<i>Background job #{job_id} has already finished.</i>")
+
     def _arm_job_wait(self, job_id: int):
         self.cancel_job_wait()
         self._awaiting_job_id = job_id
@@ -1034,6 +1155,7 @@ class TerminalHandler(BaseAgentHandler):
             return
         if status.get("status") == "done":
             self._awaiting_job_id = None
+            self._mark_job_handled(job_id)
             job_id_arg = job_id
             try:
                 final = manager.poll(job_id)

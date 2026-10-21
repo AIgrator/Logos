@@ -38,7 +38,8 @@ class CollapsibleBlockFormatter:
 
     def format_block(self, title: str, content: str, block_id: str, state: str,
                      title_color: str | None = None, content_is_html: bool = False,
-                     copy_payloads: dict | None = None) -> str:
+                     copy_payloads: dict | None = None,
+                     actions: dict | None = None) -> str:
         """
         Generates the HTML for a collapsible block in either a collapsed or expanded state.
         """
@@ -90,6 +91,21 @@ class CollapsibleBlockFormatter:
                 copy_html = (f'<div style="margin-top: 8px; font-size: 90%;">'
                              f'{"&nbsp;&nbsp;&middot;&nbsp;&nbsp;".join(links)}</div>')
 
+        action_html = ''
+        if state == 'expanded' and actions:
+            links = []
+            for label, action in actions.items():
+                safe_action = html.escape(str(action), quote=True)
+                links.append(
+                    f'<a href="action:{block_id}:{safe_action}" '
+                    f'style="color: {self._get_style("COLLAPSIBLE_TITLE")}; '
+                    'text-decoration: none; font-weight: 600;">'
+                    f'{html.escape(str(label))}</a>'
+                )
+            if links:
+                action_html = (f'<div style="margin-top: 8px; font-size: 90%;">'
+                               f'{"&nbsp;&nbsp;&middot;&nbsp;&nbsp;".join(links)}</div>')
+
         icon_style = self._get_icon_style(icon_size)
         arrow_html = f'<img src="{arrow_icon_uri}" style="{icon_style}">'
 
@@ -108,6 +124,7 @@ class CollapsibleBlockFormatter:
                 </a>
             </div>
             {copy_html}
+            {action_html}
             {content_html}
         </div>
         """
