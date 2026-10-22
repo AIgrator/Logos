@@ -313,7 +313,7 @@ class ChatWidget(QAbstractScrollArea):
         return False
 
     def update_job_block(self, job_id: int, data: dict) -> bool:
-        """Replace a running job's launch/poll block with its final result."""
+        """Replace a job's block with its final result and drop stale polls."""
         target = None
         for msg in self.messages:
             if msg.get('type') != 'collapsible' or msg.get('job_id') != job_id:
@@ -325,12 +325,15 @@ class ChatWidget(QAbstractScrollArea):
                 target = msg
         if target is None:
             return False
+        was_at_bottom = self._is_at_bottom()
+        old_scroll = self.verticalScrollBar().value()
         target['title'] = data.get('title', target.get('title', 'Details'))
         target['state'] = data.get('state', target.get('state', 'collapsed'))
         target['full_content'] = data.get('plain_content', data.get('content', ''))
         target['full_content_html'] = (
             data.get('content') if data.get('content_is_html') else None)
         target['title_color'] = data.get('title_color')
+        target['job_state'] = data.get('job_state', target.get('job_state'))
         target['copy_payloads'] = data.get('copy_payloads') or {}
         target['actions'] = data.get('actions') or {}
         target['open_log_path'] = data.get('open_log_path')
@@ -341,7 +344,25 @@ class ChatWidget(QAbstractScrollArea):
         except Exception as e:
             logging.warning(f"Job block update failed for #{job_id}: {e}")
             return False
+        removed = False
+        for msg in list(self.messages):
+            if msg is target:
+                continue
+            if (msg.get('type') == 'collapsible'
+                    and msg.get('job_id') == job_id):
+                self.messages.remove(msg)
+                removed = True
+        if removed:
+            self.selection_start = None
+            self.selection_end = None
+            self.is_selecting = False
         self._update_scroll_bar()
+        if was_at_bottom:
+            self.verticalScrollBar().setValue(
+                self.verticalScrollBar().maximum())
+        elif removed:
+            self.verticalScrollBar().setValue(
+                min(old_scroll, self.verticalScrollBar().maximum()))
         self.viewport().update()
         return True
 
@@ -550,6 +571,7 @@ class ChatWidget(QAbstractScrollArea):
                 'open_log_path': data.get('open_log_path'),
                 'job_id': data.get('job_id'),
                 'job_role': data.get('job_role'),
+                'job_state': data.get('job_state'),
                 'doc': doc,
             }
             html_content = self._format_collapsible_message(msg)

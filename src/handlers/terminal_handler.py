@@ -769,6 +769,7 @@ class TerminalHandler(BaseAgentHandler):
                     'content_is_html': True,
                     'title_color': title_color,
                     'copy_payloads': {'output': output or '(no output)'},
+                    'job_id': job_id,
                     'job_state': job_state,
                     'state': 'expanded' if job_state != "finished" else 'collapsed',
                 }
@@ -930,6 +931,7 @@ class TerminalHandler(BaseAgentHandler):
                     'command': command,
                     'output': display_stdout or '(no output)',
                 },
+                'job_id': job_id_arg,
                 'job_state': job_state,
                 # Failures open by default so the error is not hidden behind
                 # another click; successful calls stay compact.
@@ -1080,6 +1082,24 @@ class TerminalHandler(BaseAgentHandler):
             f"⏳ <b>{html.escape(str(label))}</b>{pct} · {elapsed:.0f}s{tail_html}"
         )
 
+    def _show_job_result(self, job_id, output_for_ui):
+        """Replace the job's launch block with its final state.
+
+        Poll snapshots for the same job are stale once it finishes, so the
+        widget removes them when the update succeeds. Fall back to a new block
+        when no existing block is available (e.g. after a restart).
+        """
+        update = getattr(self.ui, 'update_job_block', None)
+        if update is not None:
+            try:
+                if update(int(job_id), output_for_ui):
+                    return
+            except (TypeError, ValueError):
+                pass
+            except Exception as e:
+                logging.warning(f"Job block update failed for #{job_id}: {e}")
+        self.ui.add_message(output_for_ui)
+
     @Slot(int, object)
     def _on_tool_finished(self, ticket: int, result):
         if ticket != self._exec_ticket:
@@ -1094,14 +1114,20 @@ class TerminalHandler(BaseAgentHandler):
         output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
             self._pending_action_name, result, self._pending_action_args
         )
-        if output_for_ui:
-            self.ui.add_message(output_for_ui)
         job_id = _running_job_id(result)
-        if job_id is not None:
+        if output_for_ui:
+            if (isinstance(result, dict) and result.get('status') == 'done'
+                    and result.get('job_id') is not None):
+                self._show_job_result(result.get('job_id'), output_for_ui)
+            else:
+                self.ui.add_message(output_for_ui)
+        if job_id is not None and self._pending_action_name == 'execute_shell':
             # Background launch: do NOT ask the model immediately (it acts
             # NOW — e.g. relaunches). Record the launch, wait handler-side.
             # A readiness probe already spent the startup window, so its
             # verdict is final and the model gets control immediately.
+            # An explicit poll is different: its result is already current,
+            # so waiting again here only stalls the model by 10 seconds.
             self.command_history.append(output_for_llm)
             if isinstance(result, dict) and result.get('readiness_checked'):
                 self._continue_loop(output_for_llm)
@@ -1182,9 +1208,7 @@ class TerminalHandler(BaseAgentHandler):
                 f"(exit {final['exit_code']}).")
 
         if output_for_ui:
-            update = getattr(self.ui, 'update_job_block', None)
-            if update is None or not update(job_id, output_for_ui):
-                self.ui.add_message(output_for_ui)
+            self._show_job_result(job_id, output_for_ui)
 
         if job_id in self._handled_job_ids:
             return
@@ -1254,7 +1278,7 @@ class TerminalHandler(BaseAgentHandler):
                 "poll_shell_job", final, {"job_id": job_id_arg}
             )
             if output_for_ui:
-                self.ui.add_message(output_for_ui)
+                self._show_job_result(job_id_arg, output_for_ui)
             self._continue_loop(output_for_llm, from_job_wait=True)
             return
         self._job_wait_rounds += 1
