@@ -1880,17 +1880,18 @@ Acceptance for this sub-step:
 
 ## 18. Terminal background jobs: план следующего этапа
 
-Статус: P0 закоммичен (`4bd6a19`), P1 readiness probe реализован. Ниже —
-порядок работ, чтобы не уходить в бесконечную «кроличью нору». Сверяться с этим
-разделом перед каждым следующим коммитом.
+Статус: P0 закоммичен (`4bd6a19`), P1 закоммичен (`205f793`), P1.3 реализован.
+Ниже — порядок работ, чтобы не уходить в бесконечную «кроличью нору». Сверяться
+с этим разделом перед каждым следующим коммитом.
 
 Статус P0 (2026-10-21): реализовано и закоммичено (`4bd6a19`) — события
 `started/finished/stopped`, wake-up/pending-note, кнопка `Stop` и `Open log` в
 running-job блоке, retention логов.
 
-Статус P1 (2026-10-22): readiness probe реализован — `ready_url`/`ready_timeout`
-у `execute_shell` и `wait_for_http()`; окно старта стало гибким (после probe
-10-секундный fallback не запускается). Остался P1.3: единый формат статусов.
+Статус P1 (2026-10-22): readiness probe закоммичен (`205f793`); P1.3 реализован —
+`ShellJobManager` и tool-result отдают `state` (`starting/running/ready/
+finished/failed/stopped`), UI использует тот же словарь. `ready` сохраняется на
+job, поэтому последующий poll не теряет состояние сервера.
 
 ### 18.0 Принцип
 
@@ -1941,11 +1942,14 @@ task manager. Полная панель задач остаётся необяз
   `readiness_checked`, `ready_url`, `status_code`, `readiness_elapsed`,
   `readiness_error`.
 - Handler после probe сразу возвращает управление модели, не тратя ещё 10 секунд;
-  UI показывает `ready` (зелёный) или `not ready` (жёлтый) и советует не
-  перезапускать сервер слепо.
+  UI показывает `ready` (зелёный) или `starting` с ошибкой probe (жёлтый) и
+  советует не перезапускать сервер слепо.
 - Prompt и описание tool требуют `ready_url` для серверов.
-
-Осталось: единый формат статусов `starting/running/ready/finished/failed/stopped`.
+- Единый формат статусов: additive `state` в launch/poll/status/stop/events;
+  UI-блоки и tool-result используют `state`, старый `status`
+  (`running/done/not_found`) сохранён для совместимости. `job_state_from_result`
+  считает `0` и non-fatal `exit_note` успехом, timeout/inactivity — `failed`,
+  cancel — `stopped`.
 
 1. **Readiness probe.** — сделано.
    Универсальный `wait_for_http(url, timeout)` и `ready_url` у
@@ -1958,9 +1962,10 @@ task manager. Полная панель задач остаётся необяз
    единственным критерием. После probe handler сразу возвращает управление
    модели, не запуская второй 10-секундный цикл ожидания.
 
-3. **Единый формат статусов job.** — осталось.
+3. **Единый формат статусов job.** — сделано.
    `starting / running / ready / finished / failed / stopped` в UI и в
-   tool-result. Это упростит и панель, и диагностику.
+   tool-result. `status` оставлен машинным (`running/done/not_found`), `state` —
+   пользовательским. Это упрощает панель и диагностику.
 
 ### 18.3 P2 — отложено, вернуться при реальной необходимости
 

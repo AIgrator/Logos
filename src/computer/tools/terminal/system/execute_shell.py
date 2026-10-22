@@ -48,7 +48,8 @@ from src.computer.tools.locations import expand_path_tokens
                 "output_file": {"type": "STRING", "description": "Path to the full output; background jobs always provide a streaming log path."},
                 "exit_note": {"type": "STRING", "description": "Non-fatal note, e.g. exit 1 from grep/diff."},
                 "job_id": {"type": "INTEGER", "description": "Background job handle (only when run_in_background is true)."},
-                "status": {"type": "STRING", "description": "Background job status (only when run_in_background is true)."},
+                "status": {"type": "STRING", "description": "Machine status: running, done or not_found (only when run_in_background is true)."},
+                "state": {"type": "STRING", "description": "Unified job state: starting, running, ready, finished, failed or stopped."},
                 "ready": {"type": "BOOLEAN", "description": "Present when ready_url was supplied: whether the URL answered before the timeout."},
                 "readiness_checked": {"type": "BOOLEAN", "description": "True when a ready_url probe was performed."},
                 "ready_url": {"type": "STRING", "description": "Normalized URL that was probed."},
@@ -122,6 +123,11 @@ def execute_shell(self, command: str, run_in_background: bool = False,
                 "readiness_error": probe["last_error"],
             })
             if probe["ready"]:
+                if manager.mark_ready(job_id, probe["url"], probe["status_code"]):
+                    result["state"] = "ready"
+                else:
+                    result["state"] = manager.status(job_id).get(
+                        "state", "finished")
                 result["hint"] = (
                     f"Background job #{job_id} is running and {probe['url']} "
                     f"answered with HTTP {probe['status_code']} after "

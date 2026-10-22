@@ -534,6 +534,25 @@ def _build_result(command: str, exit_code: int, full_output: str,
     return result
 
 
+JOB_STATES = ("starting", "running", "ready", "finished", "failed", "stopped")
+
+
+def job_state_from_result(result: dict | None) -> str:
+    """Map a final job result to the user-facing job state."""
+    result = result or {}
+    if result.get("cancelled"):
+        return "stopped"
+    if result.get("timed_out") or result.get("inactivity_timeout"):
+        return "failed"
+    if result.get("exit_code") == 0 or result.get("exit_note"):
+        return "finished"
+    return "failed"
+
+
+def _running_job_state(job: "ShellJob") -> str:
+    return "ready" if job.ready else "running"
+
+
 def _mute_diagnostic(exit_code: int, stdout: str, stderr: str,
                      elapsed: float, timeout: float) -> str:
     """Explains an abnormal end with no output (otherwise unreadable).
@@ -724,6 +743,9 @@ class ShellJob:
         self.done = threading.Event()
         self.result = None
         self.started = time.monotonic()
+        self.ready = False
+        self.ready_url = None
+        self.ready_status_code = None
 
 
 class ShellJobManager:
@@ -778,6 +800,7 @@ class ShellJobManager:
             "job_id": job.job_id,
             "command": job.command,
             "status": "done",
+            "state": job_state_from_result(result),
             "exit_code": result.get("exit_code", -1),
             "elapsed_seconds": elapsed,
             "output_file": result.get("output_file") or job.log_path,
@@ -840,6 +863,7 @@ class ShellJobManager:
                     "job_id": job.job_id,
                     "command": command,
                     "status": "running",
+                    "state": "starting",
                     "elapsed_seconds": 0,
                     "output_file": job.log_path,
                 })
@@ -895,6 +919,17 @@ class ShellJobManager:
         threading.Thread(target=_target, daemon=True,
                          name=f"shell-job-{job.job_id}").start()
 
+    def mark_ready(self, job_id: int, url: str, status_code: int | None = None) -> bool:
+        """Remember that a server job answered its readiness probe."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None or job.done.is_set():
+            return False
+        job.ready = True
+        job.ready_url = url
+        job.ready_status_code = status_code
+        return True
+
     def launch(self, command: str, working_directory, timeout: float,
                output_limit: int = POLL_OUTPUT_CAP,
                inactivity_timeout: float = 0) -> dict:
@@ -905,6 +940,7 @@ class ShellJobManager:
                              inactivity_timeout=0)
         self._start_job_thread(job, working_directory)
         return {"job_id": job.job_id, "status": "running",
+                "state": "starting",
                 "output_file": job.log_path,
                 "hint": "Use poll_shell_job to check progress, stop_shell_job to abort. "
                         "Full output streams to output_file."}
@@ -932,6 +968,7 @@ class ShellJobManager:
                 logging.info(f"Foreground command detached into background job "
                              f"#{job.job_id} after {elapsed:.1f}s.")
                 return {"job_id": job.job_id, "status": "running", "detached": True,
+                        "state": "starting",
                         "output_file": job.log_path,
                         "hint": "Still running in background. Use poll_shell_job to check, "
                                 "stop_shell_job to abort. Full output streams to output_file."}
@@ -955,6 +992,7 @@ class ShellJobManager:
                              "exit_code": -1}
         result = dict(res)
         result.setdefault("wall_time", round(time.monotonic() - job.started, 2))
+        result.setdefault("state", job_state_from_result(res))
         return result
 
     def describe_live(self) -> str:
@@ -1005,8 +1043,13 @@ class ShellJobManager:
             job = self._jobs.get(job_id)
         if job is None:
             return {"job_id": job_id, "status": "not_found"}
-        state = "done" if job.done.is_set() else "running"
-        return {"job_id": job_id, "status": state,
+        if job.done.is_set():
+            status = "done"
+            job_state = job_state_from_result(job.result)
+        else:
+            status = "running"
+            job_state = _running_job_state(job)
+        return {"job_id": job_id, "status": status, "state": job_state,
                 "elapsed_seconds": round(time.monotonic() - job.started, 1),
                 "output_file": job.log_path}
 
@@ -1043,6 +1086,7 @@ class ShellJobManager:
             if res.get("output_file") and total > job.output_limit:
                 new_out += f"\n[Full output saved to: {res['output_file']}]"
             return {"job_id": job_id, "status": "done",
+                    "state": job_state_from_result(res),
                     "exit_code": res.get("exit_code", -1),
                     "elapsed_seconds": elapsed,
                     "wall_time": res.get("wall_time", elapsed),
@@ -1057,6 +1101,7 @@ class ShellJobManager:
                                    job.output_limit),
                     "total_stdout_chars": total}
         return {"job_id": job_id, "status": "running",
+                "state": _running_job_state(job),
                 "elapsed_seconds": elapsed,
                 "output_file": job.log_path,
                 "output": _cap(new_out + (("\n" + new_err) if new_err else ""),
@@ -1074,9 +1119,11 @@ class ShellJobManager:
         if job is None:
             return {"job_id": job_id, "status": "not_found"}
         if job.done.is_set():
-            return {"job_id": job_id, "status": "done"}
+            return {"job_id": job_id, "status": "done",
+                    "state": job_state_from_result(job.result)}
         job.cancel_event.set()
-        return {"job_id": job_id, "status": "stopping"}
+        return {"job_id": job_id, "status": "stopping",
+                "state": _running_job_state(job)}
 
     def stop(self, job_id: int) -> dict:
         with self._lock:

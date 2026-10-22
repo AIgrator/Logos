@@ -585,47 +585,51 @@ class TerminalHandler(BaseAgentHandler):
             readiness_elapsed = result.get('readiness_elapsed')
             readiness_error = result.get('readiness_error')
             status_code = result.get('status_code')
+            job_state = str(result.get('state') or (
+                'ready' if readiness_checked and ready else 'starting'))
             elapsed_text = (f"{readiness_elapsed:g}s"
                             if isinstance(readiness_elapsed, (int, float))
                             else "?s")
             if readiness_checked and ready:
-                note = (f"Started as job #{job_id}. Ready at {ready_url} "
-                        f"(HTTP {status_code}) after {elapsed_text}. "
-                        "Stop with stop_shell_job when done.")
+                note = (f"Started as job #{job_id}. State: {job_state}. "
+                        f"Ready at {ready_url} (HTTP {status_code}) after "
+                        f"{elapsed_text}. Stop with stop_shell_job when done.")
                 output_for_llm = (
-                    f"**Tool Result:** Background job #{job_id} started and is "
-                    f"ready at {ready_url} (HTTP {status_code}) after "
-                    f"{elapsed_text}. It is still running; stop it with "
+                    f"**Tool Result:** Background job #{job_id} started; "
+                    f"state: {job_state}. It is ready at {ready_url} "
+                    f"(HTTP {status_code}) after {elapsed_text}. Stop it with "
                     f"stop_shell_job when done.\n```\n{result}\n```"
                 )
-                title = f"Shell · job #{job_id} · ready · {ready_url}"
+                title = f"Shell · job #{job_id} · {job_state} · {ready_url}"
                 title_color = self._theme("SUCCESS_COLOR")
             elif readiness_checked:
-                note = (f"Started as job #{job_id}, but {ready_url} did not "
-                        f"answer within the readiness timeout "
-                        f"({readiness_error or 'no response'}). Check "
+                note = (f"Started as job #{job_id}. State: {job_state}. "
+                        f"{ready_url} did not answer within the readiness "
+                        f"timeout ({readiness_error or 'no response'}). Check "
                         "poll_shell_job/output_file before deciding; do not "
                         "relaunch blindly.")
                 output_for_llm = (
-                    f"**Tool Result:** Background job #{job_id} started, but "
-                    f"the readiness probe for {ready_url} failed after "
-                    f"{elapsed_text}. Last error: "
+                    f"**Tool Result:** Background job #{job_id} started; "
+                    f"state: {job_state}. The readiness probe for {ready_url} "
+                    f"failed after {elapsed_text}. Last error: "
                     f"{readiness_error or 'none'}.\n"
                     "Check poll_shell_job and output_file before deciding; do "
                     "not relaunch blindly.\n"
                     f"```\n{result}\n```"
                 )
-                title = f"Shell · job #{job_id} · not ready · {ready_url}"
+                title = f"Shell · job #{job_id} · {job_state} · {ready_url}"
                 title_color = self._theme("WARNING_COLOR")
             else:
-                note = (f"Started in background as job #{job_id}. Use "
-                        "poll_shell_job to check progress, stop_shell_job to abort.")
+                note = (f"Started in background as job #{job_id}. "
+                        f"State: {job_state}. Use poll_shell_job to check "
+                        "progress, stop_shell_job to abort.")
                 output_for_llm = (
-                    f"**Tool Result:** Background shell job #{job_id} started and is running.\n"
+                    f"**Tool Result:** Background shell job #{job_id} started; "
+                    f"state: {job_state}.\n"
                     f"Poll it with poll_shell_job, pacing polls with wait_seconds.\n"
                     f"```\n{result}\n```"
                 )
-                title = f"Shell · running in background · job #{job_id}"
+                title = f"Shell · job #{job_id} · {job_state}"
                 title_color = self._theme("WARNING_COLOR")
             output_file = result.get('output_file')
             actions = {f"Stop job #{job_id}": "stop_job"}
@@ -643,6 +647,7 @@ class TerminalHandler(BaseAgentHandler):
                 'copy_payloads': {'command': command},
                 'job_id': job_id,
                 'job_role': 'launch',
+                'job_state': job_state,
                 'actions': actions,
                 'open_log_path': output_file,
                 'state': 'expanded',
@@ -685,19 +690,21 @@ class TerminalHandler(BaseAgentHandler):
                     'inactivity_timeout': result.get('inactivity_timeout', False),
                     'exit_note': result.get('exit_note'),
                     'output_file': result.get('output_file'),
+                    'state': result.get('state'),
                 }
                 llm, ui = self._format_result_for_llm_and_ui(
                     'execute_shell', shell_result,
                     {'command': command, 'job_id': job_id, 'cwd': cwd})
-                verb = ('stopped' if tool_name == 'stop_shell_job'
-                        and result.get('cancelled') else 'finished')
+                verb = str(result.get('state') or 'finished')
                 return f"**Background job #{job_id} {verb}.**\n{llm}", ui
 
             if status == 'running' and command:
                 content = self.html_formatter.format_shell_block(
                     command, stdout=output, cwd=cwd)
+                job_state = str(result.get('state') or 'running')
                 output_for_llm = (
-                    f"**Tool Result:** Background job #{job_id} running after {elapsed}s.\n"
+                    f"**Tool Result:** Background job #{job_id} state: "
+                    f"{job_state} after {elapsed}s.\n"
                     f"```\n{output or '(no new output)'}\n```\n"
                     f"**System note:** {_RUNNING_JOB_HINT}"
                 )
@@ -707,14 +714,17 @@ class TerminalHandler(BaseAgentHandler):
                     actions["Open log"] = "open_log"
                 output_for_ui = {
                     'type': 'collapsible',
-                    'title': f"Shell · job #{job_id} · running · {elapsed}s",
+                    'title': f"Shell · job #{job_id} · {job_state} · {elapsed}s",
                     'content': content,
                     'plain_content': f"$ {command}\n\n{output or '(no new output)'}",
                     'content_is_html': True,
-                    'title_color': self._theme("WARNING_COLOR"),
+                    'title_color': self._theme(
+                        "SUCCESS_COLOR" if job_state == "ready"
+                        else "WARNING_COLOR"),
                     'copy_payloads': {'command': command, 'output': output or '(no new output)'},
                     'job_id': job_id,
                     'job_role': 'poll',
+                    'job_state': job_state,
                     'actions': actions,
                     'open_log_path': output_file,
                     'state': 'expanded',
@@ -738,12 +748,17 @@ class TerminalHandler(BaseAgentHandler):
 
             if status == 'done':
                 exit_code = result.get('exit_code', '?')
-                title = f"Background job #{job_id} finished · exit {exit_code}"
+                job_state = str(result.get('state') or 'finished')
+                title = (f"Background job #{job_id} · {job_state} · "
+                         f"exit {exit_code}")
                 title_color = self._theme(
-                    "SUCCESS_COLOR" if exit_code == 0 else "ERROR_COLOR")
+                    "SUCCESS_COLOR" if job_state == "finished"
+                    else "WARNING_COLOR" if job_state == "stopped"
+                    else "ERROR_COLOR")
                 output_for_llm = (
-                    f"**Tool Result:** Background job #{job_id} done (exit {exit_code}) "
-                    f"after {elapsed}s.\n```\n{output or '(no output)'}\n```"
+                    f"**Tool Result:** Background job #{job_id} {job_state} "
+                    f"(exit {exit_code}) after {elapsed}s.\n"
+                    f"```\n{output or '(no output)'}\n```"
                 )
                 output_for_ui = {
                     'type': 'collapsible',
@@ -754,13 +769,16 @@ class TerminalHandler(BaseAgentHandler):
                     'content_is_html': True,
                     'title_color': title_color,
                     'copy_payloads': {'output': output or '(no output)'},
-                    'state': 'expanded' if exit_code != 0 else 'collapsed',
+                    'job_state': job_state,
+                    'state': 'expanded' if job_state != "finished" else 'collapsed',
                 }
                 return output_for_llm, output_for_ui
 
             if status == 'running':
+                job_state = str(result.get('state') or 'running')
                 output_for_llm = (
-                    f"**Tool Result:** Background job #{job_id} running after {elapsed}s.\n"
+                    f"**Tool Result:** Background job #{job_id} state: "
+                    f"{job_state} after {elapsed}s.\n"
                     f"```\n{output or '(no new output)'}\n```\n"
                     f"**System note:** {_RUNNING_JOB_HINT}"
                 )
@@ -770,15 +788,18 @@ class TerminalHandler(BaseAgentHandler):
                     actions["Open log"] = "open_log"
                 output_for_ui = {
                     'type': 'collapsible',
-                    'title': f"Background job #{job_id} · running",
+                    'title': f"Background job #{job_id} · {job_state}",
                     'content': self.html_formatter.format_plain_content(
                         output or '(no new output)'),
                     'plain_content': output or '(no new output)',
                     'content_is_html': True,
-                    'title_color': self._theme("WARNING_COLOR"),
+                    'title_color': self._theme(
+                        "SUCCESS_COLOR" if job_state == "ready"
+                        else "WARNING_COLOR"),
                     'copy_payloads': {'output': output or '(no new output)'},
                     'job_id': job_id,
                     'job_role': 'poll',
+                    'job_state': job_state,
                     'actions': actions,
                     'open_log_path': output_file,
                     'state': 'expanded',
@@ -820,6 +841,7 @@ class TerminalHandler(BaseAgentHandler):
             timed_out = bool(result.get('timed_out'))
             cancelled = bool(result.get('cancelled'))
             inactive = bool(result.get('inactivity_timeout'))
+            job_state = str(result.get('state') or '')
             meta = []
             if wall_time is not None:
                 meta.append(f"{wall_time}s")
@@ -829,7 +851,9 @@ class TerminalHandler(BaseAgentHandler):
                 meta.append(f"{total_chars} chars")
             meta_text = (", " + ", ".join(meta)) if meta else ""
             ui_meta = (" · " + " · ".join(meta)) if meta else ""
-            header = f"**Command Result:** (Exit Code: {exit_code}{meta_text})\n"
+            state_text = f"State: {job_state}, " if job_state else ""
+            header = (f"**Command Result:** ({state_text}Exit Code: "
+                      f"{exit_code}{meta_text})\n")
             if exit_note:
                 header += f"**Note:** {exit_note}\n"
             output_for_llm = (
@@ -840,7 +864,15 @@ class TerminalHandler(BaseAgentHandler):
                 output_for_llm += f"\n**SYSTEM:**\n```\n{stderr}\n```"
             job_id_arg = args.get('job_id')
             prefix = f"Shell · job #{job_id_arg}" if job_id_arg else "Shell"
-            if timed_out:
+            if job_state == "finished":
+                title = f"{prefix} · finished{ui_meta}"
+            elif job_state == "failed":
+                title = f"{prefix} · failed · exit {exit_code}{ui_meta}"
+            elif job_state == "stopped":
+                title = f"{prefix} · stopped{ui_meta}"
+            elif job_state in ("ready", "running", "starting"):
+                title = f"{prefix} · {job_state}{ui_meta}"
+            elif timed_out:
                 title = f"{prefix} · timed out{ui_meta}"
             elif cancelled:
                 title = f"{prefix} · stopped{ui_meta}"
@@ -869,7 +901,13 @@ class TerminalHandler(BaseAgentHandler):
                 plain_parts += ["", f"Note: {exit_note}"]
             if output_file:
                 plain_parts += ["", f"Full output: {output_file}"]
-            if timed_out:
+            if job_state in ("finished", "ready"):
+                title_color = self._theme("SUCCESS_COLOR")
+            elif job_state in ("failed",):
+                title_color = self._theme("ERROR_COLOR")
+            elif job_state in ("stopped", "running", "starting"):
+                title_color = self._theme("WARNING_COLOR")
+            elif timed_out:
                 title_color = self._theme("ERROR_COLOR")
             elif cancelled or inactive:
                 # A user stop / idle kill is an intentional outcome, not a
@@ -892,10 +930,13 @@ class TerminalHandler(BaseAgentHandler):
                     'command': command,
                     'output': display_stdout or '(no output)',
                 },
+                'job_state': job_state,
                 # Failures open by default so the error is not hidden behind
                 # another click; successful calls stay compact.
-                'state': ('expanded' if (timed_out or (exit_code != 0
-                                         and not cancelled and not inactive))
+                'state': ('expanded' if (job_state == "failed"
+                                         or (not job_state and timed_out)
+                                         or (not job_state and exit_code != 0
+                                             and not cancelled and not inactive))
                           else 'collapsed'),
             }
 
@@ -1114,6 +1155,7 @@ class TerminalHandler(BaseAgentHandler):
         final = {
             'job_id': job_id,
             'status': 'done',
+            'state': event.get('state') or 'finished',
             'exit_code': res.get('exit_code', -1),
             'elapsed_seconds': elapsed,
             'wall_time': res.get('wall_time', elapsed),

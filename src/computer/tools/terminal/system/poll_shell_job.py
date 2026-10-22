@@ -3,12 +3,13 @@ from src.computer.computer import tool_meta
 @tool_meta(
     tool={
         "name": "poll_shell_job",
-        "description": ("Checks a background shell job started with run_in_background=true. Returns status "
-            "(running/done/not_found) plus the output produced since the previous poll (capped). "
-            "Polling a finished job returns its final result once, then the job is gone. "
-            "Never busy-loop polls - always call wait_seconds between them. A server/daemon job "
-            "stays 'running' by design: verify it with an HTTP request instead of waiting for done. "
-            "Every background job streams its full output to output_file; use that path for long logs."),
+        "description": ("Checks a background shell job started with run_in_background=true. Returns machine status "
+            "(running/done/not_found), unified state (starting/running/ready/finished/failed/stopped) "
+            "plus the output produced since the previous poll (capped). Polling a finished job returns "
+            "its final result once, then the job is gone. Never busy-loop polls - always call wait_seconds "
+            "between them. A server/daemon job stays 'running' or 'ready' by design: verify it with an "
+            "HTTP request instead of waiting for done. Every background job streams its full output to "
+            "output_file; use that path for long logs."),
         "arguments": {
             "job_id": {"type": "INTEGER", "description": "The job handle returned by execute_shell.", "required": True}
         },
@@ -16,7 +17,8 @@ from src.computer.computer import tool_meta
             "type": "OBJECT",
             "description": "Job status with new output since the last poll.",
             "properties": {
-                "status": {"type": "STRING", "description": "running, done or not_found."},
+                "status": {"type": "STRING", "description": "Machine status: running, done or not_found."},
+                "state": {"type": "STRING", "description": "Unified state: starting, running, ready, finished, failed or stopped."},
                 "output": {"type": "STRING", "description": "New output since the previous poll."},
                 "exit_code": {"type": "INTEGER", "description": "Present when done."},
                 "elapsed_seconds": {"type": "NUMBER", "description": "Seconds since the job started."},

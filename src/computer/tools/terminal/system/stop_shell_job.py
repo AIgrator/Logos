@@ -13,7 +13,8 @@ from src.computer.computer import tool_meta
             "type": "OBJECT",
             "description": "Final job status.",
             "properties": {
-                "status": {"type": "STRING", "description": "done, stopped or not_found."}
+                "status": {"type": "STRING", "description": "Machine status: done, stopping or not_found."},
+                "state": {"type": "STRING", "description": "Unified state: running, finished, failed or stopped."}
             }
         }
     },
