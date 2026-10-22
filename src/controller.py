@@ -1,8 +1,11 @@
+import html
+import json
 import logging
 import io
 import threading
 import time
 import os
+import uuid
 import pathspec
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import QFileDialog, QMessageBox
@@ -13,8 +16,10 @@ from build_info import get_build_id
 from llm.error_formatter import CONTINUE_LINK
 from llm.llm_worker import LLMWorker
 from llm.mode_capabilities import ModeCapabilities, SUBSECTIONS
+from project_manager import event_text
 from settings_manager import SettingsManager
 from ui.manager import UIManager
+from ui.text_render import render_text
 from ui.theme_manager import ThemeManager
 from ui.settings_window import SettingsWindow
 from handlers.chat_handler import ChatHandler
@@ -65,6 +70,11 @@ class AppController(QObject):
             self.project_root = os.path.abspath(self.project_root)
         self.working_directory = self.project_root
         self.session_file = ""
+        self.session_mode = "chat"
+        self.session_turn_id = ""
+        self.session_events = []
+        self._session_event_count = 0
+        self._persisted_message_count = 0
 
         # --- Single Instance Lock ---
         self.local_server = local_server
@@ -402,6 +412,7 @@ class AppController(QObject):
     def run(self):
         has_project = bool(self.project_root)
         if has_project:
+            self._restore_session_mode(self.session_mode)
             self.ui.set_project_name(self.project_manager.get_active_name(), self.project_root)
             self.ui.show_workspace()
         else:
@@ -413,10 +424,9 @@ class AppController(QObject):
         self.ui.set_title_bar_text(window_title)
         self.ui.refresh_model_button(title_string)
         self.ui.set_assistant_name(self._get_current_model_name())
-        if has_project and self.conversation_history:
-            self.ui.add_message(
-                f"<i>Restored {len(self.conversation_history)} messages from the previous "
-                f"session in this project.</i>", force_scroll=True)
+        if has_project:
+            self._restore_agent_history()
+            self._replay_session()
         self._start_vision_initialization()
         if self.indexer is not None:
             self.indexer.start()
@@ -461,9 +471,91 @@ class AppController(QObject):
         self.files_found_signal.emit(results)
 
     # ------------------------------------------------------------- projects
+    @staticmethod
+    def _valid_mode(mode: str) -> str:
+        return mode if mode in ("chat", "terminal", "browser", "vision") else "chat"
+
+    def _current_mode(self) -> str:
+        return self._valid_mode(getattr(self.ui, "_active_mode_key", "chat"))
+
+    def _restore_session_mode(self, mode: str):
+        mode = self._valid_mode(mode)
+        self.session_mode = mode
+        handlers = getattr(self, "chat_handler", None)
+        if handlers is None:
+            return
+        handler, state = {
+            "chat": (self.chat_handler, ControllerState.IDLE),
+            "terminal": (self.terminal_handler, ControllerState.TERMINAL),
+            "browser": (self.browser_handler, ControllerState.BROWSER),
+            "vision": (self.vision_handler, ControllerState.VISION),
+        }[mode]
+        self.current_handler = handler
+        self._set_state(state)
+        try:
+            self.ui.set_active_mode(mode)
+        except Exception as e:
+            logging.warning(f"Could not restore UI mode {mode}: {e}")
+
+    def _session_has_content(self) -> bool:
+        return bool(self._session_event_count or self.conversation_history)
+
+    def _create_new_session(self, mode: str = ""):
+        mode = self._valid_mode(mode or self._current_mode())
+        self.session_file = self.project_manager.new_session_file(mode=mode)
+        self.session_mode = mode
+        self.session_turn_id = ""
+        self.session_events = []
+        self._session_event_count = 0
+        self._persisted_message_count = 0
+        return self.session_file
+
+    def _prepare_session_for_mode(self, mode: str):
+        """Keep one mode per session; a non-empty mode change starts a new one."""
+        mode = self._valid_mode(mode)
+        if self.project_manager is None or not self.project_root:
+            self.session_mode = mode
+            return
+        if mode == self.session_mode:
+            return
+        try:
+            if self.session_file and not os.path.exists(self.session_file):
+                self._create_new_session(mode)
+                return
+            if not self._session_has_content():
+                if (self.session_file
+                        and self.project_manager.set_session_mode(self.session_file, mode)):
+                    self.session_mode = mode
+                    return
+                self._create_new_session(mode)
+                return
+            self._persist_session()
+        except Exception as e:
+            logging.warning(f"Could not prepare session for {mode} mode: {e}")
+        self.conversation_history.clear()
+        self.pending_attachments.clear()
+        try:
+            self.ui.clear_thumbnails()
+            self._update_attachment_menu()
+        except Exception as e:
+            logging.warning(f"Could not clear attachments on mode change: {e}")
+        try:
+            self._create_new_session(mode)
+        except Exception as e:
+            logging.warning(f"Could not create a new {mode} session: {e}")
+            self.session_file = ""
+        self._reset_agent_histories()
+        try:
+            self.ui.clear_chat()
+        except Exception:
+            pass
+
     def _load_project_session(self):
-        """Restores the most recent chat/session stored in the project."""
+        """Restores the most recent session stored in the project."""
         self.session_file = ""
+        self.session_events = []
+        self._session_event_count = 0
+        self._persisted_message_count = 0
         if self.project_manager is None or not self.project_manager.get_active_root():
             return
         try:
@@ -471,7 +563,7 @@ class AppController(QObject):
             if latest:
                 self._load_session_file(latest)
             else:
-                self.session_file = self.project_manager.new_session_file()
+                self._create_new_session(self._current_mode())
         except Exception as e:
             logging.warning(f"Could not restore project session: {e}")
 
@@ -479,10 +571,26 @@ class AppController(QObject):
         """Loads a specific session file into the shared conversation list."""
         if self.project_manager is None or not path:
             return
-        messages = self.project_manager.load_session(path)
+        data = self.project_manager.load_session_data(path)
+        if not path.endswith(".jsonl"):
+            migrated = self.project_manager.migrate_session(path, data.get("mode") or "chat")
+            if migrated != path:
+                path = migrated
+                data = self.project_manager.load_session_data(path)
+        messages = data.get("messages") or []
+        events = data.get("events") or []
         self.session_file = path
+        self.session_mode = self._valid_mode(data.get("mode") or "chat")
+        self.session_turn_id = ""
+        self.session_events = list(events)
+        self._session_event_count = len(events)
+        self._persisted_message_count = sum(
+            1 for event in events if event.get("type") == "message")
         self.conversation_history.clear()
         self.conversation_history.extend(messages)
+        if getattr(self, "chat_handler", None) is not None:
+            self._restore_session_mode(self.session_mode)
+        self._restore_agent_history()
         logging.info(f"Loaded session with {len(messages)} messages from {path}")
 
     def _session_snapshot(self) -> list:
@@ -495,15 +603,240 @@ class AppController(QObject):
                 snapshot.append({"role": item["role"], "content": item["content"]})
         return snapshot
 
+    def append_session_event(self, event_type: str, **fields):
+        """Append one typed event to the active session's JSONL log."""
+        if self.project_manager is None or not self.project_manager.get_active_root():
+            return None
+        try:
+            if not self.session_file or not os.path.exists(self.session_file):
+                self._create_new_session(self.session_mode)
+            if not self.session_file.endswith(".jsonl"):
+                self.session_file = self.project_manager.migrate_session(
+                    self.session_file, self.session_mode)
+            event = self.project_manager.make_event(event_type, **fields)
+            self.project_manager.append_event(self.session_file, event)
+            self.session_events.append(event)
+            self._session_event_count += 1
+            return event
+        except Exception as e:
+            logging.warning(f"Could not append session event '{event_type}': {e}")
+            return None
+
     def _persist_session(self):
         if self.project_manager is None or not self.project_manager.get_active_root():
             return
         try:
-            if not self.session_file:
-                self.session_file = self.project_manager.new_session_file()
-            self.project_manager.save_session(self.session_file, self._session_snapshot())
+            snapshot = self._session_snapshot()
+            if not self.session_file or not os.path.exists(self.session_file):
+                self._create_new_session(self.session_mode)
+            if not self.session_file.endswith(".jsonl"):
+                self.session_file = self.project_manager.migrate_session(
+                    self.session_file, self.session_mode)
+            if len(snapshot) < self._persisted_message_count:
+                self._persisted_message_count = 0
+            if not self.session_turn_id:
+                self.session_turn_id = uuid.uuid4().hex
+            while self._persisted_message_count < len(snapshot):
+                item = snapshot[self._persisted_message_count]
+                event = self.append_session_event(
+                    "message",
+                    turn_id=self.session_turn_id,
+                    role=item["role"],
+                    content=[{"type": "text", "text": item["content"]}],
+                )
+                if event is None:
+                    break
+                self._persisted_message_count += 1
         except Exception as e:
             logging.warning(f"Could not persist project session: {e}")
+
+    def _handler_for_mode(self, mode: str):
+        mode = self._valid_mode(mode)
+        return getattr(self, {
+            "chat": "chat_handler",
+            "terminal": "terminal_handler",
+            "browser": "browser_handler",
+            "vision": "vision_handler",
+        }[mode], None)
+
+    def _reset_agent_history(self, handler):
+        if handler is None or not hasattr(handler, "command_history"):
+            return
+        cancel_wait = getattr(handler, "cancel_job_wait", None)
+        if callable(cancel_wait):
+            try:
+                cancel_wait()
+            except Exception:
+                pass
+        for attr, value in (
+                ("original_user_request", None),
+                ("command_history", []),
+                ("_stashed_response", None),
+                ("_tool_in_flight", False),
+                ("_last_action_sig", None),
+                ("_consecutive_errors", 0),
+                ("_assessment_sent", False),
+                ("_active_call_id", None),
+                ("_active_tool_name", ""),
+                ("_active_turn_id", ""),
+                ("_awaiting_job_id", None),
+                ("_job_wait_rounds", 0),
+                ("_pending_action_name", None),
+                ("_pending_action_args", None)):
+            if hasattr(handler, attr):
+                setattr(handler, attr, value)
+
+    def _reset_agent_histories(self):
+        for name in ("terminal_handler", "browser_handler", "vision_handler"):
+            self._reset_agent_history(getattr(self, name, None))
+
+    def _restore_agent_history(self):
+        """Rebuild the current agent's model-facing history from JSONL events."""
+        self._reset_agent_histories()
+        if self.session_mode == "chat":
+            return
+        handler = self._handler_for_mode(self.session_mode)
+        if handler is None or not self.session_events:
+            return
+        history = []
+        last_user_request = None
+        last_action_sig = None
+        for event in self.session_events:
+            event_type = event.get("type")
+            if event_type == "message":
+                if event.get("role") != "user":
+                    continue
+                text = event_text(event)
+                if text:
+                    last_user_request = text
+                    history.append(f"**User Request:** {text}")
+            elif event_type == "reasoning":
+                text = event_text(event)
+                if text:
+                    history.append(f"**Model reasoning:** {text}")
+            elif event_type == "tool_call":
+                name = str(event.get("name") or "action")
+                args = event.get("input") or {}
+                if not isinstance(args, dict):
+                    args = {}
+                history.append(
+                    f"**Agent Command:** `{name}"
+                    f"({json.dumps(args, ensure_ascii=False)})`")
+                last_action_sig = (
+                    name, json.dumps(args, sort_keys=True, ensure_ascii=False))
+            elif event_type == "tool_result":
+                history.append(event_text(event) or "**Tool Result:** (no output)")
+            elif event_type == "job_result":
+                history.append(
+                    event_text(event)
+                    or f"**Background job #{event.get('job_id', '?')} finished.**")
+            elif event_type == "error":
+                message = str(event.get("message") or "").strip()
+                if message:
+                    history.append(f"**Error:** {message}")
+        handler.command_history = history
+        if last_user_request:
+            handler.original_user_request = last_user_request
+        if last_action_sig is not None:
+            handler._last_action_sig = last_action_sig
+        mode_name = getattr(handler, "MODE_NAME", type(handler).__name__)
+        logging.info(
+            f"Rebuilt {mode_name} history with {len(history)} entries "
+            f"from {len(self.session_events)} session events.")
+
+    def _replay_tool_event(self, event: dict):
+        """Generic fallback for modes without their own event renderer."""
+        event_type = event.get("type")
+        if event_type == "tool_call":
+            name = str(event.get("name") or "action")
+            args = event.get("input") or {}
+            self.ui.add_message(f"<b>Executing:</b> {html.escape(name)}")
+            self.ui.add_message({
+                "type": "collapsible",
+                "title": "Arguments",
+                "content": json.dumps(args, ensure_ascii=False, indent=2),
+            })
+            return
+        status = str(event.get("status") or "")
+        if event_type == "job_result":
+            title = (f"Background job #{event.get('job_id', '?')} · "
+                     f"{status or 'result'}")
+        else:
+            title = f"{event.get('name') or 'Tool'} · {status or 'result'}"
+        text = event_text(event) or "(no output)"
+        if text.startswith("**Tool Result:**\n"):
+            text = text[len("**Tool Result:**\n"):].strip()
+            if text.startswith("```") and text.endswith("```"):
+                text = text[3:-3].strip("\n")
+        shown = text
+        if len(shown) > 30000:
+            shown = shown[:30000] + (
+                f"\n… [truncated for display, {len(text) - 30000} chars hidden]")
+        block = {
+            "type": "collapsible",
+            "title": title,
+            "content": shown,
+            "plain_content": text,
+            "copy_payloads": {"output": text},
+            "state": "collapsed",
+        }
+        if status == "error":
+            block["title_color"] = self.theme_manager.get_style("ERROR_COLOR")
+        self.ui.add_message(block)
+
+    def _replay_session(self):
+        """Render the loaded session transcript and tool cards into the UI."""
+        events = list(self.session_events or [])
+        if not events or getattr(self, "ui", None) is None:
+            return
+        try:
+            self.ui.clear_chat()
+        except Exception:
+            pass
+        handler = self._handler_for_mode(self.session_mode)
+        model_name = self._get_current_model_name()
+        prefix = f"<b>{html.escape(str(model_name))}:</b> "
+        for event in events:
+            event_type = event.get("type")
+            if event_type == "message":
+                text = event_text(event)
+                if not text:
+                    continue
+                role = event.get("role")
+                if role == "user":
+                    self.ui.add_message(
+                        self.ui.build_user_message_html(text), role="user")
+                elif role == "assistant":
+                    self.ui.add_message(
+                        render_text(text, prefix_html=prefix, markdown_ok=True))
+                else:
+                    self.ui.add_message(
+                        f"<p><i>System:</i> {html.escape(text)}</p>")
+            elif event_type == "reasoning":
+                text = event_text(event)
+                if text:
+                    self.ui.add_message(
+                        render_text(text, prefix_html=prefix, markdown_ok=True))
+            elif event_type in ("tool_call", "tool_result", "job_result"):
+                replayed = False
+                replay = getattr(handler, "replay_event", None)
+                if callable(replay):
+                    try:
+                        replayed = bool(replay(event))
+                    except Exception as e:
+                        logging.warning(f"Could not replay {event_type}: {e}")
+                if not replayed:
+                    self._replay_tool_event(event)
+            elif event_type == "error":
+                message = str(event.get("message") or event_text(event) or "Error")
+                error_style = self.theme_manager.get_style("ERROR_MESSAGE_STYLE")
+                self.ui.add_message(
+                    f'<span style="{error_style}">{html.escape(message)}</span>')
+        try:
+            self.ui.chat_widget.scroll_to_bottom()
+        except Exception:
+            pass
+        logging.info(f"Replayed {len(events)} session events into the UI.")
 
     def _set_project_context(self, root: str):
         """Re-roots the indexer and the terminal/browser working directories."""
@@ -600,6 +933,8 @@ class AppController(QObject):
         self._persist_session()
         self.ui.show_workspace()
         self.ui.refresh_project_views()
+        self._restore_agent_history()
+        self._replay_session()
         if announce:
             self.ui.add_message(f"<i>Project switched to <b>{name}</b>.</i>", force_scroll=True)
 
@@ -629,17 +964,18 @@ class AppController(QObject):
         except Exception as e:
             logging.warning(f"Could not clear attachments for new session: {e}")
         try:
-            self.session_file = self.project_manager.new_session_file()
+            self._create_new_session(self._current_mode())
         except Exception as e:
             logging.warning(f"Could not create a new session: {e}")
             self.session_file = ""
+        self._reset_agent_histories()
         try:
             self.ui.clear_chat()
         except Exception:
             pass
         self.ui.show_workspace()
         self.ui.refresh_project_views()
-        self.ui.add_message("<i>Started a new chat.</i>", force_scroll=True)
+        self.ui.add_message("<i>Started a new session.</i>", force_scroll=True)
 
     def _handle_open_project(self):
         path = QFileDialog.getExistingDirectory(
@@ -718,6 +1054,7 @@ class AppController(QObject):
             self._enqueue_chat_message(user_text)
             return
 
+        self.session_turn_id = uuid.uuid4().hex
         self.ui.add_user_message(user_text)
         self.conversation_history.append({'role': 'user', 'content': user_text})
         self._persist_session()
@@ -848,6 +1185,7 @@ class AppController(QObject):
         except Exception as e:
             logging.warning(f"Could not activate queued chat message: {e}")
         self.current_handler = self.chat_handler
+        self.session_turn_id = uuid.uuid4().hex
         self.conversation_history.append({'role': 'user', 'content': item['text']})
         self._persist_session()
         logging.info(f"Dequeuing chat message ({len(self.chat_queue)} left).")
@@ -914,6 +1252,13 @@ class AppController(QObject):
         self.ui.stop_retry_countdown()
         self.ui.show_thinking_ui(False)
         self._last_llm_error = True
+        self.append_session_event(
+            "error",
+            turn_id=self.session_turn_id,
+            scope="llm",
+            message=str(error_message),
+            retryable=True,
+        )
 
         if self.state == ControllerState.VISION:
             # The vision handler will manage UI changes (like switching to full mode)
@@ -1369,6 +1714,17 @@ class AppController(QObject):
         # Same for the browser handler (closes the controlled browser).
         if self.current_handler == getattr(self, 'browser_handler', None):
             self.browser_handler.stop()
+
+        mode = "chat"
+        for name, handler in (
+            ("terminal", getattr(self, "terminal_handler", None)),
+            ("browser", getattr(self, "browser_handler", None)),
+            ("vision", getattr(self, "vision_handler", None)),
+        ):
+            if new_handler is handler:
+                mode = name
+                break
+        self._prepare_session_for_mode(mode)
 
         self._set_state(new_state)
         self.current_handler = new_handler

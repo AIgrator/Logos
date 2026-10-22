@@ -18,6 +18,10 @@ from datetime import UTC, datetime
 PROJECT_DIRNAME = ".logos"
 PROJECT_META_FILE = "project.json"
 MAX_RECENT_PROJECTS = 12
+SESSION_SCHEMA_VERSION = 1
+SESSION_EXT = ".jsonl"
+LEGACY_SESSION_EXT = ".json"
+MAX_EVENT_CHARS = 1_000_000
 
 
 def _now_iso() -> str:
@@ -44,17 +48,75 @@ def _same_path(a: str, b: str) -> bool:
     return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
 
 
+def _content_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(str(part.get("text") or ""))
+        return "".join(parts)
+    return ""
+
+
+def _message_text(message: dict) -> str:
+    if not isinstance(message, dict):
+        return ""
+    return _content_text(message.get("content"))
+
+
+def event_text(event: dict) -> str:
+    """Plain text carried by a message/tool/job/error session event."""
+    if not isinstance(event, dict):
+        return ""
+    if event.get("type") == "message":
+        return _message_text(event)
+    output = event.get("output")
+    if isinstance(output, dict):
+        text = _content_text(output.get("content"))
+        if text:
+            return text
+        if isinstance(output.get("text"), str):
+            return output["text"]
+    if isinstance(output, str):
+        return output
+    text = event.get("text")
+    if isinstance(text, str):
+        return text
+    message = event.get("message")
+    return message if isinstance(message, str) else ""
+
+
 def _session_title(messages: list) -> str:
     for item in messages:
         if not isinstance(item, dict) or item.get("role") != "user":
             continue
-        content = item.get("content")
-        if not isinstance(content, str):
-            continue
-        line = " ".join(content.split())
+        line = " ".join(_message_text(item).split())
         if line:
             return line[:80] + ("..." if len(line) > 80 else "")
     return "Empty session"
+
+
+def _cap_event(event: dict) -> dict:
+    """Keep one event below a sane size without dropping its shape."""
+    changed = False
+
+    def cap(value):
+        nonlocal changed
+        if isinstance(value, str) and len(value) > MAX_EVENT_CHARS:
+            changed = True
+            return value[:MAX_EVENT_CHARS] + "\n… [truncated]"
+        if isinstance(value, list):
+            return [cap(item) for item in value]
+        if isinstance(value, dict):
+            return {key: cap(item) for key, item in value.items()}
+        return value
+
+    capped = cap(event)
+    if changed:
+        capped["truncated"] = True
+    return capped
 
 
 class ProjectManager:
@@ -219,18 +281,84 @@ class ProjectManager:
         return ""
 
     # --------------------------------------------------------------- sessions
-    def new_session_file(self, root: str = "") -> str:
+    @staticmethod
+    def _write_jsonl_atomic(path: str, records: list) -> None:
+        tmp = f"{path}.tmp"
+        with open(tmp, "w", encoding="utf-8", newline="\n") as fh:
+            for record in records:
+                fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+                fh.write("\n")
+        os.replace(tmp, path)
+
+    @staticmethod
+    def make_event(event_type: str, **fields) -> dict:
+        event = {
+            "type": event_type,
+            "id": fields.pop("id", uuid.uuid4().hex),
+            "ts": fields.pop("ts", _now_iso()),
+        }
+        event.update(fields)
+        return event
+
+    def _session_header(self, session_id: str, mode: str, root: str) -> dict:
+        return {
+            "type": "session",
+            "schema_version": SESSION_SCHEMA_VERSION,
+            "id": session_id,
+            "mode": mode or "chat",
+            "created_at": _now_iso(),
+            "project_root": root,
+            "cwd": root,
+        }
+
+    def new_session_file(self, root: str = "", mode: str = "chat") -> str:
         root = root or self._active_root
         stamp = time.strftime("%Y%m%d-%H%M%S")
-        filename = f"session-{stamp}-{uuid.uuid4().hex[:6]}.json"
+        session_id = uuid.uuid4().hex
+        filename = f"session-{stamp}-{session_id[:6]}{SESSION_EXT}"
         path = os.path.join(self.sessions_dir(root), filename)
-        self._write_json_atomic(path, {
-            "id": uuid.uuid4().hex,
-            "created_at": _now_iso(),
-            "updated_at": _now_iso(),
-            "messages": [],
-        })
+        self._write_jsonl_atomic(path, [self._session_header(session_id, mode, root)])
         return path
+
+    def append_event(self, path: str, event: dict):
+        if not path or not event:
+            return
+        if not path.endswith(SESSION_EXT):
+            raise ValueError(f"Not a JSONL session: {path}")
+        record = dict(event)
+        record.setdefault("id", uuid.uuid4().hex)
+        record.setdefault("ts", _now_iso())
+        record = _cap_event(record)
+        try:
+            with open(path, "a", encoding="utf-8", newline="\n") as fh:
+                fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
+                fh.write("\n")
+                fh.flush()
+        except Exception as exc:
+            logging.warning(f"Could not append session event to {path}: {exc}")
+
+    def set_session_mode(self, path: str, mode: str) -> bool:
+        """Change the mode of an empty JSONL session (rewrites only the header)."""
+        if not path or not os.path.exists(path) or not path.endswith(SESSION_EXT):
+            return False
+        try:
+            with open(path, encoding="utf-8") as fh:
+                records = [json.loads(line) for line in fh if line.strip()]
+        except Exception as exc:
+            logging.warning(f"Could not read session header {path}: {exc}")
+            return False
+        if len(records) != 1 or not isinstance(records[0], dict):
+            return False
+        header = records[0]
+        if header.get("type") != "session":
+            return False
+        header["mode"] = mode or "chat"
+        try:
+            self._write_jsonl_atomic(path, [header])
+        except Exception as exc:
+            logging.warning(f"Could not update session mode {path}: {exc}")
+            return False
+        return True
 
     def latest_session_file(self, root: str = "") -> str:
         sessions = self.sessions_dir(root)
@@ -238,7 +366,8 @@ class ProjectManager:
             files = [
                 os.path.join(sessions, name)
                 for name in os.listdir(sessions)
-                if name.endswith(".json") and name.startswith("session-")
+                if name.startswith("session-")
+                and name.endswith((SESSION_EXT, LEGACY_SESSION_EXT))
             ]
         except OSError:
             return ""
@@ -258,27 +387,23 @@ class ProjectManager:
         except OSError:
             return []
         for name in names:
-            if not name.endswith(".json") or not name.startswith("session-"):
+            if (not name.startswith("session-")
+                    or not name.endswith((SESSION_EXT, LEGACY_SESSION_EXT))):
                 continue
             path = os.path.join(sessions, name)
             try:
                 mtime = os.path.getmtime(path)
             except OSError:
                 continue
-            messages = []
-            try:
-                with open(path, encoding="utf-8") as fh:
-                    data = json.load(fh)
-                if isinstance(data, dict) and isinstance(data.get("messages"), list):
-                    messages = data["messages"]
-            except Exception:
-                pass
+            data = self.load_session_data(path)
+            messages = data.get("messages") or []
             result.append({
                 "path": path,
                 "project_root": root,
                 "project_name": os.path.basename(root.rstrip("\\/")) or root,
                 "title": _session_title(messages),
                 "message_count": len(messages),
+                "mode": data.get("mode") or "chat",
                 "mtime": mtime,
             })
         result.sort(key=lambda item: item["mtime"], reverse=True)
@@ -306,22 +431,155 @@ class ProjectManager:
         root = os.path.dirname(logos_dir)
         return root if os.path.isdir(root) else ""
 
-    def load_session(self, path: str) -> list:
-        if not path or not os.path.exists(path):
-            return []
+    @staticmethod
+    def _message_from_event(event: dict):
+        role = event.get("role")
+        if role not in ("user", "assistant", "system"):
+            return None
+        return {"role": role, "content": _content_text(event.get("content"))}
+
+    def _load_jsonl_session(self, path: str) -> dict:
+        header = {}
+        events = []
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except Exception as exc:
+                        logging.warning(f"Skipping malformed session line in {path}: {exc}")
+                        continue
+                    if not isinstance(record, dict):
+                        continue
+                    if record.get("type") == "session" and not header:
+                        header = record
+                        continue
+                    events.append(record)
+        except Exception as exc:
+            logging.warning(f"Could not load session {path}: {exc}")
+        messages = []
+        for event in events:
+            if event.get("type") == "message":
+                message = self._message_from_event(event)
+                if message is not None:
+                    messages.append(message)
+        return {
+            "path": path,
+            "id": header.get("id") or os.path.splitext(os.path.basename(path))[0],
+            "mode": header.get("mode") or "chat",
+            "created_at": header.get("created_at") or "",
+            "messages": messages,
+            "events": events,
+        }
+
+    def _load_legacy_session(self, path: str) -> dict:
         try:
             with open(path, encoding="utf-8") as fh:
                 data = json.load(fh)
         except Exception as exc:
-            logging.warning(f"Could not load session {path}: {exc}")
-            return []
-        messages = data.get("messages") if isinstance(data, dict) else None
-        return messages if isinstance(messages, list) else []
+            logging.warning(f"Could not load legacy session {path}: {exc}")
+            return {"path": path, "id": "", "mode": "chat", "created_at": "",
+                    "messages": [], "events": []}
+        if not isinstance(data, dict):
+            data = {}
+        raw_messages = data.get("messages")
+        messages = raw_messages if isinstance(raw_messages, list) else []
+        events = []
+        for message in messages:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if role not in ("user", "assistant", "system"):
+                continue
+            text = _message_text(message)
+            if not text:
+                continue
+            events.append(self.make_event(
+                "message", turn_id="legacy", role=role,
+                content=[{"type": "text", "text": text}]))
+        return {
+            "path": path,
+            "id": data.get("id") or os.path.splitext(os.path.basename(path))[0],
+            "mode": data.get("mode") or "chat",
+            "created_at": data.get("created_at") or "",
+            "messages": [m for m in (self._message_from_event(e) for e in events)
+                         if m is not None],
+            "events": events,
+        }
+
+    def load_session_data(self, path: str) -> dict:
+        if not path or not os.path.exists(path):
+            return {"path": path, "id": "", "mode": "chat", "created_at": "",
+                    "messages": [], "events": []}
+        if path.endswith(SESSION_EXT):
+            return self._load_jsonl_session(path)
+        return self._load_legacy_session(path)
+
+    def load_session(self, path: str) -> list:
+        return self.load_session_data(path).get("messages") or []
+
+    def migrate_session(self, path: str, mode: str = "") -> str:
+        """Convert a legacy .json session into the JSONL format."""
+        if not path or not os.path.exists(path) or path.endswith(SESSION_EXT):
+            return path
+        data = self.load_session_data(path)
+        root = self.session_project_root(path)
+        new_path = os.path.splitext(path)[0] + SESSION_EXT
+        if os.path.exists(new_path):
+            new_path = os.path.splitext(path)[0] + f"-{uuid.uuid4().hex[:6]}{SESSION_EXT}"
+        header = self._session_header(
+            data.get("id") or uuid.uuid4().hex,
+            mode or data.get("mode") or "chat",
+            root,
+        )
+        if data.get("created_at"):
+            header["created_at"] = data["created_at"]
+        records = [header]
+        for message in data.get("messages") or []:
+            if not isinstance(message, dict):
+                continue
+            role = message.get("role")
+            if role not in ("user", "assistant", "system"):
+                continue
+            records.append(self.make_event(
+                "message", turn_id="legacy", role=role,
+                content=[{"type": "text", "text": _message_text(message)}]))
+        try:
+            self._write_jsonl_atomic(new_path, records)
+            os.replace(path, f"{path}.bak")
+        except Exception as exc:
+            logging.warning(f"Could not migrate session {path}: {exc}")
+            return path
+        return new_path
 
     def save_session(self, path: str, messages: list):
+        """Legacy full-save helper; new code appends events instead."""
         if not path:
             return
         try:
+            if path.endswith(SESSION_EXT):
+                existing = self.load_session_data(path)
+                root = self.session_project_root(path)
+                header = self._session_header(
+                    existing.get("id") or uuid.uuid4().hex,
+                    existing.get("mode") or "chat", root)
+                if existing.get("created_at"):
+                    header["created_at"] = existing["created_at"]
+                records = [header]
+                for message in messages or []:
+                    if not isinstance(message, dict):
+                        continue
+                    role = message.get("role")
+                    if role not in ("user", "assistant", "system"):
+                        continue
+                    records.append(self.make_event(
+                        "message", turn_id="legacy", role=role,
+                        content=[{"type": "text", "text": _message_text(message)}]))
+                self._write_jsonl_atomic(path, records)
+                return
             created_at = _now_iso()
             if os.path.exists(path):
                 try:

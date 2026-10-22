@@ -389,6 +389,22 @@ class TerminalHandler(BaseAgentHandler):
             'content': json.dumps(action_args, ensure_ascii=False, indent=2),
         }
 
+    def replay_event(self, event: dict) -> bool:
+        """Rebuild terminal action summaries/details from the session log."""
+        if event.get("type") == "tool_call":
+            name = str(event.get("name") or "action")
+            args = event.get("input") or {}
+            if not isinstance(args, dict):
+                args = {}
+            label = _action_summary(name, args)
+            self.ui.add_message(self._action_summary_html(label))
+            if args and name not in {
+                    'execute_shell', 'poll_shell_job', 'stop_shell_job',
+                    'read_files', 'list_directory', 'search_file_content'}:
+                self.ui.add_message(self._details_block(name, args))
+            return True
+        return super().replay_event(event)
+
     def execute_action(self, action: dict) -> str | None:
         """
         Executes the action (tool call) requested by the LLM.
@@ -524,6 +540,7 @@ class TerminalHandler(BaseAgentHandler):
         self._stop_thinking_timer()
         error_msg_for_llm = f"**Error:** Local fallback for {action_name} also failed: {error_message}"
         self.ui.add_message(f"<i>{error_msg_for_llm}</i>")
+        self.record_tool_result(error_msg_for_llm, status="error", name=action_name)
         self._continue_loop(error_msg_for_llm)
         self.web_thread = None
 
@@ -552,6 +569,7 @@ class TerminalHandler(BaseAgentHandler):
             self.controller.llm_worker.log_tool_response(action_name, response_text)
 
         output_for_llm = f"**Tool Result:**\n```\n{response_text}\n```"
+        self.record_tool_result(output_for_llm, name=action_name)
         self._continue_loop(output_for_llm)
 
     def _format_result_for_llm_and_ui(self, tool_name: str, result: any, args: dict) -> (str, any):
@@ -1114,6 +1132,7 @@ class TerminalHandler(BaseAgentHandler):
         output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
             self._pending_action_name, result, self._pending_action_args
         )
+        self.record_tool_result(output_for_llm, name=self._pending_action_name)
         job_id = _running_job_id(result)
         if output_for_ui:
             if (isinstance(result, dict) and result.get('status') == 'done'
@@ -1149,6 +1168,8 @@ class TerminalHandler(BaseAgentHandler):
         logging.info(f"TerminalHandler: ticket {ticket} ({self._pending_action_name}) error received, continuing loop.")
         error_msg = f"**Error:** {error_message}"
         self.ui.add_message(f"<i>{error_msg}</i>")
+        self.record_tool_result(
+            error_msg, status="error", name=self._pending_action_name)
         self._continue_loop(error_msg)
 
     def cancel_job_wait(self):
@@ -1213,6 +1234,21 @@ class TerminalHandler(BaseAgentHandler):
         if job_id in self._handled_job_ids:
             return
         self._mark_job_handled(job_id)
+        if final.get("cancelled") or event.get("type") == "stopped":
+            job_status = "stopped"
+        elif final.get("timed_out") or final.get("exit_code") not in (0, None):
+            job_status = "error"
+        else:
+            job_status = "ok"
+        self._append_session_event(
+            "job_result",
+            turn_id=getattr(self.controller, "session_turn_id", ""),
+            job_id=job_id,
+            name=tool_name,
+            status=job_status,
+            exit_code=final.get("exit_code"),
+            output={"text": str(output_for_llm or "")},
+        )
 
         if (self._awaiting_job_id == job_id
                 and self.state == VisionState.EXECUTING

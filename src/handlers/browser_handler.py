@@ -492,6 +492,7 @@ class BrowserHandler(BaseAgentHandler):
         if not ok:
             error_msg = f"**Tool Result:** Error: {text}"
             self.ui.add_message(f"<i>{error_msg}</i>")
+            self.record_tool_result(error_msg, status="error", name=action_name)
             self._continue_loop(error_msg)
             return
         output = text or "(ok, no output)"
@@ -501,11 +502,15 @@ class BrowserHandler(BaseAgentHandler):
             'content': output[-4000:],
         })
         if action_name in _UNTRUSTED_RESULT_TOOLS:
-            self._continue_loop(
+            result_text = (
                 "**Tool Result:**\n<untrusted_page_content>\n"
                 f"{output}\n</untrusted_page_content>")
+            self.record_tool_result(result_text, name=action_name)
+            self._continue_loop(result_text)
             return
-        self._continue_loop(f"**Tool Result:**\n```\n{output}\n```")
+        result_text = f"**Tool Result:**\n```\n{output}\n```"
+        self.record_tool_result(result_text, name=action_name)
+        self._continue_loop(result_text)
 
     @Slot(int, str)
     def _on_browser_error(self, ticket: int, error_message: str):
@@ -516,4 +521,6 @@ class BrowserHandler(BaseAgentHandler):
         logging.info(f"BrowserHandler: ticket {ticket} ({self._pending_action_name}) error received, continuing loop.")
         error_msg = f"**Tool Result:** Error: {error_message}"
         self.ui.add_message(f"<i>{error_msg}</i>")
+        self.record_tool_result(
+            error_msg, status="error", name=self._pending_action_name)
         self._continue_loop(error_msg)

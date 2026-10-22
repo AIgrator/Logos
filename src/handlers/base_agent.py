@@ -18,10 +18,13 @@ Contract for heirs:
     threads, end UI containers). Default does nothing.
 """
 import html
+import json
 import logging
 import os
 import re
+import uuid
 
+from project_manager import event_text
 from states import VisionState
 
 # After this many unsuccessful turns in a row the loop stops asking the
@@ -232,6 +235,9 @@ class BaseAgentHandler:
         self._assessment_sent = False  # her-verdict turn already spent this streak
         self._task_tag = "notask"  # correlation tag for the single-log timeline
         self._turn_seq = 0  # LLM-bound turn counter (same convention as CUA)
+        self._active_call_id = None
+        self._active_tool_name = ""
+        self._active_turn_id = ""
         # NOTE: there is deliberately NO timeout counter. Timeouts count as
         # ordinary failures; significance is the model's call (assessment
         # turn). Do not reintroduce a second fuse.
@@ -346,9 +352,13 @@ class BaseAgentHandler:
             draft = self.ui.user_input.toPlainText().strip()
             if draft:
                 self.ui.add_user_message(draft)
+                self.controller.session_turn_id = uuid.uuid4().hex
                 self.controller.conversation_history.append({'role': 'user', 'content': draft})
                 self.command_history.append(f"**User note (paused):** {draft}")
                 self.ui.user_input.clear()
+                persist = getattr(self.controller, "_persist_session", None)
+                if callable(persist):
+                    persist()
             self._set_state(VisionState.EXECUTING)
             self.controller._reenter_agent_mode(self)
             self.ui.add_message("<i>Execution resumed.</i>")
@@ -582,6 +592,11 @@ class BaseAgentHandler:
             # Her own thoughts persist: without this the next turn sees what
             # was DONE but never what was MEANT — stage tracking evaporates.
             self.command_history.append(f"**Model reasoning:** {reasoning}")
+            self._append_session_event(
+                "reasoning",
+                turn_id=getattr(self.controller, "session_turn_id", ""),
+                text=reasoning,
+            )
 
         if schema_name != self.SCHEMA_NAME or not payload or 'action' not in payload:
             self.ui.add_message("<i>Received an unexpected response from the model. Cannot proceed.</i>")
@@ -596,6 +611,7 @@ class BaseAgentHandler:
 
         if action.get('name') == 'finish':
             message = (action.get('arguments') or {}).get('message', 'Task completed successfully.')
+            self._record_assistant_message(message)
             success = self.controller.theme_manager.get_style("SUCCESS_COLOR")
             prefix = (f'<span style="color: {success}; font-weight: 600;">'
                       'Task Finished</span>: ')
@@ -605,6 +621,7 @@ class BaseAgentHandler:
 
         if action.get('name') == 'communicate_to_user':
             message = (action.get('arguments') or {}).get('message', 'The assistant needs your input.')
+            self._record_assistant_message(message)
             self.ui.add_formatted_message(message, prefix_html=self._model_prefix())
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()
@@ -612,6 +629,7 @@ class BaseAgentHandler:
 
         if action.get('name') == 'display_message':
             message = (action.get('arguments') or {}).get('message', '...')
+            self._record_assistant_message(message)
             self.ui.add_formatted_message(message, prefix_html=self._model_prefix())
             self._continue_loop(f"**Tool Result:** Message displayed to user: {message}")
             return
@@ -623,8 +641,96 @@ class BaseAgentHandler:
         # that outlived a mode switch) are ignored instead of crashing.
         pass
 
+    def _append_session_event(self, event_type: str, **fields):
+        append = getattr(self.controller, "append_session_event", None)
+        if not callable(append):
+            return None
+        try:
+            return append(event_type, **fields)
+        except Exception as e:
+            logging.warning(f"Could not append {event_type} session event: {e}")
+            return None
+
+    def record_tool_result(self, text, status: str = "", call_id: str = "",
+                           name: str = ""):
+        call_id = call_id or self._active_call_id
+        if not call_id:
+            return
+        if not status:
+            status = "error" if _is_error_output(text) else "ok"
+        self._append_session_event(
+            "tool_result",
+            turn_id=self._active_turn_id or getattr(
+                self.controller, "session_turn_id", ""),
+            call_id=call_id,
+            name=name or getattr(self, "_active_tool_name", "") or "",
+            status=status,
+            output={"text": str(text or "")},
+        )
+        self._active_call_id = None
+        self._active_tool_name = ""
+
+    def _record_assistant_message(self, text):
+        """Persist a user-visible assistant message so replay can show it."""
+        text = str(text or "")
+        if not text:
+            return
+        self.controller.conversation_history.append(
+            {"role": "assistant", "content": text})
+        persist = getattr(self.controller, "_persist_session", None)
+        if callable(persist):
+            persist()
+
+    def _add_replay_result(self, text, title, status: str = ""):
+        """Render a persisted tool/job result as a collapsed code block."""
+        text = str(text or "(no output)")
+        if text.startswith("**Tool Result:**\n"):
+            text = text[len("**Tool Result:**\n"):].strip()
+            if text.startswith("```") and text.endswith("```"):
+                text = text[3:-3].strip("\n")
+        shown = text
+        if len(shown) > 30000:
+            shown = shown[:30000] + (
+                f"\n… [truncated for display, {len(text) - 30000} chars hidden]")
+        block = {
+            "type": "collapsible",
+            "title": title,
+            "content": shown,
+            "plain_content": text,
+            "copy_payloads": {"output": text},
+            "state": "collapsed",
+        }
+        if status == "error":
+            theme = getattr(self.controller, "theme_manager", None)
+            if theme is not None:
+                block["title_color"] = theme.get_style("ERROR_COLOR")
+        self.ui.add_message(block)
+
+    def replay_event(self, event: dict) -> bool:
+        """Replay a persisted tool event in the current mode's visual style."""
+        event_type = event.get("type")
+        if event_type == "tool_call":
+            name = str(event.get("name") or "action")
+            args = event.get("input") or {}
+            self.ui.add_message(f"<b>Executing:</b> {html.escape(name)}")
+            self.ui.add_message({
+                "type": "collapsible",
+                "title": "Arguments",
+                "content": json.dumps(args, ensure_ascii=False, indent=2),
+            })
+            return True
+        if event_type in ("tool_result", "job_result"):
+            status = str(event.get("status") or "")
+            if event_type == "job_result":
+                title = (f"Background job #{event.get('job_id', '?')} · "
+                         f"{status or 'result'}")
+            else:
+                title = f"{event.get('name') or 'Tool'} · {status or 'result'}"
+            self._add_replay_result(event_text(event), title, status)
+            return True
+        return False
+
     def _run_action(self, action: dict):
-        import json
         if self._tool_in_flight:
             # A duplicate/superseded answer (e.g. user guidance sent a second
             # request while the first answer's tool still runs). The running
@@ -658,6 +764,16 @@ class BaseAgentHandler:
             f"`{history_action.get('name')}"
             f"({json.dumps(history_action.get('arguments') or {}, ensure_ascii=False)})`")
         self.command_history.append(f"**Agent Command:** {command_str_for_llm}")
+        self._active_call_id = uuid.uuid4().hex
+        self._active_tool_name = action_name or ""
+        self._active_turn_id = getattr(self.controller, "session_turn_id", "")
+        self._append_session_event(
+            "tool_call",
+            turn_id=self._active_turn_id,
+            call_id=self._active_call_id,
+            name=action_name,
+            input=history_action.get("arguments") or {},
+        )
         try:
             result_text = self.execute_action(action)
         except ValueError as e:
@@ -668,6 +784,7 @@ class BaseAgentHandler:
             result_text = f"**Tool Result:** Error: {e}"
         if result_text is None:
             return  # async heir continues the loop itself on completion
+        self.record_tool_result(result_text)
         self._continue_loop(result_text)
 
     # -- loop awareness (facts for the model; it decides) ------------------
