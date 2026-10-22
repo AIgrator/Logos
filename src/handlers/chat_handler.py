@@ -36,10 +36,11 @@ class ChatHandler:
 
         self._chat_seq += 1
         self._check_context_usage()
+        handoff_prompt = self.controller.handoff_prompt()
         self.controller._send_llm_request(
             user_text,
             attachments,
-            None,  # No system prompt in chat mode
+            handoff_prompt or None,
             self.conversation_history,
             None,  # No schema for chat mode
             "chat",
@@ -95,6 +96,9 @@ class ChatHandler:
         persist = getattr(self.controller, "_persist_session", None)
         if callable(persist):
             persist()
+        schedule = getattr(self.controller, "_schedule_summary_refresh", None)
+        if callable(schedule):
+            schedule()
         logging.info("Chat response finished.")
 
         # If the application window is active, focus the user input field

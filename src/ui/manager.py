@@ -272,6 +272,8 @@ class UIManager(QWidget):
     project_create_requested = Signal()
     session_open_requested = Signal(str)
     new_session_requested = Signal()
+    context_requested = Signal()
+    journal_requested = Signal()
     home_requested = Signal()
 
     # Signals for new pilot controls
@@ -356,6 +358,8 @@ class UIManager(QWidget):
         self.sidebar.new_project_requested.connect(self.project_create_requested.emit)
         self.sidebar.open_project_requested.connect(self.project_open_requested.emit)
         self.sidebar.new_session_requested.connect(self.new_session_requested.emit)
+        self.sidebar.context_requested.connect(self.context_requested.emit)
+        self.sidebar.journal_requested.connect(self.journal_requested.emit)
         self.sidebar.settings_requested.connect(self.settings_button_clicked.emit)
 
         self.chat_widget = ChatWidget(self.controller.theme_manager)

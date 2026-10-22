@@ -1,6 +1,7 @@
 """Unified project context: journal, handoff summary and model metadata.
 
-Step 1 (this module set) provides token estimation and per-model metadata
-(context window, reasoning support, input modalities) consumed from the
-``models.json`` produced by the LLM-models generator.
+``tokens`` provides token estimation plus per-model context metadata consumed
+from ``models.json``. ``handoff`` stores the rolling ``summary.md`` and its
+provenance sidecar, builds summarizer prompts, and creates the deterministic
+fallback used when an LLM pass is unavailable.
 """

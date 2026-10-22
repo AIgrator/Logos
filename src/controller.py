@@ -8,7 +8,9 @@ import os
 import uuid
 import pathspec
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
-from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PySide6.QtWidgets import (
+    QDialog, QFileDialog, QMessageBox, QPushButton, QTextBrowser, QVBoxLayout,
+)
 from PIL import Image
 
 from brain import Brain
@@ -17,6 +19,7 @@ from llm.error_formatter import CONTINUE_LINK
 from llm.llm_worker import LLMWorker
 from llm.mode_capabilities import ModeCapabilities, SUBSECTIONS
 from project_manager import event_text
+from context import handoff
 from settings_manager import SettingsManager
 from ui.manager import UIManager
 from ui.text_render import render_text
@@ -35,6 +38,7 @@ from src.utils.ignore_patterns import DEFAULT_GLOBAL_IGNORE_PATTERNS
 
 class AppController(QObject):
     llm_request_sent = Signal(str, list, str, list, str, str, int)
+    summary_requested = Signal(str, str, str, str)
     # Signals to proxy worker results safely to the main thread
     analysis_finished = Signal(object, object, object)
     analysis_failed = Signal(str)
@@ -75,6 +79,14 @@ class AppController(QObject):
         self.session_events = []
         self._session_event_count = 0
         self._persisted_message_count = 0
+        self._handoff_summary = ""
+        self._handoff_meta = {}
+        self._summary_pending = False
+        self._summary_force = False
+        self._summary_request_context = None
+        self._summary_timer = QTimer(self)
+        self._summary_timer.setSingleShot(True)
+        self._summary_timer.timeout.connect(self._maybe_refresh_summary)
 
         # --- Single Instance Lock ---
         self.local_server = local_server
@@ -124,6 +136,7 @@ class AppController(QObject):
         self.settings_window = None
         self._shutting_down = False
         self._load_project_session()
+        self._load_handoff_state()
 
         # Handlers
         comp_start = time.perf_counter()
@@ -170,7 +183,10 @@ class AppController(QObject):
         self.llm_worker.retry_attempt.connect(self._handle_retry_attempt)
         self.llm_worker.retry_countdown.connect(self._handle_retry_countdown)
         self.llm_worker.error_occurred.connect(self.handle_llm_error)
+        self.llm_worker.summary_finished.connect(self._handle_summary_response)
+        self.llm_worker.summary_failed.connect(self._handle_summary_error)
         self.llm_request_sent.connect(self.llm_worker.execute_request)
+        self.summary_requested.connect(self.llm_worker.execute_summary_request)
 
         # Thread lifecycle
         self.app.aboutToQuit.connect(self.handle_shutdown)
@@ -213,6 +229,8 @@ class AppController(QObject):
         self.ui.project_create_requested.connect(self._handle_create_project)
         self.ui.session_open_requested.connect(self.open_session)
         self.ui.new_session_requested.connect(self.new_session)
+        self.ui.context_requested.connect(self._show_context_summary)
+        self.ui.journal_requested.connect(self._show_session_journal)
         self.ui.home_requested.connect(self.ui.show_home)
 
         # Thinking timer and settings change hook
@@ -427,6 +445,7 @@ class AppController(QObject):
         if has_project:
             self._restore_agent_history()
             self._replay_session()
+            self._schedule_summary_refresh()
         self._start_vision_initialization()
         if self.indexer is not None:
             self.indexer.start()
@@ -518,6 +537,9 @@ class AppController(QObject):
             return
         if mode == self.session_mode:
             return
+        if (self._session_has_content()
+                and self._summary_settings().get("handoff_on_mode_switch", True)):
+            self._capture_handoff_summary()
         try:
             if self.session_file and not os.path.exists(self.session_file):
                 self._create_new_session(mode)
@@ -590,6 +612,7 @@ class AppController(QObject):
         self.conversation_history.extend(messages)
         if getattr(self, "chat_handler", None) is not None:
             self._restore_session_mode(self.session_mode)
+        self._load_handoff_state()
         self._restore_agent_history()
         logging.info(f"Loaded session with {len(messages)} messages from {path}")
 
@@ -614,10 +637,12 @@ class AppController(QObject):
                 self.session_file = self.project_manager.migrate_session(
                     self.session_file, self.session_mode)
             event = self.project_manager.make_event(event_type, **fields)
-            self.project_manager.append_event(self.session_file, event)
-            self.session_events.append(event)
+            stored = self.project_manager.append_event(self.session_file, event)
+            if stored is None:
+                return None
+            self.session_events.append(stored)
             self._session_event_count += 1
-            return event
+            return stored
         except Exception as e:
             logging.warning(f"Could not append session event '{event_type}': {e}")
             return None
@@ -690,13 +715,237 @@ class AppController(QObject):
         for name in ("terminal_handler", "browser_handler", "vision_handler"):
             self._reset_agent_history(getattr(self, name, None))
 
+    def _context_dir(self) -> str:
+        if self.project_manager is not None and self.project_manager.get_active_root():
+            return self.project_manager.context_dir()
+        if self.project_root:
+            return os.path.join(self.project_root, ".logos", "context")
+        return ""
+
+    def _load_handoff_state(self, create_fallback: bool = True) -> str:
+        """Load summary.md (and create an extractive fallback when missing)."""
+        self._handoff_summary = ""
+        self._handoff_meta = {}
+        context_dir = self._context_dir()
+        if not context_dir:
+            return ""
+        self._handoff_meta = handoff.read_meta(context_dir)
+        summary = handoff.read_summary(context_dir)
+        if not summary and create_fallback and self.session_events:
+            summary = handoff.fallback_summary(self.session_events)
+            if summary:
+                summary = handoff.write_summary(
+                    context_dir,
+                    summary,
+                    source_session=self.session_file,
+                    event_count=0,
+                    source="fallback",
+                )
+                self._handoff_meta = handoff.read_meta(context_dir)
+        self._handoff_summary = summary or ""
+        return self._handoff_summary
+
+    def handoff_prompt(self, include_same_session: bool = False) -> str:
+        """Summary block for a mode that did not produce the current journal.
+
+        A fresh Computer Use chain cannot replay local events, so Vision asks
+        for the summary even when it was produced by the same session.
+        """
+        if not self._handoff_summary:
+            self._load_handoff_state(create_fallback=False)
+        if not self._handoff_summary:
+            return ""
+        if (not include_same_session and self.session_events
+                and not handoff.should_inject(self._handoff_meta, self.session_file)):
+            return ""
+        return handoff.injection_block(self._handoff_summary, self.session_mode)
+
+    def _capture_handoff_summary(self) -> str:
+        """Freeze a summary before the active session is left behind."""
+        if not self.session_events:
+            return self._handoff_summary
+        context_dir = self._context_dir()
+        if not context_dir:
+            return self._handoff_summary
+        meta = handoff.read_meta(context_dir)
+        summary = handoff.read_summary(context_dir) or self._handoff_summary
+        same_session = bool(
+            self.session_file and meta.get("source_session")
+            and os.path.normcase(os.path.abspath(str(meta["source_session"])))
+            == os.path.normcase(os.path.abspath(self.session_file)))
+        if (same_session and meta.get("source") == "llm"
+                and int(meta.get("event_count") or 0) >= len(self.session_events)):
+            self._handoff_summary = summary
+            self._handoff_meta = meta
+            return summary
+        fallback = handoff.fallback_summary(self.session_events, previous=summary)
+        if fallback:
+            self._handoff_summary = handoff.write_summary(
+                context_dir,
+                fallback,
+                source_session=self.session_file,
+                event_count=0,
+                source="fallback",
+            )
+            self._handoff_meta = handoff.read_meta(context_dir)
+        self._schedule_summary_refresh(force=True)
+        return self._handoff_summary
+
+    def _schedule_summary_refresh(self, force: bool = False):
+        self._summary_force = bool(force or self._summary_force)
+        if self._summary_timer is not None and self.project_root and self.session_events:
+            self._summary_timer.start(1200)
+
+    def _summary_settings(self) -> dict:
+        return (self.settings or {}).get("context", {}) or {}
+
+    def _active_model_ids(self) -> tuple[str, str]:
+        settings = self.settings or {}
+        provider_id = settings.get("active_provider") or ""
+        providers = settings.get("llm_providers", {}) or {}
+        model_id = (providers.get(provider_id) or {}).get("model") or ""
+        return provider_id, model_id
+
+    def _summary_model_ids(self) -> tuple[str, str]:
+        """Resolve ``context.summary_model`` (provider:model or bare model)."""
+        provider_id, model_id = self._active_model_ids()
+        raw = str(self._summary_settings().get("summary_model") or "").strip()
+        if not raw:
+            return provider_id, model_id
+        for separator in (":", "/"):
+            if separator in raw:
+                summary_provider, summary_model = raw.split(separator, 1)
+                summary_provider = summary_provider.strip()
+                summary_model = summary_model.strip()
+                if summary_provider and summary_model:
+                    return summary_provider, summary_model
+                break
+        return provider_id, raw
+
+    def _maybe_refresh_summary(self):
+        if (self.project_manager is None or not self.project_root
+                or not self.session_events or self._summary_pending):
+            return
+        context_settings = self._summary_settings()
+        if not context_settings.get("handoff_enabled", True):
+            return
+        if self.thinking_timer.isActive() and not self._summary_force:
+            return
+        provider_id, model_id = self._active_model_ids()
+        if not provider_id or not model_id:
+            return
+        context_dir = self._context_dir()
+        meta = handoff.read_meta(context_dir) or self._handoff_meta
+        ratio = context_settings.get(
+            "summary_threshold_ratio", handoff.DEFAULT_THRESHOLD_RATIO)
+        force = self._summary_force
+        if not handoff.needs_refresh(
+                self.session_events, provider_id, model_id, meta, self.session_file,
+                threshold_ratio=float(ratio or handoff.DEFAULT_THRESHOLD_RATIO),
+                force=force):
+            self._summary_force = False
+            return
+        self._request_summary_update(force=force)
+
+    def _request_summary_update(self, force: bool = False):
+        if self._summary_pending:
+            self._summary_force = True
+            return
+        context_dir = self._context_dir()
+        if not context_dir or not self.session_events:
+            return
+        previous = handoff.read_summary(context_dir) or self._handoff_summary
+        meta = handoff.read_meta(context_dir)
+        same_session = bool(
+            self.session_file and meta.get("source_session")
+            and os.path.normcase(os.path.abspath(str(meta["source_session"])))
+            == os.path.normcase(os.path.abspath(self.session_file)))
+        processed = int(meta.get("event_count") or 0) if (
+            same_session and meta.get("source") == "llm") else 0
+        new_events = self.session_events[processed:]
+        if not new_events:
+            self._summary_force = False
+            return
+        provider_id, model_id = self._summary_model_ids()
+        max_tokens = int(self._summary_settings().get(
+            "summary_max_tokens", handoff.DEFAULT_MAX_TOKENS) or handoff.DEFAULT_MAX_TOKENS)
+        system_prompt, user_prompt = handoff.build_summary_prompts(
+            previous,
+            new_events,
+            project_name=self.project_manager.get_active_name() if self.project_manager else "",
+            mode=self.session_mode,
+            max_tokens=max_tokens,
+        )
+        self._summary_request_context = {
+            "context_dir": context_dir,
+            "source_session": self.session_file,
+            "event_count": len(self.session_events),
+            "provider": provider_id,
+            "model": model_id,
+        }
+        self._summary_pending = True
+        self._summary_force = False
+        self.summary_requested.emit(
+            system_prompt, user_prompt, provider_id, model_id)
+
+    def _handle_summary_response(self, text: str):
+        context = self._summary_request_context
+        self._summary_request_context = None
+        self._summary_pending = False
+        if not context:
+            return
+        previous = handoff.read_summary(context["context_dir"])
+        normalized = handoff.normalize_summary(text, fallback=previous)
+        if not normalized:
+            logging.warning("Handoff summary was empty after normalization.")
+            return
+        written = handoff.write_summary(
+            context["context_dir"],
+            normalized,
+            source_session=context.get("source_session", ""),
+            event_count=context.get("event_count", 0),
+            provider=context.get("provider", ""),
+            model=context.get("model", ""),
+            source="llm",
+        )
+        if context["context_dir"] == self._context_dir():
+            self._handoff_summary = written
+            self._handoff_meta = handoff.read_meta(context["context_dir"])
+            self._inject_handoff_into_current_agent()
+        logging.info("Handoff summary updated (%d chars).", len(written))
+
+    def _handle_summary_error(self, message: str):
+        self._summary_request_context = None
+        self._summary_pending = False
+        logging.warning("Handoff summary update failed: %s", message)
+
+    def _inject_handoff_into_current_agent(self):
+        if self.session_mode == "chat":
+            return
+        handler = self._handler_for_mode(self.session_mode)
+        if handler is None or not hasattr(handler, "command_history"):
+            return
+        history = [
+            item for item in (handler.command_history or [])
+            if not str(item).startswith("**Handoff context from earlier work")
+        ]
+        block = self.handoff_prompt()
+        if block:
+            history.insert(0, block)
+        handler.command_history = history
+
     def _restore_agent_history(self):
         """Rebuild the current agent's model-facing history from JSONL events."""
         self._reset_agent_histories()
         if self.session_mode == "chat":
             return
         handler = self._handler_for_mode(self.session_mode)
-        if handler is None or not self.session_events:
+        if handler is None:
+            return
+        if not self.session_events:
+            block = self.handoff_prompt()
+            if block:
+                handler.command_history = [block]
             return
         history = []
         last_user_request = None
@@ -734,6 +983,9 @@ class AppController(QObject):
                 message = str(event.get("message") or "").strip()
                 if message:
                     history.append(f"**Error:** {message}")
+        block = self.handoff_prompt()
+        if block:
+            history.insert(0, block)
         handler.command_history = history
         if last_user_request:
             handler.original_user_request = last_user_request
@@ -902,6 +1154,8 @@ class AppController(QObject):
         if not os.path.isdir(target):
             self._report_project_error("Project folder not found.")
             return
+        if self._summary_settings().get("handoff_enabled", True):
+            self._capture_handoff_summary()
         try:
             self.project_manager.open_project(target)
         except Exception as e:
@@ -924,6 +1178,7 @@ class AppController(QObject):
             self._load_session_file(session_file)
         else:
             self._load_project_session()
+        self._load_handoff_state()
         try:
             self.ui.clear_chat()
         except Exception:
@@ -954,6 +1209,8 @@ class AppController(QObject):
         if self.project_manager is None or not self.project_root:
             self.ui.show_home()
             return
+        if self._summary_settings().get("handoff_enabled", True):
+            self._capture_handoff_summary()
         self._stop_active_work()
         self._persist_session()
         self.conversation_history.clear()
@@ -969,6 +1226,7 @@ class AppController(QObject):
             logging.warning(f"Could not create a new session: {e}")
             self.session_file = ""
         self._reset_agent_histories()
+        self._restore_agent_history()
         try:
             self.ui.clear_chat()
         except Exception:
@@ -1643,6 +1901,8 @@ class AppController(QObject):
             notice = (f"<i>Switched to <b>{title_string}</b> (this session only). "
                       f"The new model takes over from your next message.</i>")
         self.ui.add_message(notice, force_scroll=True, keep_stream=True)
+        if self._summary_settings().get("handoff_on_model_switch", True):
+            self._schedule_summary_refresh(force=True)
         # Only kick the queue when nothing is in flight; an in-flight reply
         # drains it when it finishes, and start_chat would abort that reply.
         if not self.thinking_timer.isActive():
@@ -1725,6 +1985,7 @@ class AppController(QObject):
                 mode = name
                 break
         self._prepare_session_for_mode(mode)
+        self._restore_agent_history()
 
         self._set_state(new_state)
         self.current_handler = new_handler
@@ -2069,6 +2330,90 @@ class AppController(QObject):
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
+
+    def _show_context_summary(self):
+        context_dir = self._context_dir()
+        summary = handoff.read_summary(context_dir) if context_dir else ""
+        if not summary and self.session_events:
+            summary = self._capture_handoff_summary()
+        if not summary:
+            QMessageBox.information(
+                self.ui.main_window, "Project context",
+                "No handoff summary has been recorded for this project yet.")
+            return
+        dialog = QDialog(self.ui.main_window)
+        dialog.setWindowTitle("Project context")
+        dialog.resize(760, 600)
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser(dialog)
+        browser.setOpenExternalLinks(False)
+        browser.setMarkdown(summary)
+        layout.addWidget(browser)
+        refresh_button = QPushButton("Refresh now", dialog)
+        refresh_button.clicked.connect(
+            lambda: (self._request_manual_summary_refresh(), dialog.accept()))
+        layout.addWidget(refresh_button)
+        close_button = QPushButton("Close", dialog)
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec()
+
+    def _request_manual_summary_refresh(self):
+        if not self.session_events:
+            QMessageBox.information(
+                self.ui.main_window, "Project context",
+                "There are no session events to summarize yet.")
+            return
+        self._schedule_summary_refresh(force=True)
+        self.ui.add_message("<i>Refreshing the project handoff summary…</i>")
+
+    def _show_session_journal(self):
+        if not self.session_events:
+            QMessageBox.information(
+                self.ui.main_window, "Session journal",
+                "This session has no recorded events yet.")
+            return
+        lines = [
+            f"Session: {os.path.basename(self.session_file or '(new)')}",
+            f"Mode: {self.session_mode}",
+            "",
+        ]
+        for event in self.session_events:
+            event_type = str(event.get("type") or "event")
+            stamp = str(event.get("ts") or "")
+            if event_type == "message":
+                detail = f"{event.get('role') or 'message'}: {event_text(event)}"
+            elif event_type == "tool_call":
+                args = event.get("input") or {}
+                detail = (f"{event.get('name') or 'action'} "
+                          f"{json.dumps(args, ensure_ascii=False)}")
+            elif event_type == "tool_result":
+                detail = (f"{event.get('name') or 'tool'} "
+                          f"[{event.get('status') or 'ok'}]\n{event_text(event)}")
+            elif event_type == "job_result":
+                detail = (f"job #{event.get('job_id', '?')} "
+                          f"[{event.get('status') or 'finished'}]\n{event_text(event)}")
+            elif event_type == "error":
+                detail = str(event.get("message") or event_text(event))
+            else:
+                detail = event_text(event)
+            lines.append(f"[{stamp}] {event_type}\n{detail}\n")
+        text = "\n".join(lines).strip()
+        limit = 200_000
+        if len(text) > limit:
+            text = text[:limit] + "\n\n… [journal truncated for display]"
+        dialog = QDialog(self.ui.main_window)
+        dialog.setWindowTitle("Session journal")
+        dialog.resize(760, 600)
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser(dialog)
+        browser.setOpenExternalLinks(False)
+        browser.setPlainText(text)
+        layout.addWidget(browser)
+        close_button = QPushButton("Close", dialog)
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec()
 
     def _handle_pasted_image(self, image_bytes: bytes):
         """Handles a pasted image by adding its byte data as an attachment."""

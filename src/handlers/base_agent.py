@@ -680,6 +680,9 @@ class BaseAgentHandler:
         persist = getattr(self.controller, "_persist_session", None)
         if callable(persist):
             persist()
+        schedule = getattr(self.controller, "_schedule_summary_refresh", None)
+        if callable(schedule):
+            schedule()
 
     def _add_replay_result(self, text, title, status: str = ""):
         """Render a persisted tool/job result as a collapsed code block."""

@@ -280,6 +280,8 @@ class ProjectSidebar(QWidget):
     new_project_requested = Signal()
     open_project_requested = Signal()
     new_session_requested = Signal()
+    context_requested = Signal()
+    journal_requested = Signal()
     settings_requested = Signal()
 
     EXPANDED_WIDTH = 238
@@ -341,6 +343,16 @@ class ProjectSidebar(QWidget):
         self.new_chat_button.clicked.connect(self.new_session_requested.emit)
         root.addWidget(self.new_chat_button)
 
+        self.context_button = QPushButton("Context")
+        self.context_button.setIcon(qta.icon("fa5s.file-alt", color=colors["text"]))
+        self.context_button.clicked.connect(self.context_requested.emit)
+        root.addWidget(self.context_button)
+
+        self.journal_button = QPushButton("Journal")
+        self.journal_button.setIcon(qta.icon("fa5s.list", color=colors["text"]))
+        self.journal_button.clicked.connect(self.journal_requested.emit)
+        root.addWidget(self.journal_button)
+
         self.settings_button = QPushButton("Settings")
         self.settings_button.setIcon(qta.icon("fa5s.cog", color=colors["text"]))
         self.settings_button.clicked.connect(self.settings_requested.emit)
@@ -373,6 +385,8 @@ class ProjectSidebar(QWidget):
         self.home_button.setIcon(qta.icon("fa5s.home", color=colors["text"]))
         self.add_button.setIcon(qta.icon("fa5s.plus", color=colors["text"]))
         self.new_chat_button.setIcon(qta.icon("fa5s.pen", color=colors["text"]))
+        self.context_button.setIcon(qta.icon("fa5s.file-alt", color=colors["text"]))
+        self.journal_button.setIcon(qta.icon("fa5s.list", color=colors["text"]))
         self.settings_button.setIcon(qta.icon("fa5s.cog", color=colors["text"]))
         self._render_projects()
 
@@ -394,10 +408,14 @@ class ProjectSidebar(QWidget):
         self.home_button.setText("" if self.collapsed else "Home")
         self.add_button.setText("" if self.collapsed else "New project")
         self.new_chat_button.setText("" if self.collapsed else "New chat")
+        self.context_button.setText("" if self.collapsed else "Context")
+        self.journal_button.setText("" if self.collapsed else "Journal")
         self.settings_button.setText("" if self.collapsed else "Settings")
         self.home_button.setToolTip("Home")
         self.add_button.setToolTip("New project")
         self.new_chat_button.setToolTip("New chat")
+        self.context_button.setToolTip("Show project context summary")
+        self.journal_button.setToolTip("Show the current session journal")
         self.settings_button.setToolTip("Settings")
         self.section_label.setVisible(not self.collapsed)
         self._render_projects()

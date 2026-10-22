@@ -14,6 +14,8 @@ import time
 import uuid
 from datetime import UTC, datetime
 
+from context.secrets import redact_value
+
 
 PROJECT_DIRNAME = ".logos"
 PROJECT_META_FILE = "project.json"
@@ -322,10 +324,10 @@ class ProjectManager:
 
     def append_event(self, path: str, event: dict):
         if not path or not event:
-            return
+            return None
         if not path.endswith(SESSION_EXT):
             raise ValueError(f"Not a JSONL session: {path}")
-        record = dict(event)
+        record = redact_value(dict(event))
         record.setdefault("id", uuid.uuid4().hex)
         record.setdefault("ts", _now_iso())
         record = _cap_event(record)
@@ -334,8 +336,10 @@ class ProjectManager:
                 fh.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")))
                 fh.write("\n")
                 fh.flush()
+            return record
         except Exception as exc:
             logging.warning(f"Could not append session event to {path}: {exc}")
+            return None
 
     def set_session_mode(self, path: str, mode: str) -> bool:
         """Change the mode of an empty JSONL session (rewrites only the header)."""
@@ -575,9 +579,9 @@ class ProjectManager:
                     role = message.get("role")
                     if role not in ("user", "assistant", "system"):
                         continue
-                    records.append(self.make_event(
+                    records.append(redact_value(self.make_event(
                         "message", turn_id="legacy", role=role,
-                        content=[{"type": "text", "text": _message_text(message)}]))
+                        content=[{"type": "text", "text": _message_text(message)}])))
                 self._write_jsonl_atomic(path, records)
                 return
             created_at = _now_iso()
@@ -593,7 +597,7 @@ class ProjectManager:
                 "id": os.path.splitext(os.path.basename(path))[0],
                 "created_at": created_at,
                 "updated_at": _now_iso(),
-                "messages": messages,
+                "messages": redact_value(messages),
             }
             self._write_json_atomic(path, data)
         except Exception as exc:

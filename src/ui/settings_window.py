@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (
     QDoubleSpinBox,
     QCheckBox,
     QListWidget,
+    QLineEdit,
     QListWidgetItem,
     QButtonGroup,
     QStackedWidget,
@@ -289,6 +290,12 @@ class SettingsWindow(QDialog):
         self.history_max_chars_spinbox.setValue(context_settings.get("history_max_result_chars", 0))
         self.history_dedup_checkbox.setChecked(bool(context_settings.get("history_dedup_snapshots", False)))
         self.history_trim_tracebacks_checkbox.setChecked(bool(context_settings.get("history_trim_tracebacks", False)))
+        self.handoff_enabled_checkbox.setChecked(bool(context_settings.get("handoff_enabled", True)))
+        self.handoff_mode_switch_checkbox.setChecked(bool(context_settings.get("handoff_on_mode_switch", True)))
+        self.handoff_model_switch_checkbox.setChecked(bool(context_settings.get("handoff_on_model_switch", True)))
+        self.summary_max_tokens_spinbox.setValue(int(context_settings.get("summary_max_tokens", 1200)))
+        self.summary_threshold_spinbox.setValue(float(context_settings.get("summary_threshold_ratio", 0.6)))
+        self.summary_model_lineedit.setText(str(context_settings.get("summary_model") or ""))
 
         # Compact Mode
         compact_mode_settings = self.settings_manager.get("compact_mode", {})
@@ -379,6 +386,12 @@ class SettingsWindow(QDialog):
             "history_max_result_chars": self.history_max_chars_spinbox.value(),
             "history_dedup_snapshots": self.history_dedup_checkbox.isChecked(),
             "history_trim_tracebacks": self.history_trim_tracebacks_checkbox.isChecked(),
+            "handoff_enabled": self.handoff_enabled_checkbox.isChecked(),
+            "handoff_on_mode_switch": self.handoff_mode_switch_checkbox.isChecked(),
+            "handoff_on_model_switch": self.handoff_model_switch_checkbox.isChecked(),
+            "summary_max_tokens": self.summary_max_tokens_spinbox.value(),
+            "summary_threshold_ratio": round(self.summary_threshold_spinbox.value(), 2),
+            "summary_model": self.summary_model_lineedit.text().strip(),
         }
         # Preserve keys with no UI widget so saving never silently drops them.
         try:
@@ -835,8 +848,8 @@ class SettingsWindow(QDialog):
         return group
 
     def _create_context_section(self):
-        """Creates the Context (agent history compaction) settings section."""
-        group = QGroupBox("Agent History (browser mode)")
+        """Creates the Context (history compaction + handoff summary) section."""
+        group = QGroupBox("Context")
         context_layout = QGridLayout(group)
         context_layout.setColumnStretch(2, 1)
 
@@ -881,6 +894,62 @@ class SettingsWindow(QDialog):
         context_layout.addWidget(QLabel("Trim long tracebacks:"), 3, 0)
         context_layout.addWidget(self._create_help_label(trim_tooltip), 3, 1, Qt.AlignLeft)
         context_layout.addWidget(self.history_trim_tracebacks_checkbox, 3, 3)
+
+        self.handoff_enabled_checkbox = QCheckBox()
+        handoff_tooltip = (
+            "Keep a rolling project handoff summary in .logos/context/summary.md "
+            "so a new mode, model or application run can continue with compact "
+            "context instead of the full journal."
+        )
+        context_layout.addWidget(QLabel("Rolling handoff summary:"), 4, 0)
+        context_layout.addWidget(self._create_help_label(handoff_tooltip), 4, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.handoff_enabled_checkbox, 4, 3)
+
+        self.handoff_mode_switch_checkbox = QCheckBox()
+        mode_tooltip = "Refresh and inject the summary when switching chat/terminal/browser mode."
+        context_layout.addWidget(QLabel("On mode switch:"), 5, 0)
+        context_layout.addWidget(self._create_help_label(mode_tooltip), 5, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.handoff_mode_switch_checkbox, 5, 3)
+
+        self.handoff_model_switch_checkbox = QCheckBox()
+        model_tooltip = "Refresh and inject the summary when switching the active model."
+        context_layout.addWidget(QLabel("On model switch:"), 6, 0)
+        context_layout.addWidget(self._create_help_label(model_tooltip), 6, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.handoff_model_switch_checkbox, 6, 3)
+
+        self.summary_max_tokens_spinbox = QSpinBox()
+        self.summary_max_tokens_spinbox.setRange(200, 8000)
+        self.summary_max_tokens_spinbox.setSingleStep(100)
+        self.summary_max_tokens_spinbox.setFixedWidth(80)
+        max_tokens_tooltip = "Token budget requested from the summarizer model."
+        context_layout.addWidget(QLabel("Summary max tokens:"), 7, 0)
+        context_layout.addWidget(self._create_help_label(max_tokens_tooltip), 7, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.summary_max_tokens_spinbox, 7, 3)
+
+        self.summary_threshold_spinbox = QDoubleSpinBox()
+        self.summary_threshold_spinbox.setRange(0.1, 1.0)
+        self.summary_threshold_spinbox.setSingleStep(0.05)
+        self.summary_threshold_spinbox.setDecimals(2)
+        self.summary_threshold_spinbox.setFixedWidth(80)
+        threshold_tooltip = (
+            "Refresh the summary when estimated context usage reaches this "
+            "fraction of the model window."
+        )
+        context_layout.addWidget(QLabel("Refresh threshold:"), 8, 0)
+        context_layout.addWidget(self._create_help_label(threshold_tooltip), 8, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.summary_threshold_spinbox, 8, 3)
+
+        self.summary_model_lineedit = QLineEdit()
+        self.summary_model_lineedit.setPlaceholderText(
+            "provider:model (empty = current session model)")
+        summary_model_tooltip = (
+            "Optional cheaper model for handoff summaries. Use "
+            "'provider:model' (for example 'openai:gpt-5-mini'), or a bare "
+            "model id to keep the active provider. Empty uses the session model."
+        )
+        context_layout.addWidget(QLabel("Summarizer model:"), 9, 0)
+        context_layout.addWidget(self._create_help_label(summary_model_tooltip), 9, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.summary_model_lineedit, 9, 2, 1, 2)
 
         return group
 

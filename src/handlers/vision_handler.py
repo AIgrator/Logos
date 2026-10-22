@@ -1258,6 +1258,21 @@ class VisionHandler(BaseAgent):
         except Exception:
             return False
 
+    def _task_with_handoff(self, task: str) -> str:
+        """Seed a fresh CUA chain with the project handoff summary."""
+        task = task or ""
+        prompt = getattr(self.controller, "handoff_prompt", None)
+        if not callable(prompt):
+            return task
+        try:
+            block = prompt(include_same_session=True)
+        except Exception as e:
+            logging.warning(f"Could not read Vision handoff context: {e}")
+            return task
+        if not block or "Handoff context from earlier work" in task:
+            return task
+        return f"{task}\n\n{block}".strip()
+
     def _cua_system_prompt(self) -> str:
         if getattr(self, "_cua_system_cache", None) is None:
             text = ""
@@ -1389,6 +1404,7 @@ class VisionHandler(BaseAgent):
                 task = (f"{task}\n\nPrevious attempt: "
                         f"{self._cua_seed_note}").strip()
                 self._cua_seed_note = None
+            task = self._task_with_handoff(task)
             instructions = self._cua_system_prompt()
             if not (instructions or "").strip():
                 message = (

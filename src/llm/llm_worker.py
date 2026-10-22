@@ -26,6 +26,8 @@ class LLMWorker(QObject):
     retry_attempt = Signal(int, int, str, float)  # attempt_num, max_attempts, error, wait_seconds
     retry_countdown = Signal(float)  # remaining seconds before the next automatic retry
     error_occurred = Signal(str)
+    summary_finished = Signal(str)
+    summary_failed = Signal(str)
 
     def __init__(self, settings_manager, settings):
         super().__init__()
@@ -48,9 +50,9 @@ class LLMWorker(QObject):
         self.provider_ready = self.provider is not None
         logging.info("LLMWorker settings and provider have been updated.")
 
-    def _create_llm_provider(self, settings):
+    def _create_llm_provider(self, settings, provider_name=None, model_id=None):
         """Factory function to create an LLM provider instance based on current settings."""
-        active_provider_name = settings.get("active_provider")
+        active_provider_name = provider_name or settings.get("active_provider")
         if not active_provider_name:
             logging.warning("No active LLM provider selected in settings.")
             return None
@@ -85,6 +87,8 @@ class LLMWorker(QObject):
         full_config = static_provider_config
         full_config.update(user_provider_config)
         full_config['name'] = active_provider_name
+        if model_id:
+            full_config["model"] = model_id
 
         logging.info(f"Instantiating provider '{active_provider_name}' with model '{full_config.get('model')}'.")
         inst_start = perf_counter()
@@ -291,7 +295,50 @@ class LLMWorker(QObject):
             raise RetryableError("LLM provider call ended with no result.")
         return box["res"]
 
-    @Slot(str, list, str, list, str, str, int)
+    @Slot(str, str, str, str)
+    def execute_summary_request(self, system_prompt, user_prompt,
+                                provider_id="", model_id=""):
+        """Runs a non-streaming handoff-summary call in the worker thread.
+
+        Kept separate from ``execute_request`` so its plain-text response cannot
+        be mistaken for a chat/agent reply. The slot is queued on the same
+        worker thread, which also serializes it with normal LLM traffic.
+        """
+        provider = self.provider
+        if provider_id or model_id:
+            provider = self._create_llm_provider(
+                self.settings, provider_id or None, model_id or None)
+        if not provider:
+            self.summary_failed.emit("LLM provider is not configured.")
+            return
+        try:
+            from llm.base_provider import set_log_ctx
+            set_log_ctx("summary", 0)
+        except Exception:
+            pass
+        try:
+            response = provider.get_response(
+                prompt=user_prompt,
+                attachments=[],
+                system_prompt=system_prompt,
+                history=[],
+            )
+            text = ""
+            if isinstance(response, dict):
+                text = response.get("text") or ""
+                if not text:
+                    tool_calls = response.get("tool_calls")
+                    if isinstance(tool_calls, dict):
+                        text = tool_calls.get("text") or ""
+            text = str(text or "").strip()
+            if not text:
+                self.summary_failed.emit("The model returned an empty summary.")
+                return
+            self.summary_finished.emit(text)
+        except Exception as exc:
+            logging.warning("Handoff summary request failed: %s", exc)
+            self.summary_failed.emit(f"{type(exc).__name__}: {exc}")
+
     def execute_request(self, prompt, attachments, system_prompt, history, schema_name=None,
                         tag="untagged", turn=0):
         """

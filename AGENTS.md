@@ -38,11 +38,18 @@ lives in `<project>/.logos/`:
 - `sessions/` - one append-only JSONL file per session; the first line is a
   `session` header (`schema_version`, `id`, `mode`) and later lines are typed
   events (`message`, `reasoning`, `tool_call`, `tool_result`, `job_result`,
-  `error`). The newest is restored at startup: messages are replayed into the
+  `error`). Credentials are redacted before events are written. The newest is
+  restored at startup: messages are replayed into the
   chat, and terminal/browser `command_history` plus tool cards are rebuilt from
   the same events. Agent `finish` / `communicate_to_user` / `display_message`
   text is persisted as an assistant `message`.
-- `context/` - reserved for instructions/memory
+- `context/summary.md` - rolling project handoff summary with fixed sections
+  (`Objective`, `Done`, `Current`, `Next`, `Files`, `Blockers`),
+  `context/summary.json` - its source session/event count/model metadata.
+  The deterministic fallback is always available; the LLM refresh runs in the
+  worker thread and is injected as chat system context, the first
+  terminal/browser history entry, or the first task of a fresh Vision/CUA chain
+  when continuing in a different session/mode.
 - `attachments/` - reserved for project-scoped attachments
 
 Sessions are mode-locked: `chat`, `terminal`, `browser`, or `vision`. Switching
