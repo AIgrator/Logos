@@ -542,6 +542,18 @@ class ChatWidget(QAbstractScrollArea):
             bar = self.verticalScrollBar()
             bar.setValue(bar.maximum())
 
+    def clear_messages(self):
+        """Drops all rendered messages (used when switching projects)."""
+        self.messages = []
+        self.is_streaming = False
+        self._streaming_msg = None
+        self._retry_countdown_msg_idx = -1
+        self.selection_start = None
+        self.selection_end = None
+        self._update_scroll_bar()
+        self.verticalScrollBar().setValue(0)
+        self.viewport().update()
+
     def add_message(self, data, force_scroll=False, keep_stream=False, role=None):
         streaming_msg = self._streaming_msg
         if not keep_stream:

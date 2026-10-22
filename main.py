@@ -8,10 +8,6 @@ import logging
 
 def main():
     """Main function to run the application."""
-    # Capture the original current working directory *before* changing it.
-    # This is needed for the terminal mode's default working directory.
-    original_cwd = os.getcwd()
-
     # Set the current working directory to the script's directory.
     # This ensures that all relative paths for resources (models, icons, etc.)
     # are resolved correctly, regardless of where the application is launched from.
@@ -124,6 +120,7 @@ def main():
     import logging_config
     from controller import AppController
     from settings_manager import SettingsManager
+    from project_manager import ProjectManager
     from initial_setup import run_setup_wizard
 
     # --- Main Execution ---
@@ -233,11 +230,9 @@ def main():
     except Exception as e:
         logging.warning(f"Could not install threading.excepthook: {e}")
 
-    # Determine the effective working directory for the terminal mode.
-    # If a path is passed as a non-empty argument, use it; otherwise, use the original CWD.
-    # This handles the case where `logos.bat` passes `""` as an argument.
-    working_directory = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else original_cwd
-    print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Effective working directory: {working_directory}")
+    # An explicit path argument (e.g. from logos.bat) is treated as the
+    # project to open; otherwise the remembered active project is used.
+    project_arg = sys.argv[1] if len(sys.argv) > 1 and sys.argv[1] else ""
 
     local_server = None
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] app initialized")
@@ -283,6 +278,27 @@ def main():
             sys.exit(0) # User cancelled setup
     # --- End First Run Setup ---
 
+    # --- Active project resolution ---
+    # Every project owns a .logos folder holding its chats, sessions and
+    # context; the project root is also the terminal/browser working directory
+    # and the root of the file index.
+    project_manager = ProjectManager(settings_manager)
+    project_root = project_manager.resolve_startup_project(project_arg)
+    if project_root:
+        try:
+            project_manager.open_project(project_root)
+        except Exception as e:
+            logging.warning(f"Could not open remembered project '{project_root}': {e}")
+            project_root = ""
+    working_directory = project_manager.get_active_root() if project_root else ""
+    if working_directory:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Active project: {working_directory}")
+        logging.info(f"Active project: {working_directory}")
+    else:
+        print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No active project; showing home screen.")
+        logging.info("No active project; showing home screen.")
+    # --- End Active project resolution ---
+
     try:
         from computer.tool_registry import ToolRegistry
         # ToolRegistry now gets its paths from the settings_manager
@@ -291,7 +307,8 @@ def main():
     except Exception:
         logging.debug("ToolRegistry.generate_all() failed during main startup", exc_info=True)
 
-    controller = AppController(app, settings_manager, local_server, working_directory)
+    controller = AppController(app, settings_manager, local_server, working_directory,
+                               project_manager=project_manager)
     _phase("AppController created")
 
     # Apply the theme using the new manager

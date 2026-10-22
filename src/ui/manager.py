@@ -29,6 +29,7 @@ from .widgets.model_switch_popup import ModelSwitchPopup
 from .widgets.custom_title_bar import CustomTitleBar
 from .widgets.flow_layout import FlowLayout
 from .widgets.non_scrollable_scroll_area import NonScrollableScrollArea
+from .navigation import HomePage, ProjectSidebar
 
 class MainWindow(QMainWindow):
     """Custom MainWindow to ensure the application quits on close."""
@@ -265,6 +266,14 @@ class UIManager(QWidget):
     file_search_requested = Signal(str, str)
     path_selected_for_attachment = Signal(str)
 
+    # Project switching (emitted by the sidebar / title bar button)
+    project_switch_requested = Signal(str)
+    project_open_requested = Signal()
+    project_create_requested = Signal()
+    session_open_requested = Signal(str)
+    new_session_requested = Signal()
+    home_requested = Signal()
+
     # Signals for new pilot controls
     pause_resume_clicked = Signal()
     pause_for_feedback_clicked = Signal()
@@ -308,7 +317,46 @@ class UIManager(QWidget):
 
         self.custom_title_bar = CustomTitleBar(self.controller.theme_manager)
         self.custom_title_bar.setVisible(False)
+        self.custom_title_bar.project_clicked.connect(self._show_project_menu)
         self.layout.addWidget(self.custom_title_bar)
+
+        # Start screen: shown when no project is selected.
+        self.home_page = HomePage(
+            getattr(self.controller, "project_manager", None),
+            self.controller.theme_manager,
+        )
+        self.home_page.setVisible(False)
+        self.layout.addWidget(self.home_page, 1)
+
+        # Workspace: collapsible project sidebar + chat/input column.
+        self.workspace_container = QWidget()
+        self.workspace_layout = QHBoxLayout(self.workspace_container)
+        self.workspace_layout.setContentsMargins(0, 0, 0, 0)
+        self.workspace_layout.setSpacing(0)
+        self.sidebar = ProjectSidebar(
+            getattr(self.controller, "project_manager", None),
+            self.controller.theme_manager,
+        )
+        self.workspace_layout.addWidget(self.sidebar)
+        self.workspace_column = QWidget()
+        self.workspace_column_layout = QVBoxLayout(self.workspace_column)
+        self.workspace_column_layout.setContentsMargins(0, 0, 0, 0)
+        self.workspace_column_layout.setSpacing(0)
+        self.workspace_layout.addWidget(self.workspace_column, 1)
+        self.layout.addWidget(self.workspace_container, 1)
+
+        self.home_page.project_selected.connect(self.project_switch_requested.emit)
+        self.home_page.session_selected.connect(self.session_open_requested.emit)
+        self.home_page.new_project_requested.connect(self.project_create_requested.emit)
+        self.home_page.open_project_requested.connect(self.project_open_requested.emit)
+        self.home_page.new_session_requested.connect(self.new_session_requested.emit)
+        self.home_page.settings_requested.connect(self.settings_button_clicked.emit)
+        self.sidebar.home_requested.connect(self.home_requested.emit)
+        self.sidebar.project_selected.connect(self.project_switch_requested.emit)
+        self.sidebar.new_project_requested.connect(self.project_create_requested.emit)
+        self.sidebar.open_project_requested.connect(self.project_open_requested.emit)
+        self.sidebar.new_session_requested.connect(self.new_session_requested.emit)
+        self.sidebar.settings_requested.connect(self.settings_button_clicked.emit)
 
         self.chat_widget = ChatWidget(self.controller.theme_manager)
         self.chat_widget.is_compact_fn = lambda: self.is_compact
@@ -320,7 +368,7 @@ class UIManager(QWidget):
         self.chat_widget.retry_requested.connect(self.retry_requested.emit)
         self.chat_widget.continue_requested.connect(self.continue_requested.emit)
         self.chat_widget.job_stop_requested.connect(self.job_stop_requested.emit)
-        self.layout.addWidget(self.chat_widget, 1)
+        self.workspace_column_layout.addWidget(self.chat_widget, 1)
 
         self.attachment_scroll_area = NonScrollableScrollArea()
         self.attachment_scroll_area.setWidgetResizable(True)
@@ -329,7 +377,7 @@ class UIManager(QWidget):
         self.attachment_widget = QWidget()
         self.attachment_layout = FlowLayout(self.attachment_widget, spacing=6)
         self.attachment_scroll_area.setWidget(self.attachment_widget)
-        self.layout.addWidget(self.attachment_scroll_area)
+        self.workspace_column_layout.addWidget(self.attachment_scroll_area)
         self.attachment_scroll_area.setVisible(False)
 
         # --- File Search Popup ---
@@ -508,7 +556,7 @@ class UIManager(QWidget):
         self.bottom_center_row_layout.addStretch(1)
         self.bottom_center_row_layout.addWidget(self.bottom_center_column, 1000)
         self.bottom_center_row_layout.addStretch(1)
-        self.layout.addWidget(self.bottom_center_row)
+        self.workspace_column_layout.addWidget(self.bottom_center_row)
 
         self.send_button.clicked.connect(self._on_send_clicked)
         self.user_input.return_pressed.connect(self._on_send_clicked)
@@ -1156,6 +1204,80 @@ class UIManager(QWidget):
     def set_title_bar_text(self, text: str):
         self.custom_title_bar.set_title(text)
 
+    def set_project_name(self, name: str, path: str = ""):
+        """Updates the compact title-bar chip and highlights the sidebar item."""
+        display = name or "Select Project"
+        if len(display) > 32:
+            display = display[:29].rstrip() + "..."
+        tooltip = path or "Switch project"
+        self.custom_title_bar.set_project_name(display, tooltip)
+        try:
+            self.sidebar.set_active_project(path)
+        except Exception:
+            pass
+
+    def show_home(self):
+        """Shows the start screen (project and session lists)."""
+        if self.is_compact:
+            self.switchToFullMode()
+        self.home_page.refresh()
+        self.home_page.setVisible(True)
+        self.workspace_container.setVisible(False)
+        self.custom_title_bar.setVisible(False)
+        self.home_page.search.setFocus()
+
+    def show_workspace(self):
+        """Shows the chat workspace (sidebar hidden in compact mode)."""
+        self.home_page.setVisible(False)
+        self.workspace_container.setVisible(True)
+        self.sidebar.setVisible(not self.is_compact)
+        self.custom_title_bar.setVisible(self.is_compact)
+
+    def refresh_project_views(self):
+        """Reloads project/session lists in the sidebar and home screen."""
+        try:
+            self.sidebar.refresh()
+            manager = getattr(self.controller, "project_manager", None)
+            if manager is not None:
+                self.sidebar.set_active_project(manager.get_active_root())
+        except Exception as e:
+            logging.warning(f"Could not refresh sidebar: {e}")
+        try:
+            self.home_page.refresh()
+        except Exception as e:
+            logging.warning(f"Could not refresh home page: {e}")
+
+    def _show_project_menu(self):
+        """Popover listing recent projects plus open/create actions."""
+        manager = getattr(self.controller, "project_manager", None)
+        menu = QMenu(self.main_window)
+        active = ""
+        if manager is not None:
+            active = manager.get_active_root()
+            recents = manager.recent_projects()
+            if recents:
+                header = menu.addAction("Recent projects")
+                header.setEnabled(False)
+                for item in recents:
+                    path = item.get("path", "")
+                    label = item.get("name") or os.path.basename(path) or path
+                    action = menu.addAction(label)
+                    action.setToolTip(path)
+                    if path == active:
+                        action.setText(f"{label}  *")
+                    action.triggered.connect(
+                        lambda _checked=False, p=path: self.project_switch_requested.emit(p))
+                menu.addSeparator()
+        open_action = menu.addAction("Open Folder...")
+        open_action.triggered.connect(self.project_open_requested.emit)
+        create_action = menu.addAction("New Project...")
+        create_action.triggered.connect(self.project_create_requested.emit)
+        anchor = self.custom_title_bar.project_button
+        menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
+
+    def clear_chat(self):
+        self.chat_widget.clear_messages()
+
     def set_assistant_name(self, name: str):
         self.chat_widget.set_assistant_name(name)
 
@@ -1335,8 +1457,13 @@ class UIManager(QWidget):
     def show_main_window(self):
         import time
         t0 = time.perf_counter()
-        self.main_window.show()
+        self.main_window.showMaximized()
+        QTimer.singleShot(0, self._remember_full_geometry)
         logging.info(f"show_main_window called, took {time.perf_counter() - t0:.3f}s to return")
+
+    def _remember_full_geometry(self):
+        if not self.is_compact and self.main_window.isMaximized():
+            self.full_mode_geometry = self.main_window.geometry()
 
     def show_highlight(self, x1, y1, x2, y2):
         self.overlay = HighlightOverlay(QRect(x1, y1, x2-x1, y2-y1))
@@ -1364,6 +1491,7 @@ class UIManager(QWidget):
         self.bottom_toolbar_container.setVisible(False)
         self._toolbar_single_row = None  # re-evaluate when returning to full mode
         self.custom_title_bar.setVisible(True)
+        self.sidebar.setVisible(False)
         self.main_window.size_grip.setVisible(True)
         self.layout.setContentsMargins(5, 0, 5, 5)
         self.main_window.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Tool | Qt.FramelessWindowHint)
@@ -1421,6 +1549,7 @@ class UIManager(QWidget):
         logging.info("switchToFullMode: enter")
         self.is_compact = False
         self.custom_title_bar.setVisible(False)
+        self.sidebar.setVisible(True)
         self.main_window.size_grip.setVisible(False)
         if self.attachment_thumbnails:
             self.attachment_scroll_area.setVisible(True)

@@ -92,6 +92,9 @@ class ChatHandler:
 
         self.controller._set_state(ControllerState.IDLE)
         self.conversation_history.append({'role': 'assistant', 'content': full_response})
+        persist = getattr(self.controller, "_persist_session", None)
+        if callable(persist):
+            persist()
         logging.info("Chat response finished.")
 
         # If the application window is active, focus the user input field

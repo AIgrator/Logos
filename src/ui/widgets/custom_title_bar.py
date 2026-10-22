@@ -13,6 +13,7 @@ class CustomTitleBar(QWidget):
     pause_for_feedback_clicked = Signal()
     stop_clicked = Signal()
     close_clicked = Signal()
+    project_clicked = Signal()
 
     def __init__(self, theme_manager, parent=None):
         super().__init__(parent)
@@ -25,6 +26,20 @@ class CustomTitleBar(QWidget):
         self.layout.setSpacing(10)
 
         self.title_label = QLabel("Logos AI Assistant")
+
+        self.project_button = QPushButton()
+        self.project_button.setObjectName("TitleBarProjectButton")
+        self.project_button.setFixedHeight(24)
+        self.project_button.setIconSize(QSize(14, 14))
+        self.project_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.project_button.setToolTip("Switch project")
+        self.project_button.installEventFilter(
+            IconHoverFilter(
+                self.theme_manager,
+                'fa5s.folder-open',
+                parent=self.project_button
+            )
+        )
 
         # --- Create Buttons (icons will be set later) ---
         self.pause_resume_button = self._create_button("Pause")
@@ -57,6 +72,7 @@ class CustomTitleBar(QWidget):
         )
 
         # --- Assemble Layout ---
+        self.layout.addWidget(self.project_button)
         self.layout.addWidget(self.title_label)
         self.layout.addStretch()
         self.layout.addWidget(self.pause_resume_button)
@@ -69,6 +85,7 @@ class CustomTitleBar(QWidget):
         self.feedback_button.clicked.connect(self.pause_for_feedback_clicked.emit)
         self.stop_button.clicked.connect(self.stop_clicked.emit)
         self.close_button.clicked.connect(self.close_clicked.emit)
+        self.project_button.clicked.connect(self.project_clicked.emit)
 
         self.drag_position = None
 
@@ -84,6 +101,7 @@ class CustomTitleBar(QWidget):
         button_style = self.theme_manager.get_style("TITLE_BAR_BUTTON_STYLE")
         for button in [self.pause_resume_button, self.feedback_button, self.stop_button, self.close_button]:
             button.setStyleSheet(button_style)
+        self.project_button.setStyleSheet(button_style + " QPushButton { padding: 0 6px; }")
 
     def _update_icon_colors(self):
         """
@@ -97,6 +115,16 @@ class CustomTitleBar(QWidget):
     def set_title(self, title: str):
         """Sets the text of the title label."""
         self.title_label.setText(title)
+
+    def set_project_name(self, name: str, tooltip: str = ""):
+        """Sets the compact-mode project button label."""
+        display = name or ""
+        if len(display) > 28:
+            display = display[:25].rstrip() + "..."
+        self.project_button.setText(display)
+        self.project_button.setMaximumWidth(220)
+        if tooltip:
+            self.project_button.setToolTip(tooltip)
 
     def _create_button(self, tooltip):
         button = QPushButton("")

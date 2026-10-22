@@ -5,7 +5,7 @@ import time
 import os
 import pathspec
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
-from PySide6.QtWidgets import QFileDialog
+from PySide6.QtWidgets import QFileDialog, QMessageBox
 from PIL import Image
 
 from brain import Brain
@@ -46,7 +46,8 @@ class AppController(QObject):
     # How many messages may wait in the chat queue while a reply streams.
     CHAT_QUEUE_MAX = 5
 
-    def __init__(self, app, settings_manager: SettingsManager, local_server=None, working_directory=None):
+    def __init__(self, app, settings_manager: SettingsManager, local_server=None, working_directory=None,
+                 project_manager=None):
         super().__init__()
         init_start = time.perf_counter()
         # Basic references
@@ -54,7 +55,16 @@ class AppController(QObject):
         self.settings_manager = settings_manager
         self.theme_manager = ThemeManager(self.settings_manager)
         self.settings = self.settings_manager.all()
-        self.working_directory = working_directory if working_directory else os.getcwd()
+        self.project_manager = project_manager
+        self.project_root = ""
+        if self.project_manager is not None:
+            self.project_root = self.project_manager.get_active_root()
+        elif working_directory:
+            self.project_root = working_directory
+        if self.project_root:
+            self.project_root = os.path.abspath(self.project_root)
+        self.working_directory = self.project_root
+        self.session_file = ""
 
         # --- Single Instance Lock ---
         self.local_server = local_server
@@ -66,12 +76,14 @@ class AppController(QObject):
         self.brain = Brain(settings_manager)
         self.vision = None  # Will be initialized in a background thread
         self.is_vision_module_initialized = False
-        self.indexer = Indexer('.')
-        # File index lives for Terminal mode only (user choice): auto-rebuilds
-        # anywhere else are skipped; entering Terminal forces a fresh build.
-        self.indexer.is_active_cb = lambda: self.state == ControllerState.TERMINAL
+        self.indexer = None
+        if self.project_root:
+            self.indexer = Indexer(self.project_root)
+            # File index lives for Terminal mode only (user choice): auto-rebuilds
+            # anywhere else are skipped; entering Terminal forces a fresh build.
+            self.indexer.is_active_cb = lambda: self.state == ControllerState.TERMINAL
+            self.indexer.index_updated.connect(self._on_index_updated)
         self.last_search_query = None
-        self.indexer.index_updated.connect(self._on_index_updated)
 
         # --- Background Vision Initialization ---
         self.vision_thread = None
@@ -101,10 +113,12 @@ class AppController(QObject):
         self.thinking_time = 0
         self.settings_window = None
         self._shutting_down = False
+        self._load_project_session()
 
         # Handlers
         comp_start = time.perf_counter()
-        self.computer = Computer(self.settings_manager, mode="chat")
+        self.computer = Computer(self.settings_manager, mode="chat",
+                                 working_directory=self.working_directory)
         self._last_llm_request = None  # (user_prompt, attachments, system_prompt, history, schema) for Retry
         self._last_llm_error = False  # True if the last request ended with an error card
         self.vision_handler = VisionHandler(self)
@@ -184,6 +198,12 @@ class AppController(QObject):
         self.ui.files_pasted.connect(self._handle_pasted_files)
         self.ui.files_dropped.connect(self._handle_pasted_files)
         self.ui.path_selected_for_attachment.connect(self._handle_path_mention_for_attachment)
+        self.ui.project_switch_requested.connect(self.switch_project)
+        self.ui.project_open_requested.connect(self._handle_open_project)
+        self.ui.project_create_requested.connect(self._handle_create_project)
+        self.ui.session_open_requested.connect(self.open_session)
+        self.ui.new_session_requested.connect(self.new_session)
+        self.ui.home_requested.connect(self.ui.show_home)
 
         # Thinking timer and settings change hook
         self.thinking_timer.timeout.connect(self._update_thinking_timer)
@@ -300,6 +320,7 @@ class AppController(QObject):
     def cleanup(self):
         """Stops background processes with per-step guards and time budgets."""
         logging.info("AppController cleanup initiated.")
+        self._persist_session()
         try:
             computer = getattr(getattr(self, "terminal_handler", None),
                                "computer", None)
@@ -379,6 +400,12 @@ class AppController(QObject):
         self.hotkey_cancel_request_triggered.emit()
 
     def run(self):
+        has_project = bool(self.project_root)
+        if has_project:
+            self.ui.set_project_name(self.project_manager.get_active_name(), self.project_root)
+            self.ui.show_workspace()
+        else:
+            self.ui.show_home()
         self.ui.show_main_window()
         title_string = self._get_llm_title_string()
         window_title = self._get_llm_window_title()
@@ -386,8 +413,13 @@ class AppController(QObject):
         self.ui.set_title_bar_text(window_title)
         self.ui.refresh_model_button(title_string)
         self.ui.set_assistant_name(self._get_current_model_name())
+        if has_project and self.conversation_history:
+            self.ui.add_message(
+                f"<i>Restored {len(self.conversation_history)} messages from the previous "
+                f"session in this project.</i>", force_scroll=True)
         self._start_vision_initialization()
-        self.indexer.start()
+        if self.indexer is not None:
+            self.indexer.start()
         self._check_initial_configuration()
 
     def _check_initial_configuration(self):
@@ -422,8 +454,216 @@ class AppController(QObject):
     def search_files(self, query: str):
         """Performs a file search and emits the results."""
         self.last_search_query = query if query else None
+        if self.indexer is None:
+            self.files_found_signal.emit([])
+            return
         results = self.indexer.search(query)
         self.files_found_signal.emit(results)
+
+    # ------------------------------------------------------------- projects
+    def _load_project_session(self):
+        """Restores the most recent chat/session stored in the project."""
+        self.session_file = ""
+        if self.project_manager is None or not self.project_manager.get_active_root():
+            return
+        try:
+            latest = self.project_manager.latest_session_file()
+            if latest:
+                self._load_session_file(latest)
+            else:
+                self.session_file = self.project_manager.new_session_file()
+        except Exception as e:
+            logging.warning(f"Could not restore project session: {e}")
+
+    def _load_session_file(self, path: str):
+        """Loads a specific session file into the shared conversation list."""
+        if self.project_manager is None or not path:
+            return
+        messages = self.project_manager.load_session(path)
+        self.session_file = path
+        self.conversation_history.clear()
+        self.conversation_history.extend(messages)
+        logging.info(f"Loaded session with {len(messages)} messages from {path}")
+
+    def _session_snapshot(self) -> list:
+        """Serializable subset of the conversation (plain role/content turns)."""
+        snapshot = []
+        for item in getattr(self, "conversation_history", []) or []:
+            if (isinstance(item, dict)
+                    and item.get("role") in ("user", "assistant", "system")
+                    and isinstance(item.get("content"), str)):
+                snapshot.append({"role": item["role"], "content": item["content"]})
+        return snapshot
+
+    def _persist_session(self):
+        if self.project_manager is None or not self.project_manager.get_active_root():
+            return
+        try:
+            if not self.session_file:
+                self.session_file = self.project_manager.new_session_file()
+            self.project_manager.save_session(self.session_file, self._session_snapshot())
+        except Exception as e:
+            logging.warning(f"Could not persist project session: {e}")
+
+    def _set_project_context(self, root: str):
+        """Re-roots the indexer and the terminal/browser working directories."""
+        self.project_root = os.path.abspath(root)
+        self.working_directory = self.project_root
+        computers = [getattr(self, "computer", None)]
+        for handler in (getattr(self, "terminal_handler", None),
+                        getattr(self, "browser_handler", None)):
+            computers.append(getattr(handler, "computer", None))
+        for computer in computers:
+            if computer is not None:
+                computer.working_directory = self.project_root
+        try:
+            if self.indexer is not None:
+                self.indexer.stop()
+        except Exception as e:
+            logging.warning(f"Indexer stop during project switch failed: {e}")
+        self.indexer = Indexer(self.project_root)
+        self.indexer.is_active_cb = lambda: self.state == ControllerState.TERMINAL
+        self.indexer.index_updated.connect(self._on_index_updated)
+        self.last_search_query = None
+        self.indexer.start()
+
+    def _stop_active_work(self):
+        """Cancels streaming/queued work and shell jobs before switching context."""
+        self._clear_chat_queue()
+        try:
+            if self.thinking_timer.isActive() or self.state != ControllerState.IDLE:
+                self.handle_cancel_request()
+        except Exception as e:
+            logging.warning(f"Could not cancel work on project switch: {e}")
+        try:
+            computer = getattr(self.terminal_handler, "computer", None)
+            manager = getattr(computer, "shell_jobs", None)
+            if manager is not None:
+                manager.kill_all()
+        except Exception as e:
+            logging.warning(f"Could not stop shell jobs on project switch: {e}")
+        self._forget_last_request()
+        try:
+            self.thinking_timer.stop()
+            self.ui.stop_retry_countdown()
+            self.ui.show_thinking_ui(False)
+        except Exception:
+            pass
+
+    def _report_project_error(self, message: str):
+        """Shows project errors on Home (dialog) or in the chat workspace."""
+        message = str(message)
+        if self.ui.home_page.isVisible():
+            QMessageBox.warning(self.ui.main_window, "Projects", message)
+        else:
+            self.ui.add_message(f"<i>{message}</i>", force_scroll=True)
+
+    def switch_project(self, path: str, session_file: str = "", announce: bool = True):
+        """Switches the active project and optionally opens one of its sessions."""
+        if self.project_manager is None or not path:
+            return
+        target = os.path.abspath(path)
+        if target == self.project_root and not session_file:
+            self.ui.show_workspace()
+            return
+        if not os.path.isdir(target):
+            self._report_project_error("Project folder not found.")
+            return
+        try:
+            self.project_manager.open_project(target)
+        except Exception as e:
+            self._report_project_error(f"Could not switch project: {e}")
+            return
+
+        self._stop_active_work()
+        self._persist_session()
+        self.conversation_history.clear()
+        self.pending_attachments.clear()
+        try:
+            self.ui.clear_thumbnails()
+            self._update_attachment_menu()
+        except Exception as e:
+            logging.warning(f"Could not clear attachments on project switch: {e}")
+
+        self.session_file = ""
+        self._set_project_context(target)
+        if session_file:
+            self._load_session_file(session_file)
+        else:
+            self._load_project_session()
+        try:
+            self.ui.clear_chat()
+        except Exception:
+            pass
+        name = self.project_manager.get_active_name()
+        self.ui.set_project_name(name, self.project_root)
+        self._persist_session()
+        self.ui.show_workspace()
+        self.ui.refresh_project_views()
+        if announce:
+            self.ui.add_message(f"<i>Project switched to <b>{name}</b>.</i>", force_scroll=True)
+
+    def open_session(self, session_path: str):
+        """Opens a saved session from the home screen or sidebar."""
+        if self.project_manager is None or not session_path:
+            return
+        root = self.project_manager.session_project_root(session_path)
+        if not root:
+            self._report_project_error("Could not locate the project for this session.")
+            return
+        self.switch_project(root, session_file=session_path, announce=False)
+        self.ui.add_message("<i>Opened saved session.</i>", force_scroll=True)
+
+    def new_session(self):
+        """Starts an empty session in the active project."""
+        if self.project_manager is None or not self.project_root:
+            self.ui.show_home()
+            return
+        self._stop_active_work()
+        self._persist_session()
+        self.conversation_history.clear()
+        self.pending_attachments.clear()
+        try:
+            self.ui.clear_thumbnails()
+            self._update_attachment_menu()
+        except Exception as e:
+            logging.warning(f"Could not clear attachments for new session: {e}")
+        try:
+            self.session_file = self.project_manager.new_session_file()
+        except Exception as e:
+            logging.warning(f"Could not create a new session: {e}")
+            self.session_file = ""
+        try:
+            self.ui.clear_chat()
+        except Exception:
+            pass
+        self.ui.show_workspace()
+        self.ui.refresh_project_views()
+        self.ui.add_message("<i>Started a new chat.</i>", force_scroll=True)
+
+    def _handle_open_project(self):
+        path = QFileDialog.getExistingDirectory(
+            self.ui.main_window, "Open Project Folder", os.path.expanduser("~"))
+        if path:
+            self.switch_project(path)
+
+    def _handle_create_project(self):
+        parent = QFileDialog.getExistingDirectory(
+            self.ui.main_window, "Choose Where to Create the Project", os.path.expanduser("~"))
+        if not parent:
+            return
+        from PySide6.QtWidgets import QInputDialog
+        name, ok = QInputDialog.getText(self.ui.main_window, "New Project", "Project folder name:")
+        name = (name or "").strip()
+        if not ok or not name:
+            return
+        target = os.path.join(parent, name)
+        try:
+            os.makedirs(target, exist_ok=True)
+        except Exception as e:
+            self._report_project_error(f"Could not create project: {e}")
+            return
+        self.switch_project(target)
 
     def _start_vision_initialization(self):
         """Marks Vision ready immediately (agent-loop rebuild).
@@ -480,6 +720,7 @@ class AppController(QObject):
 
         self.ui.add_user_message(user_text)
         self.conversation_history.append({'role': 'user', 'content': user_text})
+        self._persist_session()
 
         # Process attachments based on the current mode
         attachments_for_handler = []
@@ -608,6 +849,7 @@ class AppController(QObject):
             logging.warning(f"Could not activate queued chat message: {e}")
         self.current_handler = self.chat_handler
         self.conversation_history.append({'role': 'user', 'content': item['text']})
+        self._persist_session()
         logging.info(f"Dequeuing chat message ({len(self.chat_queue)} left).")
         self.chat_handler.start_chat(item['text'], item.get('attachments') or [])
         return True
@@ -1151,7 +1393,8 @@ class AppController(QObject):
         self._cleanup_and_switch_handler(self.terminal_handler, ControllerState.TERMINAL)
         self.ui.set_active_mode('terminal')
         self.ui.add_message("<i>Terminal mode enabled. I will now use terminal commands to accomplish tasks.</i>", force_scroll=True)
-        self.indexer.schedule_reindex(force=True)
+        if self.indexer is not None:
+            self.indexer.schedule_reindex(force=True)
 
     def _activate_browser_mode(self):
         self._cleanup_and_switch_handler(self.browser_handler, ControllerState.BROWSER)

@@ -113,6 +113,9 @@ class SettingsManager(QObject):
 
     DEFAULTS = {
         "prevent_multiple_instances": True,
+        # --- Active project (all per-project data lives in <root>/.logos) ---
+        "active_project": "",
+        "recent_projects": [],
         "active_provider": "google_gemini", # A sensible default
         "llm_providers": _llm_providers_defaults,
         # Dedicated Vision (computer-use) model. Applied session-only when
@@ -371,19 +374,24 @@ class SettingsManager(QObject):
     def set(self, key, value, save: bool = True):
         self.set_many({key: value}, save=save)
 
-    def set_many(self, settings_dict: dict, save: bool = True):
+    def set_many(self, settings_dict: dict, save: bool = True, emit: bool = True):
         """Set multiple settings at once and emit a single signal.
 
         With save=False the change stays in memory only (no disk write, no
-        settings_changed signal) — used for session-only switches such as
-        the toolbar model switcher. Callers then refresh dependents manually.
+        settings_changed signal) - used for session-only switches such as
+        the toolbar model switcher. With emit=False the change is persisted
+        but listeners are not notified (used for project bookkeeping, which
+        must not trigger a provider reload).
         """
         self._settings.update(settings_dict)
         for key, value in settings_dict.items():
-            # Avoid logging sensitive values like API keys — including nested
+            # Avoid logging sensitive values like API keys - including nested
             # ones (e.g. llm_providers.*.api_key). Secrets must never hit logs.
             logger.info(f"[SettingsManager] Setting '{key}' to '{_redact_secrets(value)}' (part of batch, save={save}).")
         if not save:
+            return
+        if not emit:
+            self._write_settings(self._settings)
             return
         logger.info("[SettingsManager] Emitting single settings_changed signal for batch update.")
         self.save()

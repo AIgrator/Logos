@@ -45,6 +45,8 @@ class Indexer(QObject):
         self._reindex_timer = None
 
         self.hardcoded_ignore_dirs: set[str] = {'.git', '.venv', 'venv', 'node_modules', '__pycache__',
+                                                # Logos' own per-project data folder.
+                                                '.logos',
                                                 # Machine-generated, high-churn dirs: screenshots
                                                 # (CUA debug shots every turn), logs, model cache.
                                                 'screenshots', 'logs', 'cache'}
