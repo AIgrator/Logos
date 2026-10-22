@@ -1880,7 +1880,8 @@ Acceptance for this sub-step:
 
 ## 18. Terminal background jobs: план следующего этапа
 
-Статус: P0 закоммичен (`4bd6a19`), P1 закоммичен (`205f793`), P1.3 реализован.
+Статус: P0 закоммичен (`4bd6a19`), P1 закоммичен (`205f793`), P1.3 закоммичен
+(`b0172c3`).
 Ниже — порядок работ, чтобы не уходить в бесконечную «кроличью нору». Сверяться
 с этим разделом перед каждым следующим коммитом.
 
@@ -1888,10 +1889,10 @@ Acceptance for this sub-step:
 `started/finished/stopped`, wake-up/pending-note, кнопка `Stop` и `Open log` в
 running-job блоке, retention логов.
 
-Статус P1 (2026-10-22): readiness probe закоммичен (`205f793`); P1.3 реализован —
-`ShellJobManager` и tool-result отдают `state` (`starting/running/ready/
-finished/failed/stopped`), UI использует тот же словарь. `ready` сохраняется на
-job, поэтому последующий poll не теряет состояние сервера.
+Статус P1 (2026-10-22): readiness probe закоммичен (`205f793`); P1.3 закоммичен
+(`b0172c3`) — `ShellJobManager` и tool-result отдают `state`
+(`starting/running/ready/finished/failed/stopped`), UI использует тот же словарь.
+`ready` сохраняется на job, поэтому последующий poll не теряет состояние сервера.
 
 ### 18.0 Принцип
 
