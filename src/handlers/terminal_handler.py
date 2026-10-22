@@ -579,26 +579,67 @@ class TerminalHandler(BaseAgentHandler):
                 job_cwds[job_id] = cwd
                 if len(job_cwds) > 100:
                     job_cwds.pop(next(iter(job_cwds)))
-            note = (f"Started in background as job #{job_id}. Use poll_shell_job "
-                    "to check progress, stop_shell_job to abort.")
-            output_for_llm = (
-                f"**Tool Result:** Background shell job #{job_id} started and is running.\n"
-                f"Poll it with poll_shell_job, pacing polls with wait_seconds.\n"
-                f"```\n{result}\n```"
-            )
+            readiness_checked = bool(result.get('readiness_checked'))
+            ready = bool(result.get('ready'))
+            ready_url = str(result.get('ready_url') or '')
+            readiness_elapsed = result.get('readiness_elapsed')
+            readiness_error = result.get('readiness_error')
+            status_code = result.get('status_code')
+            elapsed_text = (f"{readiness_elapsed:g}s"
+                            if isinstance(readiness_elapsed, (int, float))
+                            else "?s")
+            if readiness_checked and ready:
+                note = (f"Started as job #{job_id}. Ready at {ready_url} "
+                        f"(HTTP {status_code}) after {elapsed_text}. "
+                        "Stop with stop_shell_job when done.")
+                output_for_llm = (
+                    f"**Tool Result:** Background job #{job_id} started and is "
+                    f"ready at {ready_url} (HTTP {status_code}) after "
+                    f"{elapsed_text}. It is still running; stop it with "
+                    f"stop_shell_job when done.\n```\n{result}\n```"
+                )
+                title = f"Shell · job #{job_id} · ready · {ready_url}"
+                title_color = self._theme("SUCCESS_COLOR")
+            elif readiness_checked:
+                note = (f"Started as job #{job_id}, but {ready_url} did not "
+                        f"answer within the readiness timeout "
+                        f"({readiness_error or 'no response'}). Check "
+                        "poll_shell_job/output_file before deciding; do not "
+                        "relaunch blindly.")
+                output_for_llm = (
+                    f"**Tool Result:** Background job #{job_id} started, but "
+                    f"the readiness probe for {ready_url} failed after "
+                    f"{elapsed_text}. Last error: "
+                    f"{readiness_error or 'none'}.\n"
+                    "Check poll_shell_job and output_file before deciding; do "
+                    "not relaunch blindly.\n"
+                    f"```\n{result}\n```"
+                )
+                title = f"Shell · job #{job_id} · not ready · {ready_url}"
+                title_color = self._theme("WARNING_COLOR")
+            else:
+                note = (f"Started in background as job #{job_id}. Use "
+                        "poll_shell_job to check progress, stop_shell_job to abort.")
+                output_for_llm = (
+                    f"**Tool Result:** Background shell job #{job_id} started and is running.\n"
+                    f"Poll it with poll_shell_job, pacing polls with wait_seconds.\n"
+                    f"```\n{result}\n```"
+                )
+                title = f"Shell · running in background · job #{job_id}"
+                title_color = self._theme("WARNING_COLOR")
             output_file = result.get('output_file')
             actions = {f"Stop job #{job_id}": "stop_job"}
             if output_file:
                 actions["Open log"] = "open_log"
             output_for_ui = {
                 'type': 'collapsible',
-                'title': f"Shell · running in background · job #{job_id}",
+                'title': title,
                 'content': self.html_formatter.format_shell_block(
                     command, exit_note=note, show_output=False, cwd=cwd,
                     output_file=output_file),
                 'plain_content': f"$ {command}\n\n{note}",
                 'content_is_html': True,
-                'title_color': self._theme("WARNING_COLOR"),
+                'title_color': title_color,
                 'copy_payloads': {'command': command},
                 'job_id': job_id,
                 'job_role': 'launch',
@@ -1018,7 +1059,12 @@ class TerminalHandler(BaseAgentHandler):
         if job_id is not None:
             # Background launch: do NOT ask the model immediately (it acts
             # NOW — e.g. relaunches). Record the launch, wait handler-side.
+            # A readiness probe already spent the startup window, so its
+            # verdict is final and the model gets control immediately.
             self.command_history.append(output_for_llm)
+            if isinstance(result, dict) and result.get('readiness_checked'):
+                self._continue_loop(output_for_llm)
+                return
             self._arm_job_wait(job_id)
             return
         self._continue_loop(output_for_llm)

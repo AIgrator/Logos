@@ -1880,13 +1880,17 @@ Acceptance for this sub-step:
 
 ## 18. Terminal background jobs: план следующего этапа
 
-Статус: текущий этап закоммичен (`eb4a16d`). Ниже — порядок работ, чтобы не
-уходить в бесконечную «кроличью нору». Сверяться с этим разделом перед каждым
-следующим коммитом.
+Статус: P0 закоммичен (`4bd6a19`), P1 readiness probe реализован. Ниже —
+порядок работ, чтобы не уходить в бесконечную «кроличью нору». Сверяться с этим
+разделом перед каждым следующим коммитом.
 
-Статус P0 (2026-10-21): реализовано — события `started/finished/stopped`,
-wake-up/pending-note, кнопка `Stop` и `Open log` в running-job блоке,
-retention логов. Следующий этап — P1 readiness probe.
+Статус P0 (2026-10-21): реализовано и закоммичено (`4bd6a19`) — события
+`started/finished/stopped`, wake-up/pending-note, кнопка `Stop` и `Open log` в
+running-job блоке, retention логов.
+
+Статус P1 (2026-10-22): readiness probe реализован — `ready_url`/`ready_timeout`
+у `execute_shell` и `wait_for_http()`; окно старта стало гибким (после probe
+10-секундный fallback не запускается). Остался P1.3: единый формат статусов.
 
 ### 18.0 Принцип
 
@@ -1929,18 +1933,32 @@ task manager. Полная панель задач остаётся необяз
 
 ### 18.2 P1 — после P0
 
-1. **Readiness probe.**
-   Универсальный `wait_for_http(url, timeout)` или `ready_url` у
-   `execute_shell`: ждать порт/HTTP до таймаута и возвращать `ready` +
+Реализовано (2026-10-22):
+- `src/computer/http_probe.py`: `wait_for_http(url, timeout)` считает ready любой
+  HTTP-ответ < 500, повторяет 5xx/сетевые ошибки, учитывает `cancel_event`.
+- `execute_shell` принимает `ready_url` + `ready_timeout` (0.5..120 с, default 10)
+  только вместе с `run_in_background=true`; результат содержит `ready`,
+  `readiness_checked`, `ready_url`, `status_code`, `readiness_elapsed`,
+  `readiness_error`.
+- Handler после probe сразу возвращает управление модели, не тратя ещё 10 секунд;
+  UI показывает `ready` (зелёный) или `not ready` (жёлтый) и советует не
+  перезапускать сервер слепо.
+- Prompt и описание tool требуют `ready_url` для серверов.
+
+Осталось: единый формат статусов `starting/running/ready/finished/failed/stopped`.
+
+1. **Readiness probe.** — сделано.
+   Универсальный `wait_for_http(url, timeout)` и `ready_url` у
+   `execute_shell`: ждать HTTP до таймаута и возвращать `ready` +
    последний статус. Не хардкодить `npm start`/`http.server`.
    Зачем: убрать гадание «сервер поднялся или ещё нет» после 10 секунд.
 
-2. **Гибкий startup window.**
+2. **Гибкий startup window.** — сделано.
    Если readiness probe есть, 10 секунд становятся fallback-ом, а не
-   единственным критерием. Для finite jobs можно возвращать управление
-   раньше при первом output/завершении.
+   единственным критерием. После probe handler сразу возвращает управление
+   модели, не запуская второй 10-секундный цикл ожидания.
 
-3. **Единый формат статусов job.**
+3. **Единый формат статусов job.** — осталось.
    `starting / running / ready / finished / failed / stopped` в UI и в
    tool-result. Это упростит и панель, и диагностику.
 
