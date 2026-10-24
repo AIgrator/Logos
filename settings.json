@@ -144,23 +144,53 @@
     "wait_check_interval_ms": 5000,
     "post_action_delay_ms": 1000,
     "max_correction_attempts": 3,
-    "grounding_backend": "local"
+    "grounding_backend": "local",
+    "allow_system_surfaces": false,
+    "restrict_to_allowed_apps": false,
+    "max_task_seconds": 1800,
+    "max_actions_per_turn": 20,
+    "action_timeout_seconds": 30,
+    "max_wait_seconds": 30,
+    "debug_screenshot_retention_days": 7
   },
   "browser": {
     "block_ads": true,
     "headless": false,
     "default_timeout_ms": 30000,
-    "profile_dir": "cache/browser_profile"
+    "profile_dir": "cache/browser_profile",
+    "max_steps": 50,
+    "max_task_seconds": 1800,
+    "allowed_domains": [],
+    "block_private_networks": true,
+    "require_approval": true,
+    "approval_timeout_seconds": 300
   },
   "context": {
     "history_keep_last_n": 0,
     "history_max_result_chars": 0,
     "history_dedup_snapshots": false,
-    "history_trim_tracebacks": false
+    "history_trim_tracebacks": false,
+    "handoff_enabled": true,
+    "handoff_on_model_switch": true,
+    "handoff_on_mode_switch": true,
+    "summary_model": "",
+    "summary_max_tokens": 1200,
+    "summary_threshold_ratio": 0.6
   },
   "max_consecutive_errors": 3,
   "terminal": {
     "shell_timeout_seconds": 60,
-    "shell_detach_seconds": 25
-  }
+    "shell_detach_seconds": 25,
+    "output_cap_chars": 20000,
+    "inactivity_timeout_seconds": 300
+  },
+  "active_project": "C:\\Users\\vipTe\\Project\\python\\test",
+  "recent_projects": [
+    {
+      "path": "C:\\Users\\vipTe\\Project\\python\\test",
+      "name": "test",
+      "last_opened": "2026-10-24T18:54:48+00:00"
+    }
+  ],
+  "mode_models": {}
 }
