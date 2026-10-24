@@ -247,6 +247,7 @@ class XAIProvider(BaseLLMProvider):
 
         try:
             response = self.client.chat.completions.create(**request_body)
+            self._record_usage(getattr(response, "usage", None))
             message = response.choices[0].message
             text_content = message.content or ""
             raw_tool_calls = message.tool_calls
@@ -356,6 +357,7 @@ class XAIProvider(BaseLLMProvider):
             _logged_finish_event = False
 
             for resp, chunk in chat.stream():
+                self._record_usage(getattr(resp, "usage", None), merge=True)
                 # Determine if the chunk has meaningful content or if it's a finish event
                 has_content = bool(getattr(chunk, "content", None))
                 has_tool_calls = bool(getattr(chunk, "tool_calls", None))

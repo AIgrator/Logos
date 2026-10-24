@@ -253,6 +253,7 @@ class AnthropicProvider(BaseLLMProvider):
                 messages=messages,
                 timeout=90,
             )
+            self._record_usage(getattr(response, "usage", None))
             messages.append({"role": "assistant", "content": response.content})
 
             actions: list = []
@@ -535,6 +536,7 @@ class AnthropicProvider(BaseLLMProvider):
 
         try:
             response = self.client.messages.create(**request_body)
+            self._record_usage(getattr(response, "usage", None))
 
             text_content = ""
 
@@ -749,7 +751,11 @@ class AnthropicProvider(BaseLLMProvider):
                         logger.info("Stream gracefully cancelled by user request (Anthropic).")
                         break
 
-                    if event.type == "content_block_start":
+                    if event.type == "message_start":
+                        usage = getattr(getattr(event, "message", None), "usage", None)
+                        self._record_usage(usage, merge=True)
+
+                    elif event.type == "content_block_start":
                         if event.content_block.type in ["tool_use", "server_tool_use"]:
                             tool_calls[event.index]["name"] = event.content_block.name
                             logger.info(f"🔧 Tool use started: {event.content_block.name} at index {event.index}")
@@ -786,8 +792,10 @@ class AnthropicProvider(BaseLLMProvider):
                     elif event.type == "message_delta":
                         if hasattr(event.delta, 'stop_reason') and event.delta.stop_reason:
                             logger.info(f"⏹️ Stop reason: {event.delta.stop_reason}")
-                        if hasattr(event, 'usage'):
-                            logger.info(f"📊 Usage: {event.usage}")
+                        usage = getattr(event, 'usage', None)
+                        if usage is not None:
+                            self._record_usage(usage, merge=True)
+                            logger.info(f"📊 Usage: {usage}")
 
         except AuthenticationError as e:
             raise FatalError(f"Anthropic authentication error: {e}") from e

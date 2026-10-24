@@ -28,6 +28,7 @@ class LLMWorker(QObject):
     error_occurred = Signal(str)
     summary_finished = Signal(str)
     summary_failed = Signal(str)
+    usage_received = Signal(dict)
 
     def __init__(self, settings_manager, settings):
         super().__init__()
@@ -96,6 +97,19 @@ class LLMWorker(QObject):
         inst_duration = perf_counter() - inst_start
         logging.info(f"Provider '{active_provider_name}' __init__ completed in {inst_duration:.3f}s")
         return instance
+
+    def _emit_usage(self, purpose: str = "completion", provider=None) -> None:
+        provider = provider or self.provider
+        apply_pricing = getattr(provider, "apply_model_pricing", None)
+        if callable(apply_pricing):
+            apply_pricing()
+        usage = getattr(provider, "last_usage", None)
+        if not usage:
+            return
+        payload = dict(usage)
+        payload["purpose"] = purpose
+        self.usage_received.emit(payload)
+        provider.last_usage = None
 
     @Slot()
     def prepare_provider(self):
@@ -323,6 +337,7 @@ class LLMWorker(QObject):
                 system_prompt=system_prompt,
                 history=[],
             )
+            self._emit_usage("summary", provider)
             text = ""
             if isinstance(response, dict):
                 text = response.get("text") or ""
@@ -433,6 +448,7 @@ class LLMWorker(QObject):
                     if response_dict is None:
                         # Cancelled while waiting (abandoned in-flight call).
                         return
+                    self._emit_usage("completion")
 
                     raw_llm_logger.info(json.dumps(response_dict))
                     if self.is_cancelled:
@@ -525,6 +541,7 @@ class LLMWorker(QObject):
                         if correction_response_dict is None:
                             # Cancelled while waiting (abandoned in-flight call).
                             return
+                        self._emit_usage("completion")
                         raw_llm_logger.info(json.dumps({"self_correction_response": correction_response_dict}))
 
                         corr_tool_calls = correction_response_dict.get("tool_calls", {})
@@ -653,6 +670,7 @@ class LLMWorker(QObject):
                     raw_llm_logger.info(json.dumps(log_content))
 
                     self.response_finished.emit(full_response_text)
+                    self._emit_usage("completion")
                     return
 
             except RetryableError as e:

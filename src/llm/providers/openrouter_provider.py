@@ -68,6 +68,24 @@ class OpenRouterProvider(BaseLLMProvider):
         self.session = requests.Session()
         self.current_generation_id = None
 
+    def _fetch_generation_cost(self, generation_id: str) -> None:
+        if not generation_id:
+            return
+        try:
+            response = self.session.get(
+                f"{self.base_url}/generation",
+                params={"id": generation_id},
+                headers={"Authorization": f"Bearer {self.api_key}"},
+                timeout=10,
+            )
+            response.raise_for_status()
+            data = response.json().get("data") or {}
+            cost = data.get("total_cost")
+            if cost is not None:
+                self._set_usage_cost(cost)
+        except Exception:
+            pass
+
     def web_search(self, query: str) -> str | None:
         """
         Performs a web search using the configured OpenRouter model by appending
@@ -285,6 +303,9 @@ class OpenRouterProvider(BaseLLMProvider):
             response.raise_for_status()
 
             response_data = response.json()
+            self._record_usage(response_data.get("usage"))
+            if not (self.last_usage or {}).get("cost"):
+                self._fetch_generation_cost(response_data.get("id"))
             message = response_data.get("choices", [{}])[0].get("message", {})
             text_content = message.get("content") or ""
             raw_tool_calls = message.get("tool_calls")
@@ -354,7 +375,12 @@ class OpenRouterProvider(BaseLLMProvider):
         # Append ':online' to enable web search for streaming responses
         streaming_model = f"{self.model}:online"
         logging.info(f"Enabling web search for streaming with model: {streaming_model}")
-        request_body = {"model": streaming_model, "messages": messages, "stream": True}
+        request_body = {
+            "model": streaming_model,
+            "messages": messages,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+        }
 
         log_body = copy.deepcopy(request_body)
         for message in log_body.get('messages', []):
@@ -385,6 +411,9 @@ class OpenRouterProvider(BaseLLMProvider):
 
                         try:
                             chunk = json.loads(json_str)
+                            usage = chunk.get("usage")
+                            if usage:
+                                self._record_usage(usage, merge=True)
                             # Check for generation_id, which is a special event
                             if 'id' in chunk and 'choices' not in chunk:
                                 self.current_generation_id = chunk.get('id')
@@ -398,6 +427,9 @@ class OpenRouterProvider(BaseLLMProvider):
                                 yield content
                         except json.JSONDecodeError:
                             logging.warning(f"Could not decode stream chunk: {json_str}")
+
+            if not (self.last_usage or {}).get("cost"):
+                self._fetch_generation_cost(self.current_generation_id)
 
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code

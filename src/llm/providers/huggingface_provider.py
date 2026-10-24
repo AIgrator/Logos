@@ -228,6 +228,7 @@ class HuggingFaceProvider(BaseLLMProvider):
             )
             response.raise_for_status()
             data = response.json()
+            self._record_usage(data.get("usage"))
 
             text_content = ""
             choices = data.get("choices", [])
@@ -371,6 +372,9 @@ class HuggingFaceProvider(BaseLLMProvider):
 
                         try:
                             chunk = json.loads(json_str)
+                            usage = chunk.get("usage")
+                            if usage:
+                                self._record_usage(usage, merge=True)
                             choices = chunk.get("choices", [])
                             if choices:
                                 delta = choices[0].get("delta", {})

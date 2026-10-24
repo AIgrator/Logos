@@ -33,7 +33,78 @@ class BaseLLMProvider(ABC):
         self.api_key = self.provider_config.get("api_key")
         self.model = self.provider_config.get("model")
         self.require_json_output = self.provider_config.get("require_json_output", False)
+        self.last_usage = None
         self._install_auto_logging()
+
+    def _record_usage(self, raw, *, merge: bool = False, cost=None) -> None:
+        """Store normalized token usage for the next worker signal."""
+        from llm.usage import merge_usage, normalize_usage
+
+        usage = normalize_usage(
+            raw, type(self).get_provider_id(), self.model, cost=cost)
+        if not usage:
+            return
+        self.last_usage = merge_usage(self.last_usage, usage) if merge else usage
+
+    def _set_usage_cost(self, cost, currency: str = "USD") -> None:
+        """Attach a cost reported separately from the token payload."""
+        try:
+            value = float(cost)
+        except (TypeError, ValueError):
+            return
+        usage = dict(self.last_usage or {
+            "input": 0,
+            "output": 0,
+            "reasoning": 0,
+            "cache_read": 0,
+            "cache_write": 0,
+            "provider": type(self).get_provider_id(),
+            "model": self.model,
+        })
+        usage["cost"] = value
+        usage["cost_source"] = "provider"
+        usage["currency"] = currency
+        self.last_usage = usage
+
+    def apply_model_pricing(self) -> None:
+        """Fill cost from optional ``models.json`` prices after a full response."""
+        usage = self.last_usage
+        if not usage or usage.get("cost") is not None:
+            return
+        from context.tokens import ModelMetadata
+
+        prices = ModelMetadata.pricing(
+            type(self).get_provider_id(), self.model)
+        input_rate = prices.get("input_cost_per_mtok")
+        output_rate = prices.get("output_cost_per_mtok")
+        if input_rate is None and output_rate is None:
+            return
+        input_rate = input_rate or 0.0
+        output_rate = output_rate or 0.0
+        cache_read_rate = prices.get("cache_read_cost_per_mtok", input_rate)
+        cache_write_rate = prices.get("cache_write_cost_per_mtok", input_rate)
+        cache_read = int(usage.get("cache_read") or 0)
+        cache_write = int(usage.get("cache_write") or 0)
+        # Providers differ: OpenAI-style APIs already count cached tokens in
+        # the prompt total, Anthropic reports them separately.
+        billable_input = int(usage.get("input") or 0)
+        if usage.get("cache_in_input", True):
+            billable_input = max(0, billable_input - cache_read - cache_write)
+        # Likewise, reasoning is either inside output tokens or billed on top.
+        billable_output = int(usage.get("output") or 0)
+        if not usage.get("reasoning_in_output", False):
+            billable_output += int(usage.get("reasoning") or 0)
+        cost = (
+            billable_input * input_rate
+            + billable_output * output_rate
+            + cache_read * cache_read_rate
+            + cache_write * cache_write_rate
+        ) / 1_000_000
+        usage = dict(usage)
+        usage["cost"] = round(cost, 8)
+        usage["cost_source"] = "model_metadata"
+        usage["currency"] = "USD"
+        self.last_usage = usage
 
     def _install_auto_logging(self):
         """Wraps both call paths with timing + error journaling.
@@ -93,6 +164,7 @@ class BaseLLMProvider(ABC):
             t0 = time.perf_counter()
             chunks = 0
             chars = 0
+            self.last_usage = None
             try:
                 for chunk in orig_stream(*args, **kwargs):
                     chunks += 1
@@ -130,6 +202,7 @@ class BaseLLMProvider(ABC):
         def logged_cua(*args, **kwargs):
             ctx = _ctx()
             t0 = time.perf_counter()
+            self.last_usage = None
             try:
                 result = orig_cua(*args, **kwargs)
                 comm.info(json.dumps({
@@ -192,6 +265,7 @@ class BaseLLMProvider(ABC):
         It ensures that the response always contains a structured tool_calls object.
         """
         import logging
+        self.last_usage = None
         response_dict = self._execute_get_response(
             prompt, attachments, system_prompt, history, schema_name
         )

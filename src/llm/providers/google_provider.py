@@ -390,6 +390,7 @@ class GoogleProvider(BaseLLMProvider):
                     create_kwargs["system_instruction"] = instructions
                 interaction = self.client.interactions.create(**create_kwargs)
 
+            self._record_usage(self._field(interaction, "usage"))
             chain_id = (self._field(interaction, "id")
                         or previous_response_id)
             steps = self._field(interaction, "steps") or []
@@ -675,6 +676,7 @@ class GoogleProvider(BaseLLMProvider):
                 contents=contents,
                 config=generation_config,
             )
+            self._record_usage(getattr(response, "usage_metadata", None))
 
             if response.prompt_feedback and response.prompt_feedback.block_reason:
                 reason = response.prompt_feedback.block_reason.name
@@ -795,6 +797,9 @@ class GoogleProvider(BaseLLMProvider):
                         raw_llm_logger.info(str(chunk))
                 except Exception as log_e:
                     raw_llm_logger.warning(f"Could not serialize and log raw chunk: {log_e}")
+
+                self._record_usage(
+                    getattr(chunk, "usage_metadata", None), merge=True)
 
                 if chunk.prompt_feedback and chunk.prompt_feedback.block_reason:
                     reason = chunk.prompt_feedback.block_reason.name

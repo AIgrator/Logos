@@ -199,6 +199,7 @@ class OpenAIProvider(BaseLLMProvider):
                     f"({len(instructions)} chars).")
 
             response = self.client.responses.create(**kwargs)
+            self._record_usage(getattr(response, "usage", None))
 
             actions: list = []
             out_call_id = None
@@ -473,6 +474,7 @@ class OpenAIProvider(BaseLLMProvider):
         try:
             # Use the Responses API
             response = self.client.responses.create(**request_body)
+            self._record_usage(getattr(response, "usage", None))
             final_text = getattr(response, "output_text", "") or ""
 
             # Parse possible function/tool calls in the output
@@ -613,6 +615,13 @@ class OpenAIProvider(BaseLLMProvider):
                         "arguments": args_dict
                     }
                     yield {"type": "tool_code", "content": tool_call_data}
+
+                elif event_type == 'response.completed':
+                    completed = getattr(event, 'response', None)
+                    usage = getattr(completed, 'usage', None)
+                    if usage is None:
+                        usage = getattr(event, 'usage', None)
+                    self._record_usage(usage)
 
         except AuthenticationError as e:
             raise FatalError(f"OpenAI authentication error: {e}") from e

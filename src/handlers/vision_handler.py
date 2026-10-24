@@ -283,6 +283,7 @@ class CuaTurnWorker(QThread):
     ask_needed = Signal(list)     # ask_user calls -> GUI question dialogs
     ensure_visible = Signal(float, float)  # point must not hide under us
     progress = Signal(str)
+    usage_ready = Signal(dict)
 
     def __init__(self, handler, provider, turn_request: dict, parent=None,
                  generation: int = 0):
@@ -416,6 +417,15 @@ class CuaTurnWorker(QThread):
             t0 = time.perf_counter()
             turn = self._provider.computer_use_turn(**protocol)
             took = round(time.perf_counter() - t0, 1)
+            apply_pricing = getattr(self._provider, "apply_model_pricing", None)
+            if callable(apply_pricing):
+                apply_pricing()
+            usage = getattr(self._provider, "last_usage", None)
+            if usage:
+                payload = dict(usage)
+                payload["purpose"] = "completion"
+                self.usage_ready.emit(payload)
+                self._provider.last_usage = None
             self._comm_log("RESPONSE", {
                 "turn": turn_no,
                 "took_seconds": took,
@@ -1459,7 +1469,12 @@ class VisionHandler(BaseAgent):
         worker.ensure_visible.connect(self._on_ensure_visible)
         worker.progress.connect(
             lambda msg: self.ui.add_message(f"<i>{msg}</i>"))
+        worker.usage_ready.connect(self._on_cua_usage)
         worker.start()
+
+    def _on_cua_usage(self, usage: dict):
+        if isinstance(usage, dict) and usage:
+            self.controller.record_provider_usage(usage)
 
     # -- turn outcome (GUI thread) --------------------------------------
 

@@ -38,7 +38,9 @@ lives in `<project>/.logos/`:
 - `sessions/` - one append-only JSONL file per session; the first line is a
   `session` header (`schema_version`, `id`, `mode`) and later lines are typed
   events (`message`, `reasoning`, `tool_call`, `tool_result`, `job_result`,
-  `error`). Credentials are redacted before events are written. The newest is
+  `usage`, `error`). `usage` events carry normalized provider token counts and
+  optional cost; they are counted in context statistics but never replayed as
+  chat text. Credentials are redacted before events are written. The newest is
   restored at startup: messages are replayed into the
   chat, and terminal/browser `command_history` plus tool cards are rebuilt from
   the same events. Agent `finish` / `communicate_to_user` / `display_message`

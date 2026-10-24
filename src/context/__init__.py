@@ -3,5 +3,6 @@
 ``tokens`` provides token estimation plus per-model context metadata consumed
 from ``models.json``. ``handoff`` stores the rolling ``summary.md`` and its
 provenance sidecar, builds summarizer prompts, and creates the deterministic
-fallback used when an LLM pass is unavailable.
+fallback used when an LLM pass is unavailable. ``context_stats`` merges actual
+provider ``usage`` events with those estimates for the Context dialog.
 """

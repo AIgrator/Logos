@@ -9,7 +9,8 @@ import uuid
 import pathspec
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QMessageBox, QPushButton, QTextBrowser, QVBoxLayout,
+    QDialog, QFileDialog, QGroupBox, QLabel, QMessageBox, QProgressBar,
+    QPushButton, QTextBrowser, QVBoxLayout,
 )
 from PIL import Image
 
@@ -19,7 +20,8 @@ from llm.error_formatter import CONTINUE_LINK
 from llm.llm_worker import LLMWorker
 from llm.mode_capabilities import ModeCapabilities, SUBSECTIONS
 from project_manager import event_text
-from context import handoff
+from context import context_stats, handoff
+from context.tokens import ModelMetadata
 from settings_manager import SettingsManager
 from ui.manager import UIManager
 from ui.text_render import render_text
@@ -84,6 +86,9 @@ class AppController(QObject):
         self._summary_pending = False
         self._summary_force = False
         self._summary_request_context = None
+        self._summary_failures = 0
+        self._summary_retry_at = 0.0
+        self._context_warning_file = ""
         self._summary_timer = QTimer(self)
         self._summary_timer.setSingleShot(True)
         self._summary_timer.timeout.connect(self._maybe_refresh_summary)
@@ -185,6 +190,7 @@ class AppController(QObject):
         self.llm_worker.error_occurred.connect(self.handle_llm_error)
         self.llm_worker.summary_finished.connect(self._handle_summary_response)
         self.llm_worker.summary_failed.connect(self._handle_summary_error)
+        self.llm_worker.usage_received.connect(self._handle_usage)
         self.llm_request_sent.connect(self.llm_worker.execute_request)
         self.summary_requested.connect(self.llm_worker.execute_summary_request)
 
@@ -829,7 +835,10 @@ class AppController(QObject):
         context_settings = self._summary_settings()
         if not context_settings.get("handoff_enabled", True):
             return
-        if self.thinking_timer.isActive() and not self._summary_force:
+        force = self._summary_force
+        if not force and time.monotonic() < self._summary_retry_at:
+            return
+        if self.thinking_timer.isActive() and not force:
             return
         provider_id, model_id = self._active_model_ids()
         if not provider_id or not model_id:
@@ -838,7 +847,6 @@ class AppController(QObject):
         meta = handoff.read_meta(context_dir) or self._handoff_meta
         ratio = context_settings.get(
             "summary_threshold_ratio", handoff.DEFAULT_THRESHOLD_RATIO)
-        force = self._summary_force
         if not handoff.needs_refresh(
                 self.session_events, provider_id, model_id, meta, self.session_file,
                 threshold_ratio=float(ratio or handoff.DEFAULT_THRESHOLD_RATIO),
@@ -894,6 +902,8 @@ class AppController(QObject):
         self._summary_pending = False
         if not context:
             return
+        self._summary_failures = 0
+        self._summary_retry_at = 0.0
         previous = handoff.read_summary(context["context_dir"])
         normalized = handoff.normalize_summary(text, fallback=previous)
         if not normalized:
@@ -913,11 +923,90 @@ class AppController(QObject):
             self._handoff_meta = handoff.read_meta(context["context_dir"])
             self._inject_handoff_into_current_agent()
         logging.info("Handoff summary updated (%d chars).", len(written))
+        if self._summary_force:
+            self._schedule_summary_refresh(force=True)
 
     def _handle_summary_error(self, message: str):
         self._summary_request_context = None
         self._summary_pending = False
-        logging.warning("Handoff summary update failed: %s", message)
+        self._summary_failures += 1
+        self._summary_force = False
+        delay = min(300.0, 15.0 * (2 ** min(self._summary_failures - 1, 4)))
+        self._summary_retry_at = time.monotonic() + delay
+        logging.warning(
+            "Handoff summary update failed (%d); retry in %.0fs: %s",
+            self._summary_failures, delay, message)
+
+    def record_provider_usage(self, usage: dict):
+        """Record usage reported by provider calls outside the LLM worker."""
+        self._handle_usage(usage)
+
+    def _maybe_warn_context_usage(self, usage: dict):
+        if not self.ui or self._context_warning_file == self.session_file:
+            return
+        total = int(usage.get("total") or 0)
+        if not total:
+            total = sum(int(usage.get(key) or 0) for key in
+                        ("input", "output", "reasoning", "cache_read", "cache_write"))
+        if not total:
+            return
+        provider_id = str(usage.get("provider") or "")
+        model_id = str(usage.get("model") or "")
+        if not provider_id or not model_id:
+            provider_id, model_id = self._active_model_ids()
+        if not provider_id or not model_id:
+            return
+        window = ModelMetadata.context_window(provider_id, model_id)
+        if not window:
+            return
+        ratio = total / window
+        if ratio < 0.8:
+            return
+        self._context_warning_file = self.session_file
+        self.ui.add_message(
+            f"<i>Context window is {ratio * 100:.0f}% full "
+            f"({total:,} / {window:,} tokens). Use Compact now in Project "
+            "context if the session starts losing detail.</i>")
+
+    def _handle_usage(self, usage: dict):
+        if not isinstance(usage, dict) or not usage:
+            return
+        purpose = str(usage.get("purpose") or "completion")
+        fields = {"purpose": purpose}
+        for key in ("provider", "model", "currency", "cost_source"):
+            value = usage.get(key)
+            if value:
+                fields[key] = str(value)
+        for key in ("input", "output", "reasoning", "cache_read", "cache_write",
+                    "total"):
+            value = usage.get(key)
+            if value is not None:
+                try:
+                    fields[key] = int(value)
+                except (TypeError, ValueError):
+                    continue
+        if usage.get("cost") is not None:
+            try:
+                fields["cost"] = float(usage["cost"])
+            except (TypeError, ValueError):
+                pass
+
+        if purpose == "completion":
+            self._maybe_warn_context_usage(fields)
+
+        target_session = self.session_file
+        if purpose == "summary" and self._summary_request_context:
+            target_session = (
+                self._summary_request_context.get("source_session")
+                or target_session
+            )
+        turn_id = "" if purpose == "summary" else (self.session_turn_id or "")
+        if target_session and target_session != self.session_file:
+            event = self.project_manager.make_event(
+                "usage", turn_id=turn_id, **fields) if self.project_manager else None
+            if event and self.project_manager.append_event(target_session, event) is not None:
+                return
+        self.append_session_event("usage", turn_id=turn_id, **fields)
 
     def _inject_handoff_into_current_agent(self):
         if self.session_mode == "chat":
@@ -2331,25 +2420,153 @@ class AppController(QObject):
         self.settings_window.raise_()
         self.settings_window.activateWindow()
 
+    def _context_stats_snapshot(self, summary: str = "") -> dict:
+        """Actual provider usage where available, estimates otherwise."""
+        if not self.session_events:
+            return {}
+        provider_id, model_id = self._active_model_ids()
+        if not provider_id or not model_id:
+            return {}
+        ratio = self._summary_settings().get(
+            "summary_threshold_ratio", handoff.DEFAULT_THRESHOLD_RATIO)
+        try:
+            ratio = float(ratio)
+        except (TypeError, ValueError):
+            ratio = handoff.DEFAULT_THRESHOLD_RATIO
+        return context_stats.build_session_stats(
+            self.session_events,
+            provider_id,
+            model_id,
+            summary_text=summary,
+            threshold_ratio=ratio,
+        )
+
+    def _context_stats_widget(self, parent, stats: dict):
+        group = QGroupBox("Context window", parent)
+        box = QVBoxLayout(group)
+        used = int(stats.get("context_tokens") or 0)
+        source = str(stats.get("context_source") or "estimated")
+        prefix = "" if source == "actual" else "~"
+        window = int(stats.get("window") or 0)
+        percent = float(stats.get("percent") or 0.0)
+        threshold = float(stats.get("threshold_ratio") or 0.0) * 100.0
+        threshold_tokens = int(stats.get("threshold_tokens") or 0)
+
+        bar = QProgressBar(group)
+        bar.setRange(0, 1000)
+        bar.setValue(min(1000, max(0, round(float(stats.get("ratio") or 0) * 1000))))
+        bar.setTextVisible(False)
+        box.addWidget(bar)
+
+        headline = QLabel(
+            f"<b>{prefix}{used:,} / {window:,} tokens ({percent:.1f}%)</b> · "
+            f"{source} · refresh threshold ~{threshold_tokens:,} ({threshold:.0f}%)",
+            group,
+        )
+        headline.setWordWrap(True)
+        box.addWidget(headline)
+
+        counts = stats.get("counts") or {}
+        box.addWidget(QLabel(
+            f"Events {int(counts.get('events') or 0):,} · "
+            f"messages {int(counts.get('messages') or 0):,} "
+            f"(user {int(counts.get('user_messages') or 0):,}, "
+            f"assistant {int(counts.get('assistant_messages') or 0):,}) · "
+            f"tool calls {int(counts.get('tool_calls') or 0):,} · "
+            f"results {int(counts.get('tool_results') or 0) + int(counts.get('job_results') or 0):,} · "
+            f"reasoning {int(counts.get('reasoning') or 0):,} · "
+            f"errors {int(counts.get('errors') or 0):,}",
+            group,
+        ))
+        breakdown = context_stats.format_breakdown(stats)
+        if breakdown:
+            box.addWidget(QLabel(f"Estimated tokens: {breakdown}", group))
+        box.addWidget(QLabel(
+            f"Estimated journal text: input ~{int(stats.get('estimated_input') or 0):,} · "
+            f"output ~{int(stats.get('estimated_output') or 0):,} · "
+            f"summary ~{int(stats.get('summary_tokens') or 0):,}",
+            group,
+        ))
+        usage_events = int(stats.get("usage_events") or 0)
+        if usage_events:
+            box.addWidget(QLabel(
+                f"Provider-reported: input {int(stats.get('actual_input') or 0):,} · "
+                f"output {int(stats.get('actual_output') or 0):,} · "
+                f"reasoning {int(stats.get('actual_reasoning') or 0):,} · "
+                f"cache read {int(stats.get('actual_cache_read') or 0):,} · "
+                f"cache write {int(stats.get('actual_cache_write') or 0):,}",
+                group,
+            ))
+            box.addWidget(QLabel(
+                f"Session total: {int(stats.get('actual_tokens') or 0):,} tokens "
+                f"across {usage_events:,} provider call(s)",
+                group,
+            ))
+        if stats.get("first_ts"):
+            box.addWidget(QLabel(
+                f"Session: {str(stats.get('first_ts'))[:19]} → "
+                f"{str(stats.get('last_ts'))[:19]}",
+                group,
+            ))
+        box.addWidget(QLabel(
+            f"Context source: {source} · "
+            f"{stats.get('provider_id') or '?'}::{stats.get('model_id') or '?'}",
+            group,
+        ))
+        cost_total = stats.get("cost_total")
+        if cost_total is not None:
+            currency = str(stats.get("currency") or "USD")
+            cost_source = str(stats.get("cost_source") or "provider")
+            if cost_source == "model_metadata":
+                source_label = "models.json pricing"
+            elif cost_source == "mixed":
+                source_label = "mixed sources"
+            else:
+                source_label = "provider-reported"
+            parts = [f"Cost: {currency} {float(cost_total):.6f} ({source_label})."]
+            latest_cost = stats.get("latest_cost")
+            if latest_cost is not None:
+                parts.append(
+                    f"Last request: {currency} {float(latest_cost):.6f}.")
+            cost_text = " ".join(parts)
+        else:
+            cost_text = (
+                "Cost: the provider did not report a price for this session "
+                "and models.json has no pricing for this model."
+            )
+        cost = QLabel(cost_text, group)
+        cost.setWordWrap(True)
+        box.addWidget(cost)
+        return group
+
     def _show_context_summary(self):
         context_dir = self._context_dir()
         summary = handoff.read_summary(context_dir) if context_dir else ""
         if not summary and self.session_events:
             summary = self._capture_handoff_summary()
-        if not summary:
+        stats = self._context_stats_snapshot(summary)
+        if not summary and not stats:
             QMessageBox.information(
                 self.ui.main_window, "Project context",
                 "No handoff summary has been recorded for this project yet.")
             return
         dialog = QDialog(self.ui.main_window)
         dialog.setWindowTitle("Project context")
-        dialog.resize(760, 600)
+        dialog.resize(760, 640)
         layout = QVBoxLayout(dialog)
-        browser = QTextBrowser(dialog)
-        browser.setOpenExternalLinks(False)
-        browser.setMarkdown(summary)
-        layout.addWidget(browser)
-        refresh_button = QPushButton("Refresh now", dialog)
+        if stats:
+            layout.addWidget(self._context_stats_widget(dialog, stats))
+        if summary:
+            browser = QTextBrowser(dialog)
+            browser.setOpenExternalLinks(False)
+            browser.setMarkdown(summary)
+            layout.addWidget(browser)
+        else:
+            layout.addWidget(QLabel(
+                "No handoff summary yet. It will be generated from the journal.",
+                dialog,
+            ))
+        refresh_button = QPushButton("Compact now", dialog)
         refresh_button.clicked.connect(
             lambda: (self._request_manual_summary_refresh(), dialog.accept()))
         layout.addWidget(refresh_button)
@@ -2365,7 +2582,7 @@ class AppController(QObject):
                 "There are no session events to summarize yet.")
             return
         self._schedule_summary_refresh(force=True)
-        self.ui.add_message("<i>Refreshing the project handoff summary…</i>")
+        self.ui.add_message("<i>Compacting the project context…</i>")
 
     def _show_session_journal(self):
         if not self.session_events:

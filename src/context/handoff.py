@@ -32,6 +32,11 @@ MIN_EVENTS_FOR_SUMMARY = 4
 MAX_PROMPT_CHARS = 40_000
 MAX_EVENT_CHARS = 2_400
 MAX_SUMMARY_CHARS = 16_000
+# opencode-style compaction: keep the recent tail intact, prune older tool
+# output to head/tail excerpts, and cap what one event may contribute.
+RECENT_TAIL_CHARS = 20_000
+RECENT_EVENT_MAX_CHARS = 12_000
+PRUNED_TOOL_OUTPUT_CHARS = 2_000
 
 _PATH_RE = re.compile(
     r"(?<![\w.-])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[\w.-]+[\\/])?"
@@ -118,14 +123,14 @@ def _clip(text, limit: int = MAX_EVENT_CHARS) -> str:
     return text[:head].rstrip() + " … " + text[-tail:].lstrip()
 
 
-def _event_line(event: dict) -> str:
+def _event_line(event: dict, limit: int = MAX_EVENT_CHARS) -> str:
     event_type = event.get("type")
     text = redact(event_text(event))
     if event_type == "message":
         role = str(event.get("role") or "message").upper()
-        return f"{role}: {_clip(text)}"
+        return f"{role}: {_clip(text, limit)}"
     if event_type == "reasoning":
-        return f"REASONING: {_clip(text)}"
+        return f"REASONING: {_clip(text, limit)}"
     if event_type == "tool_call":
         name = str(event.get("name") or "action")
         args = event.get("input") or {}
@@ -133,17 +138,22 @@ def _event_line(event: dict) -> str:
             args_text = json.dumps(args, ensure_ascii=False, sort_keys=True)
         except (TypeError, ValueError):
             args_text = str(args)
-        return f"ACTION {name}: {_clip(args_text)}"
+        return f"ACTION {name}: {_clip(args_text, limit)}"
     if event_type == "tool_result":
         name = str(event.get("name") or "tool")
         status = str(event.get("status") or "ok")
-        return f"RESULT {name} [{status}]: {_clip(text)}"
+        return f"RESULT {name} [{status}]: {_clip(text, limit)}"
     if event_type == "job_result":
         status = str(event.get("status") or "finished")
-        return f"JOB #{event.get('job_id', '?')} [{status}]: {_clip(text)}"
+        return f"JOB #{event.get('job_id', '?')} [{status}]: {_clip(text, limit)}"
     if event_type == "error":
-        return f"ERROR: {_clip(text or event.get('message', ''))}"
+        return f"ERROR: {_clip(text or event.get('message', ''), limit)}"
     return ""
+
+
+def event_line(event: dict) -> str:
+    """Public journal line shared by summarization and context statistics."""
+    return _event_line(event)
 
 
 def _split_sections(text: str) -> dict:
@@ -316,25 +326,48 @@ def normalize_summary(text: str, fallback: str = "") -> str:
     return result
 
 
-def _select_event_lines(events: list) -> str:
-    selected = []
+def _recent_boundary(events: list) -> int:
+    """Index from which events are kept verbatim (bounded recent tail)."""
     total = 0
-    for event in reversed(events or []):
-        line = _event_line(event)
+    boundary = len(events)
+    for index in range(len(events) - 1, -1, -1):
+        line = _event_line(events[index], RECENT_EVENT_MAX_CHARS)
         if not line:
             continue
-        if selected and total + len(line) > MAX_PROMPT_CHARS:
+        if total + len(line) > RECENT_TAIL_CHARS and boundary < len(events):
             break
-        selected.append(line)
         total += len(line) + 1
-    selected.reverse()
+        boundary = index
+    return boundary
+
+
+def _select_event_lines(events: list) -> str:
+    events = [event for event in (events or []) if isinstance(event, dict)]
+    boundary = _recent_boundary(events)
+    selected = []
+    for index, event in enumerate(events):
+        limit = RECENT_EVENT_MAX_CHARS if index >= boundary else MAX_EVENT_CHARS
+        if index < boundary and event.get("type") in ("tool_result", "job_result"):
+            limit = PRUNED_TOOL_OUTPUT_CHARS
+        line = _event_line(event, limit)
+        if line:
+            selected.append(line)
+
     first_user = next(
-        (_event_line(event) for event in events or []
+        (_event_line(event, RECENT_EVENT_MAX_CHARS) for event in events
          if event.get("type") == "message" and event.get("role") == "user"),
         "",
     )
     if first_user and first_user not in selected:
         selected.insert(0, first_user)
+
+    total = sum(len(line) + 1 for line in selected)
+    while selected and total > MAX_PROMPT_CHARS and len(selected) > 1:
+        if selected[0] == first_user:
+            removed = selected.pop(1)
+        else:
+            removed = selected.pop(0)
+        total -= len(removed) + 1
     return "\n".join(selected)
 
 
@@ -379,6 +412,28 @@ def build_summary_prompts(
     return system_prompt, user_prompt
 
 
+def _latest_completion_tokens(events: list) -> int:
+    for event in reversed(events or []):
+        if not isinstance(event, dict) or event.get("type") != "usage":
+            continue
+        if str(event.get("purpose") or "completion") != "completion":
+            continue
+        total = 0
+        try:
+            total = max(0, int(event.get("total") or 0))
+        except (TypeError, ValueError):
+            total = 0
+        if not total:
+            for key in ("input", "output", "reasoning", "cache_read", "cache_write"):
+                try:
+                    total += max(0, int(event.get(key) or 0))
+                except (TypeError, ValueError):
+                    continue
+        if total:
+            return total
+    return 0
+
+
 def needs_refresh(
     events: list,
     provider_id: str,
@@ -402,10 +457,16 @@ def needs_refresh(
     processed = int(meta.get("event_count") or 0) if same_session else 0
     if count <= processed:
         return False
-    if count < MIN_EVENTS_FOR_SUMMARY and not force:
-        return False
     if force:
         return True
+    threshold = float(threshold_ratio or DEFAULT_THRESHOLD_RATIO)
+    if provider_id and model_id:
+        actual = _latest_completion_tokens(events)
+        if actual:
+            window = context_usage(provider_id, model_id, "")["window"]
+            return bool(window and (actual / window) >= threshold)
+    if count < MIN_EVENTS_FOR_SUMMARY:
+        return False
     if not meta:
         return True
     if not provider_id or not model_id:
@@ -416,7 +477,7 @@ def needs_refresh(
         if line:
             lines.append(line)
     usage = context_usage(provider_id, model_id, "\n".join(lines))
-    return usage["ratio"] >= float(threshold_ratio or DEFAULT_THRESHOLD_RATIO)
+    return usage["ratio"] >= threshold
 
 
 def should_inject(meta: dict, session_file: str) -> bool:
