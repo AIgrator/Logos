@@ -2679,6 +2679,22 @@ class AppController(QObject):
                 self.ui.main_window, "Session journal",
                 "This session has no recorded events yet.")
             return
+        text = self._session_journal_text()
+        dialog = QDialog(self.ui.main_window)
+        dialog.setWindowTitle("Session journal")
+        dialog.resize(760, 600)
+        layout = QVBoxLayout(dialog)
+        browser = QTextBrowser(dialog)
+        browser.setOpenExternalLinks(False)
+        browser.setPlainText(text)
+        layout.addWidget(browser)
+        close_button = QPushButton("Close", dialog)
+        close_button.clicked.connect(dialog.accept)
+        layout.addWidget(close_button)
+        dialog.exec()
+
+    def _session_journal_text(self) -> str:
+        """Plain-text journal of every recorded session event."""
         lines = [
             f"Session: {os.path.basename(self.session_file or '(new)')}",
             f"Mode: {self.session_mode}",
@@ -2701,6 +2717,8 @@ class AppController(QObject):
                           f"[{event.get('status') or 'finished'}]\n{event_text(event)}")
             elif event_type == "error":
                 detail = str(event.get("message") or event_text(event))
+            elif event_type == "usage":
+                detail = self._usage_journal_detail(event)
             else:
                 detail = event_text(event)
             lines.append(f"[{stamp}] {event_type}\n{detail}\n")
@@ -2708,18 +2726,35 @@ class AppController(QObject):
         limit = 200_000
         if len(text) > limit:
             text = text[:limit] + "\n\n… [journal truncated for display]"
-        dialog = QDialog(self.ui.main_window)
-        dialog.setWindowTitle("Session journal")
-        dialog.resize(760, 600)
-        layout = QVBoxLayout(dialog)
-        browser = QTextBrowser(dialog)
-        browser.setOpenExternalLinks(False)
-        browser.setPlainText(text)
-        layout.addWidget(browser)
-        close_button = QPushButton("Close", dialog)
-        close_button.clicked.connect(dialog.accept)
-        layout.addWidget(close_button)
-        dialog.exec()
+        return text
+
+    @staticmethod
+    def _usage_journal_detail(event: dict) -> str:
+        """Token counts of one provider call, for the Session journal."""
+        parts = []
+        for key, label in (
+            ("input", "input"),
+            ("output", "output"),
+            ("reasoning", "reasoning"),
+            ("cache_read", "cache read"),
+            ("cache_write", "cache write"),
+            ("total", "total"),
+        ):
+            value = event.get(key)
+            if value is None:
+                continue
+            try:
+                parts.append(f"{label} {int(value):,}")
+            except (TypeError, ValueError):
+                continue
+        purpose = str(event.get("purpose") or "completion")
+        detail = f"{purpose}: " + (" · ".join(parts) or "no token counts")
+        source = "::".join(
+            str(value) for value in (event.get("provider"), event.get("model"))
+            if value)
+        if source:
+            detail += f"\nProvider: {source}"
+        return detail
 
     def _handle_pasted_image(self, image_bytes: bytes):
         """Handles a pasted image by adding its byte data as an attachment."""
