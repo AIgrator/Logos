@@ -235,6 +235,10 @@ class AppController(QObject):
         self.ui.project_create_requested.connect(self._handle_create_project)
         self.ui.session_open_requested.connect(self.open_session)
         self.ui.new_session_requested.connect(self.new_session)
+        self.ui.project_renamed.connect(self.rename_project)
+        self.ui.project_removed.connect(self.remove_project)
+        self.ui.session_renamed.connect(self.rename_session)
+        self.ui.session_deleted.connect(self.delete_session)
         self.ui.context_requested.connect(self._show_context_summary)
         self.ui.journal_requested.connect(self._show_session_journal)
         self.ui.home_requested.connect(self.ui.show_home)
@@ -1178,19 +1182,22 @@ class AppController(QObject):
         """Re-roots the indexer and the terminal/browser working directories."""
         self.project_root = os.path.abspath(root)
         self.working_directory = self.project_root
-        computers = [getattr(self, "computer", None)]
-        for handler in (getattr(self, "terminal_handler", None),
-                        getattr(self, "browser_handler", None)):
-            computers.append(getattr(handler, "computer", None))
-        for computer in computers:
-            if computer is not None:
-                computer.working_directory = self.project_root
+        for computer in self._project_computers():
+            computer.working_directory = self.project_root
         try:
             if self.indexer is not None:
                 self.indexer.stop()
         except Exception as e:
             logging.warning(f"Indexer stop during project switch failed: {e}")
         self.indexer = Indexer(self.project_root)
+
+    def _project_computers(self) -> list:
+        """Computers whose working directory follows the active project."""
+        computers = [getattr(self, "computer", None)]
+        for handler in (getattr(self, "terminal_handler", None),
+                        getattr(self, "browser_handler", None)):
+            computers.append(getattr(handler, "computer", None))
+        return [computer for computer in computers if computer is not None]
         self.indexer.is_active_cb = lambda: self.state == ControllerState.TERMINAL
         self.indexer.index_updated.connect(self._on_index_updated)
         self.last_search_query = None
@@ -1287,6 +1294,117 @@ class AppController(QObject):
             return
         self.switch_project(root, session_file=session_path, announce=False)
         self.ui.add_message("<i>Opened saved session.</i>", force_scroll=True)
+
+    def rename_project(self, path: str, new_name: str):
+        """Stores a custom project name; the folder on disk keeps its name."""
+        if self.project_manager is None or not path:
+            return
+        try:
+            name = self.project_manager.rename_project(path, new_name)
+        except Exception as e:
+            self._report_project_error(f"Could not rename the project: {e}")
+            return
+        if not name:
+            return
+        if self.project_root and os.path.abspath(path) == self.project_root:
+            self.ui.set_project_name(name, self.project_root)
+        self.ui.refresh_project_views()
+
+    def remove_project(self, path: str, delete_data: bool = False):
+        """Removes a project from the list; the project folder itself stays."""
+        if self.project_manager is None or not path:
+            return
+        target = os.path.abspath(path)
+        is_active = bool(self.project_root) and target == self.project_root
+        if is_active:
+            self._stop_active_work()
+            self._persist_session()
+        try:
+            self.project_manager.remove_project(target, delete_data=delete_data)
+        except Exception as e:
+            self._report_project_error(f"Could not remove the project: {e}")
+            return
+        if is_active:
+            self.project_root = ""
+            self.working_directory = ""
+            self.session_file = ""
+            self.session_events = []
+            self._session_event_count = 0
+            self._persisted_message_count = 0
+            self.conversation_history.clear()
+            self.pending_attachments.clear()
+            for computer in self._project_computers():
+                try:
+                    computer.working_directory = ""
+                except Exception:
+                    pass
+            try:
+                if self.indexer is not None:
+                    self.indexer.stop()
+            except Exception as e:
+                logging.warning(f"Indexer stop after project removal failed: {e}")
+            self.indexer = None
+            try:
+                self.ui.clear_chat()
+                self.ui.clear_thumbnails()
+                self._update_attachment_menu()
+            except Exception as e:
+                logging.warning(f"Could not clear the UI after removing the project: {e}")
+            self.ui.show_home()
+        self.ui.refresh_project_views()
+
+    def rename_session(self, path: str, new_title: str):
+        """Stores a custom session title in the session header."""
+        if self.project_manager is None or not path:
+            return
+        try:
+            renamed = self.project_manager.set_session_title(path, new_title)
+        except Exception as e:
+            self._report_project_error(f"Could not rename the session: {e}")
+            return
+        if not renamed:
+            self._report_project_error("The session title could not be saved.")
+            return
+        self.ui.refresh_project_views()
+
+    def delete_session(self, path: str):
+        """Deletes a session file; the open one is replaced with an empty one."""
+        if self.project_manager is None or not path:
+            return
+        target = os.path.abspath(path)
+        is_open = bool(self.session_file) and target == os.path.abspath(self.session_file)
+        if is_open:
+            self._stop_active_work()
+        try:
+            deleted = self.project_manager.delete_session(target)
+        except Exception as e:
+            self._report_project_error(f"Could not delete the session: {e}")
+            return
+        if not deleted:
+            self._report_project_error("The session file could not be deleted.")
+            return
+        if is_open:
+            self.session_file = ""
+            self.session_events = []
+            self._session_event_count = 0
+            self._persisted_message_count = 0
+            self.conversation_history.clear()
+            self.pending_attachments.clear()
+            try:
+                self.ui.clear_chat()
+                self.ui.clear_thumbnails()
+                self._update_attachment_menu()
+            except Exception as e:
+                logging.warning(f"Could not clear the UI after deleting the session: {e}")
+            if self.project_root:
+                try:
+                    self._create_new_session(self.session_mode)
+                except Exception as e:
+                    logging.warning(f"Could not start a session after deleting another: {e}")
+                self.ui.add_message(
+                    "<i>The session was deleted. A new empty session was started.</i>",
+                    force_scroll=True)
+        self.ui.refresh_project_views()
 
     def new_session(self):
         """Starts an empty session in the active project."""

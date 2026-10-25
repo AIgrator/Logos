@@ -34,11 +34,13 @@ workspace, projects and sessions are reached through the collapsible left sideba
 Clicking a recent session opens its project and that exact session. Per-project data
 lives in `<project>/.logos/`:
 
-- `project.json` - id, name, timestamps
+- `project.json` - id, name, timestamps. `name` may be a custom display name set
+  from the project context menu; the folder itself is never renamed.
 - `sessions/` - one append-only JSONL file per session; the first line is a
-  `session` header (`schema_version`, `id`, `mode`) and later lines are typed
-  events (`message`, `reasoning`, `tool_call`, `tool_result`, `job_result`,
-  `usage`, `error`). `usage` events carry normalized provider token counts
+  `session` header (`schema_version`, `id`, `mode`, optional `title`) and later
+  lines are typed events (`message`, `reasoning`, `tool_call`, `tool_result`,
+  `job_result`, `usage`, `error`). `usage` events carry normalized provider token
+  counts
   (input/output/reasoning/cache/total); they are counted in context statistics
   but never replayed as chat text. No prices are stored or computed. Credentials
   are redacted before events are written. The newest is

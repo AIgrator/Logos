@@ -1,13 +1,17 @@
 """Home screen and project sidebar (opencode-style navigation)."""
+import logging
 import os
+import subprocess
+import sys
 import zlib
 from datetime import date, datetime, timedelta
 
 import qtawesome as qta
-from PySide6.QtCore import QSize, Qt, Signal
-from PySide6.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import (QHBoxLayout, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMenu, QPushButton, QVBoxLayout,
+from PySide6.QtCore import QSize, Qt, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QInputDialog, QLabel,
+                               QLineEdit, QListWidget, QListWidgetItem,
+                               QMessageBox, QMenu, QPushButton, QVBoxLayout,
                                QWidget)
 
 
@@ -56,7 +60,102 @@ def _truncate(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 3].rstrip() + "..."
 
 
-class HomePage(QWidget):
+def _reveal_in_explorer(path: str) -> None:
+    """Opens the folder, or selects a file, in the system file manager."""
+    target = os.path.normpath(path or "")
+    if not target or not os.path.exists(target):
+        return
+    try:
+        if sys.platform.startswith("win") and os.path.isfile(target):
+            # explorer /select needs the comma glued to the path; its exit
+            # code is 1 even on success, so it is not checked.
+            subprocess.Popen(["explorer", f"/select,{target}"])
+            return
+        folder = target if os.path.isdir(target) else os.path.dirname(target)
+        QDesktopServices.openUrl(QUrl.fromLocalFile(folder))
+    except Exception as exc:
+        logging.warning(f"Could not open the file manager for {path}: {exc}")
+
+
+def _ask_project_name(parent, current: str) -> str:
+    name, ok = QInputDialog.getText(
+        parent, "Rename Project", "Project name:", text=current or "")
+    if not ok:
+        return ""
+    name = " ".join((name or "").split())
+    return "" if name == current else name
+
+
+def _confirm_project_removal(parent, name: str) -> tuple:
+    """Returns ``(confirmed, delete_data)``."""
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Warning)
+    box.setWindowTitle("Remove Project")
+    box.setText(f'Remove "{name}" from the project list?')
+    box.setInformativeText("The project folder itself is not deleted.")
+    delete_data = QCheckBox(
+        "Also delete the .logos folder (sessions, context, attachments)")
+    box.setCheckBox(delete_data)
+    box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+    box.setDefaultButton(QMessageBox.Cancel)
+    confirmed = box.exec() == QMessageBox.Yes
+    return confirmed, bool(delete_data.isChecked())
+
+
+def _ask_session_title(parent, current: str) -> str:
+    title, ok = QInputDialog.getText(
+        parent, "Rename Session", "Session title:", text=current or "")
+    if not ok:
+        return ""
+    title = " ".join((title or "").split())
+    return "" if title == current else title
+
+
+def _confirm_session_deletion(parent, title: str) -> bool:
+    box = QMessageBox(parent)
+    box.setIcon(QMessageBox.Warning)
+    box.setWindowTitle("Delete Session")
+    box.setText(f'Delete "{_truncate(title or "this session", 60)}"?')
+    box.setInformativeText("This cannot be undone.")
+    box.setStandardButtons(QMessageBox.Yes | QMessageBox.Cancel)
+    box.setDefaultButton(QMessageBox.Cancel)
+    return box.exec() == QMessageBox.Yes
+
+
+class _ProjectMenuMixin:
+    """Right-click menu shared by the home screen and the sidebar list."""
+
+    def _project_name(self, path: str) -> str:
+        for project in self._projects:
+            if project.get("path") == path:
+                return project.get("name") or os.path.basename(path)
+        return os.path.basename(path.rstrip("\\/")) or path
+
+    def _show_project_item_menu(self, pos):
+        item = self.project_list.itemAt(pos)
+        path = item.data(Qt.UserRole) if item is not None else ""
+        if not path:
+            return
+        menu = QMenu(self)
+        rename_action = menu.addAction("Rename...")
+        reveal_action = menu.addAction("Show in Explorer")
+        menu.addSeparator()
+        remove_action = menu.addAction("Remove Project...")
+        chosen = menu.exec(self.project_list.viewport().mapToGlobal(pos))
+        if chosen is rename_action:
+            name = _ask_project_name(self, self._project_name(path))
+            if name:
+                self.project_renamed.emit(path, name)
+        elif chosen is reveal_action:
+            _reveal_in_explorer(path)
+        elif chosen is remove_action:
+            confirmed, delete_data = _confirm_project_removal(
+                self, self._project_name(path))
+            if confirmed:
+                self.project_removed.emit(path, delete_data)
+
+
+class HomePage(_ProjectMenuMixin, QWidget):
     """Start screen: projects on the left, recent sessions on the right."""
 
     project_selected = Signal(str)
@@ -65,6 +164,10 @@ class HomePage(QWidget):
     open_project_requested = Signal()
     new_session_requested = Signal()
     settings_requested = Signal()
+    project_renamed = Signal(str, str)   # project path, new name
+    project_removed = Signal(str, bool)  # project path, delete .logos data
+    session_renamed = Signal(str, str)   # session path, new title
+    session_deleted = Signal(str)        # session path
 
     def __init__(self, project_manager, theme_manager, parent=None):
         super().__init__(parent)
@@ -126,6 +229,9 @@ class HomePage(QWidget):
         self.project_list = QListWidget()
         self.project_list.setIconSize(QSize(26, 26))
         self.project_list.itemClicked.connect(self._on_project_clicked)
+        self.project_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.project_list.customContextMenuRequested.connect(
+            self._show_project_item_menu)
         left_layout.addWidget(self.project_list, 1)
         body.addWidget(left)
 
@@ -146,6 +252,9 @@ class HomePage(QWidget):
         self.session_list = QListWidget()
         self.session_list.setIconSize(QSize(24, 24))
         self.session_list.itemClicked.connect(self._on_session_clicked)
+        self.session_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.session_list.customContextMenuRequested.connect(
+            self._show_session_item_menu)
         right_layout.addWidget(self.session_list, 1)
         body.addWidget(right, 1)
 
@@ -271,8 +380,39 @@ class HomePage(QWidget):
         if path:
             self.session_selected.emit(path)
 
+    # -------------------------------------------------- session context menu
+    def _session_info(self, path: str) -> dict:
+        for session in self._sessions:
+            if session.get("path") == path:
+                return session
+        return {}
 
-class ProjectSidebar(QWidget):
+    def _show_session_item_menu(self, pos):
+        item = self.session_list.itemAt(pos)
+        path = item.data(Qt.UserRole) if item is not None else ""
+        if not path:
+            return
+        menu = QMenu(self)
+        rename_action = menu.addAction("Rename...")
+        reveal_action = menu.addAction("Show in Explorer")
+        menu.addSeparator()
+        delete_action = menu.addAction("Delete Session...")
+        chosen = menu.exec(self.session_list.viewport().mapToGlobal(pos))
+        if chosen is rename_action:
+            info = self._session_info(path)
+            current = info.get("title") or "Empty session"
+            title = _ask_session_title(self, current)
+            if title:
+                self.session_renamed.emit(path, title)
+        elif chosen is reveal_action:
+            _reveal_in_explorer(path)
+        elif chosen is delete_action:
+            info = self._session_info(path)
+            if _confirm_session_deletion(self, info.get("title") or ""):
+                self.session_deleted.emit(path)
+
+
+class ProjectSidebar(_ProjectMenuMixin, QWidget):
     """Collapsible workspace sidebar: Home, projects, new chat, settings."""
 
     home_requested = Signal()
@@ -283,6 +423,8 @@ class ProjectSidebar(QWidget):
     context_requested = Signal()
     journal_requested = Signal()
     settings_requested = Signal()
+    project_renamed = Signal(str, str)   # project path, new name
+    project_removed = Signal(str, bool)  # project path, delete .logos data
 
     EXPANDED_WIDTH = 238
     COLLAPSED_WIDTH = 58
@@ -331,6 +473,9 @@ class ProjectSidebar(QWidget):
         self.project_list = QListWidget()
         self.project_list.setIconSize(QSize(24, 24))
         self.project_list.itemClicked.connect(self._on_project_clicked)
+        self.project_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.project_list.customContextMenuRequested.connect(
+            self._show_project_item_menu)
         root.addWidget(self.project_list, 1)
 
         self.add_button = QPushButton("New project")

@@ -9,6 +9,7 @@ application settings file; everything project-specific stays portable.
 import json
 import logging
 import os
+import shutil
 import sys
 import time
 import uuid
@@ -172,9 +173,7 @@ class ProjectManager:
         return bool(path) and _same_path(path, APP_DIR)
 
     def get_active_name(self) -> str:
-        if not self._active_root:
-            return ""
-        return os.path.basename(self._active_root.rstrip("\\/")) or self._active_root
+        return self.project_display_name(self._active_root)
 
     def recent_projects(self) -> list:
         return list(self._recent)
@@ -183,6 +182,24 @@ class ProjectManager:
     @staticmethod
     def project_dir(root: str) -> str:
         return os.path.join(root, PROJECT_DIRNAME)
+
+    @staticmethod
+    def _read_project_meta(root: str) -> dict:
+        meta_path = os.path.join(root, PROJECT_DIRNAME, PROJECT_META_FILE)
+        try:
+            with open(meta_path, encoding="utf-8") as fh:
+                meta = json.load(fh) or {}
+        except Exception:
+            return {}
+        return meta if isinstance(meta, dict) else {}
+
+    def project_display_name(self, root: str = "") -> str:
+        """Custom project name from ``project.json`` (folder name as fallback)."""
+        root = _clean_path(root) or self._active_root
+        if not root:
+            return ""
+        name = str(self._read_project_meta(root).get("name") or "").strip()
+        return name or os.path.basename(root.rstrip("\\/")) or root
 
     def sessions_dir(self, root: str = "") -> str:
         root = root or self._active_root
@@ -243,7 +260,7 @@ class ProjectManager:
         if not isinstance(meta, dict):
             meta = {}
         meta.setdefault("id", uuid.uuid4().hex)
-        meta["name"] = os.path.basename(root.rstrip("\\/")) or root
+        meta.setdefault("name", os.path.basename(root.rstrip("\\/")) or root)
         meta.setdefault("created_at", _now_iso())
         meta["path"] = root
         meta["last_opened"] = _now_iso()
@@ -259,6 +276,29 @@ class ProjectManager:
         logging.info(f"Active project set to: {root}")
         return meta
 
+    def rename_project(self, path: str, new_name: str) -> str:
+        """Stores a custom display name without touching the project folder."""
+        root = _clean_path(path)
+        name = " ".join(str(new_name or "").split())
+        if not root or not os.path.isdir(root):
+            raise ValueError("Project folder not found.")
+        if not name:
+            raise ValueError("The project name cannot be empty.")
+        logos_dir = self.project_dir(root)
+        os.makedirs(logos_dir, exist_ok=True)
+        meta = self._read_project_meta(root)
+        meta.setdefault("id", uuid.uuid4().hex)
+        meta["name"] = name
+        meta.setdefault("created_at", _now_iso())
+        meta["path"] = root
+        meta["last_opened"] = meta.get("last_opened") or _now_iso()
+        self._write_json_atomic(os.path.join(logos_dir, PROJECT_META_FILE), meta)
+        for item in self._recent:
+            if item.get("path") == root:
+                item["name"] = name
+        self._persist()
+        return name
+
     def _touch_recent(self, root: str, name: str):
         entry = {"path": root, "name": name, "last_opened": _now_iso()}
         self._recent = [item for item in self._recent if item.get("path") != root]
@@ -272,6 +312,22 @@ class ProjectManager:
             self._active_root = ""
         if persist:
             self._persist()
+
+    def remove_project(self, path: str, delete_data: bool = False,
+                       persist: bool = True):
+        """Drops a project from the list; optionally deletes its ``.logos`` data.
+
+        The project folder itself (the user's own files) is never touched.
+        """
+        root = _clean_path(path)
+        if not root:
+            return
+        if delete_data:
+            logos_dir = self.project_dir(root)
+            if os.path.isdir(logos_dir):
+                shutil.rmtree(logos_dir)
+                logging.info(f"Deleted project data: {logos_dir}")
+        self.forget_project(root, persist=persist)
 
     def resolve_startup_project(self, candidate: str = "") -> str:
         """Return a usable project root for startup, or "" when the user must
@@ -364,6 +420,69 @@ class ProjectManager:
             return False
         return True
 
+    def set_session_title(self, path: str, title: str) -> bool:
+        """Stores a custom session title in the session header.
+
+        The whole JSONL file is rewritten atomically; malformed lines abort the
+        update instead of being silently dropped. Legacy JSON sessions store the
+        title in the same top-level object.
+        """
+        text = " ".join(str(title or "").split())
+        if not text or not path or not os.path.isfile(path):
+            return False
+        if path.endswith(LEGACY_SESSION_EXT):
+            try:
+                with open(path, encoding="utf-8") as fh:
+                    data = json.load(fh)
+            except Exception as exc:
+                logging.warning(f"Could not read session {path}: {exc}")
+                return False
+            if not isinstance(data, dict):
+                return False
+            data["title"] = text
+            data["title_updated_at"] = _now_iso()
+            try:
+                self._write_json_atomic(path, data)
+            except Exception as exc:
+                logging.warning(f"Could not update session title {path}: {exc}")
+                return False
+            return True
+        if not path.endswith(SESSION_EXT):
+            return False
+        try:
+            with open(path, encoding="utf-8") as fh:
+                records = [json.loads(line) for line in fh if line.strip()]
+        except Exception as exc:
+            logging.warning(f"Could not read session {path}: {exc}")
+            return False
+        if not records or not isinstance(records[0], dict):
+            return False
+        header = records[0]
+        if header.get("type") != "session":
+            return False
+        header["title"] = text
+        header["title_updated_at"] = _now_iso()
+        try:
+            self._write_jsonl_atomic(path, records)
+        except Exception as exc:
+            logging.warning(f"Could not update session title {path}: {exc}")
+            return False
+        return True
+
+    def delete_session(self, path: str) -> bool:
+        """Deletes one session file. Never touches the project folder."""
+        if not path or not os.path.isfile(path):
+            return False
+        if not path.endswith((SESSION_EXT, LEGACY_SESSION_EXT)):
+            return False
+        try:
+            os.remove(path)
+        except OSError as exc:
+            logging.warning(f"Could not delete session {path}: {exc}")
+            return False
+        logging.info(f"Deleted session: {path}")
+        return True
+
     def latest_session_file(self, root: str = "") -> str:
         sessions = self.sessions_dir(root)
         try:
@@ -404,8 +523,8 @@ class ProjectManager:
             result.append({
                 "path": path,
                 "project_root": root,
-                "project_name": os.path.basename(root.rstrip("\\/")) or root,
-                "title": _session_title(messages),
+                "project_name": self.project_display_name(root),
+                "title": data.get("title") or _session_title(messages),
                 "message_count": len(messages),
                 "mode": data.get("mode") or "chat",
                 "mtime": mtime,
@@ -475,6 +594,7 @@ class ProjectManager:
             "id": header.get("id") or os.path.splitext(os.path.basename(path))[0],
             "mode": header.get("mode") or "chat",
             "created_at": header.get("created_at") or "",
+            "title": header.get("title") or "",
             "messages": messages,
             "events": events,
         }
@@ -486,7 +606,7 @@ class ProjectManager:
         except Exception as exc:
             logging.warning(f"Could not load legacy session {path}: {exc}")
             return {"path": path, "id": "", "mode": "chat", "created_at": "",
-                    "messages": [], "events": []}
+                    "title": "", "messages": [], "events": []}
         if not isinstance(data, dict):
             data = {}
         raw_messages = data.get("messages")
@@ -509,6 +629,7 @@ class ProjectManager:
             "id": data.get("id") or os.path.splitext(os.path.basename(path))[0],
             "mode": data.get("mode") or "chat",
             "created_at": data.get("created_at") or "",
+            "title": data.get("title") or "",
             "messages": [m for m in (self._message_from_event(e) for e in events)
                          if m is not None],
             "events": events,
@@ -517,7 +638,7 @@ class ProjectManager:
     def load_session_data(self, path: str) -> dict:
         if not path or not os.path.exists(path):
             return {"path": path, "id": "", "mode": "chat", "created_at": "",
-                    "messages": [], "events": []}
+                    "title": "", "messages": [], "events": []}
         if path.endswith(SESSION_EXT):
             return self._load_jsonl_session(path)
         return self._load_legacy_session(path)
