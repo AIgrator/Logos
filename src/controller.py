@@ -973,7 +973,7 @@ class AppController(QObject):
             return
         purpose = str(usage.get("purpose") or "completion")
         fields = {"purpose": purpose}
-        for key in ("provider", "model", "currency", "cost_source"):
+        for key in ("provider", "model"):
             value = usage.get(key)
             if value:
                 fields[key] = str(value)
@@ -985,11 +985,6 @@ class AppController(QObject):
                     fields[key] = int(value)
                 except (TypeError, ValueError):
                     continue
-        if usage.get("cost") is not None:
-            try:
-                fields["cost"] = float(usage["cost"])
-            except (TypeError, ValueError):
-                pass
 
         if purpose == "completion":
             self._maybe_warn_context_usage(fields)
@@ -2513,30 +2508,6 @@ class AppController(QObject):
             f"{stats.get('provider_id') or '?'}::{stats.get('model_id') or '?'}",
             group,
         ))
-        cost_total = stats.get("cost_total")
-        if cost_total is not None:
-            currency = str(stats.get("currency") or "USD")
-            cost_source = str(stats.get("cost_source") or "provider")
-            if cost_source == "model_metadata":
-                source_label = "models.json pricing"
-            elif cost_source == "mixed":
-                source_label = "mixed sources"
-            else:
-                source_label = "provider-reported"
-            parts = [f"Cost: {currency} {float(cost_total):.6f} ({source_label})."]
-            latest_cost = stats.get("latest_cost")
-            if latest_cost is not None:
-                parts.append(
-                    f"Last request: {currency} {float(latest_cost):.6f}.")
-            cost_text = " ".join(parts)
-        else:
-            cost_text = (
-                "Cost: the provider did not report a price for this session "
-                "and models.json has no pricing for this model."
-            )
-        cost = QLabel(cost_text, group)
-        cost.setWordWrap(True)
-        box.addWidget(cost)
         return group
 
     def _show_context_summary(self):

@@ -417,9 +417,6 @@ class CuaTurnWorker(QThread):
             t0 = time.perf_counter()
             turn = self._provider.computer_use_turn(**protocol)
             took = round(time.perf_counter() - t0, 1)
-            apply_pricing = getattr(self._provider, "apply_model_pricing", None)
-            if callable(apply_pricing):
-                apply_pricing()
             usage = getattr(self._provider, "last_usage", None)
             if usage:
                 payload = dict(usage)

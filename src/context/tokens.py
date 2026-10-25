@@ -103,30 +103,6 @@ class ModelMetadata:
         mods = cls.get(provider_id, model_id).get("input_modalities")
         return list(mods) if isinstance(mods, (list, tuple)) else []
 
-    @classmethod
-    def pricing(cls, provider_id: str, model_id: str) -> dict:
-        """Optional USD prices per million tokens from ``models.json``.
-
-        Recognized keys: ``input_cost_per_mtok``, ``output_cost_per_mtok``,
-        ``cache_read_cost_per_mtok`` and ``cache_write_cost_per_mtok``.
-        Missing cache prices fall back to the input price.
-        """
-        info = cls.get(provider_id, model_id)
-        prices = {}
-        for key in (
-            "input_cost_per_mtok",
-            "output_cost_per_mtok",
-            "cache_read_cost_per_mtok",
-            "cache_write_cost_per_mtok",
-        ):
-            try:
-                value = float(info.get(key))
-            except (TypeError, ValueError):
-                continue
-            if value >= 0:
-                prices[key] = value
-        return prices
-
 
 def context_usage(provider_id: str, model_id: str, text: str) -> dict:
     """Estimated context usage of ``text`` for a given model.

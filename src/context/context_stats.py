@@ -5,8 +5,8 @@ context size (latest completion) and session totals. Sessions recorded before
 usage capture, or providers that report no usage, fall back to estimates
 derived from the same journal lines the handoff threshold uses.
 
-Cost is only shown when a provider reports it or when ``models.json`` carries
-optional per-million-token prices; this module never invents a price.
+Only tokens are reported. Money is deliberately not computed: providers report
+prices inconsistently, so Logos never invents a cost.
 """
 from __future__ import annotations
 
@@ -48,12 +48,7 @@ def _aggregate_usage(events: list) -> dict:
     totals = {"input": 0, "output": 0, "reasoning": 0,
               "cache_read": 0, "cache_write": 0}
     latest_tokens = 0
-    latest_cost = None
-    last_cost_source = ""
-    cost_total = None
     session_total = 0
-    currencies = set()
-    cost_sources = set()
     for event in events:
         tokens = {key: _to_int(event.get(key)) for key in totals}
         for key, value in tokens.items():
@@ -61,45 +56,10 @@ def _aggregate_usage(events: list) -> dict:
         event_total = _to_int(event.get("total")) or sum(tokens.values())
         session_total += event_total
         purpose = str(event.get("purpose") or "completion")
-        cost = event.get("cost")
         if purpose == "completion" and event_total:
             latest_tokens = event_total
-            latest_cost = None
-            last_cost_source = ""
-            if cost is not None:
-                try:
-                    latest_cost = float(cost)
-                except (TypeError, ValueError):
-                    latest_cost = None
-            if latest_cost is not None:
-                last_cost_source = str(
-                    event.get("cost_source") or "provider")
-        if cost is not None:
-            try:
-                cost_total = (cost_total or 0.0) + float(cost)
-            except (TypeError, ValueError):
-                pass
-            cost_sources.add(str(event.get("cost_source") or "provider"))
-        currency = str(event.get("currency") or "")
-        if currency:
-            currencies.add(currency)
     totals["total"] = session_total
     totals["latest_tokens"] = latest_tokens
-    totals["latest_cost"] = latest_cost
-    totals["latest_cost_source"] = last_cost_source
-    totals["cost"] = cost_total
-    if len(cost_sources) == 1:
-        totals["cost_source"] = next(iter(cost_sources))
-    elif len(cost_sources) > 1:
-        totals["cost_source"] = "mixed"
-    else:
-        totals["cost_source"] = ""
-    if len(currencies) == 1:
-        totals["currency"] = next(iter(currencies))
-    elif len(currencies) > 1:
-        totals["currency"] = "mixed"
-    else:
-        totals["currency"] = ""
     return totals
 
 
@@ -193,11 +153,6 @@ def build_session_stats(
         "actual_cache_write": actual["cache_write"],
         "actual_tokens": actual["total"],
         "usage_events": len(usage_events),
-        "cost_total": actual["cost"],
-        "latest_cost": actual["latest_cost"],
-        "latest_cost_source": actual["latest_cost_source"],
-        "cost_source": actual["cost_source"],
-        "currency": actual["currency"],
         "estimated_used": estimated_used,
         "estimated_input": (groups["user"] + groups["system"]
                             + groups["tool_result"] + groups["error"]

@@ -100,9 +100,6 @@ class LLMWorker(QObject):
 
     def _emit_usage(self, purpose: str = "completion", provider=None) -> None:
         provider = provider or self.provider
-        apply_pricing = getattr(provider, "apply_model_pricing", None)
-        if callable(apply_pricing):
-            apply_pricing()
         usage = getattr(provider, "last_usage", None)
         if not usage:
             return
