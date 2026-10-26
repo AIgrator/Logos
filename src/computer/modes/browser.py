@@ -1,3 +1,5 @@
+from functools import wraps
+
 from src.computer.tools.browser.actions import (
     browser_click,
     browser_close,
@@ -17,6 +19,45 @@ from src.computer.tools.browser.actions import (
 )
 from src.computer.tools.common.communicate_to_user import communicate_to_user
 from src.computer.tools.common.finish import finish
+from src.computer.tools.terminal.fs.list_directory import list_directory
+from src.computer.tools.terminal.fs.read_files import read_files
+from src.computer.tools.terminal.fs.search_file_content import search_file_content
+
+
+def _tolerant_fs_tool(tool):
+    """Browser's flat strict schema lists every tool's argument as required.
+
+    Drop keys that do not belong to this tool (and null optionals) before
+    calling the shared filesystem implementation, which has a strict signature.
+    """
+    allowed = tuple(
+        (getattr(tool, "__tool_meta__", {}).get("tool", {}).get("arguments") or {})
+        .keys())
+
+    @wraps(tool)
+    def wrapper(self, **kwargs):
+        filtered = {
+            name: value for name, value in kwargs.items()
+            if name in allowed and value is not None
+        }
+        return tool(self, **filtered)
+
+    return wrapper
+
+
+def _browser_read_files(tool):
+    """read_files accepts a list; the flat browser schema also exposes `path`."""
+    @wraps(tool)
+    def wrapper(self, **kwargs):
+        paths = kwargs.get("paths")
+        if not paths and kwargs.get("path"):
+            paths = [kwargs["path"]]
+        if isinstance(paths, str):
+            paths = [paths]
+        return tool(self, paths=paths)
+
+    return wrapper
+
 
 TOOLS_METADATA = {
     "browser_goto": browser_goto,
@@ -34,6 +75,9 @@ TOOLS_METADATA = {
     "browser_tabs": browser_tabs,
     "browser_handle_dialog": browser_handle_dialog,
     "browser_close": browser_close,
+    "read_files": _browser_read_files(read_files),
+    "list_directory": _tolerant_fs_tool(list_directory),
+    "search_file_content": _tolerant_fs_tool(search_file_content),
     "communicate_to_user": communicate_to_user,
     "finish": finish,
 }

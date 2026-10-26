@@ -141,6 +141,7 @@ Vision mode does not use a local tool manifest. Actions come from the provider's
 *   **Navigation**: `browser_goto`, `browser_navigate_back`, `browser_tabs`, `browser_close`.
 *   **Observation**: `browser_snapshot` (numbered element refs), `browser_screenshot` (with ref badges), `browser_read`, `browser_find`.
 *   **Interaction**: `browser_click`, `browser_fill`, `browser_select_option`, `browser_hover`, `browser_press`, `browser_handle_dialog`, `browser_wait_for`.
+*   **Attachments**: `read_files`, `list_directory`, `search_file_content` (read-only filesystem access for files attached by reference).
 *   **User Interaction**: `communicate_to_user`, `finish`.
 
 ---

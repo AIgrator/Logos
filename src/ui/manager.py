@@ -277,7 +277,6 @@ class UIManager(QWidget):
     project_removed = Signal(str, bool)
     session_open_requested = Signal(str)
     session_renamed = Signal(str, str)
-    session_objective_changed = Signal(str, str)
     session_deleted = Signal(str)
     new_session_requested = Signal()
     context_requested = Signal()
@@ -364,8 +363,6 @@ class UIManager(QWidget):
         self.home_page.project_renamed.connect(self.project_renamed.emit)
         self.home_page.project_removed.connect(self.project_removed.emit)
         self.home_page.session_renamed.connect(self.session_renamed.emit)
-        self.home_page.session_objective_changed.connect(
-            self.session_objective_changed.emit)
         self.home_page.session_deleted.connect(self.session_deleted.emit)
         self.sidebar.home_requested.connect(self.home_requested.emit)
         self.sidebar.project_selected.connect(self.project_switch_requested.emit)

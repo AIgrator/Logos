@@ -51,7 +51,7 @@ The application is a PySide6 desktop assistant with four modes — Chat, Termina
 | Browser | `BaseAgentHandler` | `browser_tool_code` | `BrowserExecWorker` + Playwright | non-streaming, one action per turn |
 | Vision | `BaseAgentHandler` discipline + CUA tail | provider-native Computer Use | `CuaTurnWorker` per turn; pynput/mss performers | non-streaming protocol turns |
 
-Chat, Terminal and Browser messages enter through `AppController.handle_user_input()`; mode-specific attachments are prepared before dispatch. A session is mode-locked: switching mode in a non-empty session starts a new session, while switching in an empty session rewrites only the header.
+Chat, Terminal and Browser messages enter through `AppController.handle_user_input()`; attachments are journaled and turned into a model-facing reference block before dispatch (Chat inlines text-file contents once because it has no tools). A session is mode-locked: switching mode in a non-empty session starts a new session, while switching in an empty session rewrites only the header.
 
 ---
 
@@ -123,8 +123,10 @@ Every reasoning line, tool call and tool result is appended to the active sessio
 
 ## Chat mode
 
-`ChatHandler.start_chat()` sends the conversation history and the user's attachments to `LLMWorker`, which streams chunks back to the UI. Chat has no schema and no agent loop.
+`ChatHandler.start_chat()` sends the conversation history and image attachments to `LLMWorker`, which streams chunks back to the UI. Chat has no schema and no agent loop.
 
+- Text-file attachments are inlined once into the current request (Chat has no filesystem tools); later turns see only the attachment reference lines.
+- Images are passed as provider image payloads; non-image bytes are never sent as "images".
 - The project handoff summary is injected as the system prompt when it comes from another session or mode.
 - Messages typed while a reply streams are queued and answered in order; a new message during generation cancels the previous request first.
 - Chat uses provider-side web search where the provider supports it. The app does not run a client-side Chat tool loop: streamed tool-call deltas are parsed and logged, but nothing executes them. Local `ddgs`/`trafilatura` search belongs to Terminal mode (see [hybrid_web_search_guide.md](./hybrid_web_search_guide.md)).
@@ -150,6 +152,7 @@ Browser is a stateful web agent with `browser_tool_code`.
 - `BrowserExecWorker` runs tools on a dedicated thread. Before risky actions it requests GUI-thread approval (`require_approval`, default on); denial is the safe default and the model is told not to retry.
 - `validate_url()` blocks non-HTTP(S) schemes, loopback/private/link-local addresses, blocked hostnames/families and domains outside `browser.allowed_domains`. Redirects pass through the same guard via a CDP `Fetch` handler. This is a policy layer, not a sandbox.
 - Page text returned to the model is wrapped in `<untrusted_page_content>`; the system prompt treats it as data, never instructions.
+- Read-only filesystem tools (`read_files`, `list_directory`, `search_file_content`) let the model open attached files by reference instead of receiving their contents every step.
 - Per-task budgets (`browser.max_steps`, `browser.max_task_seconds`) stop runaway loops.
 - Screenshots are attached to the next model request only when the model asks for one; they are invalidated by navigation.
 
@@ -260,7 +263,7 @@ A project is a folder on disk. All app-owned data lives in `<project>/.logos/`:
 - `context/summary.md`, `summary.json` — rolling handoff summary and its provenance.
 - `attachments/<session-id>/` — copies of pasted images and other bytes with no stable source path, deduplicated by SHA-256. Files that already exist on disk are referenced from the journal instead of copied.
 
-Sessions are mode-locked (`chat`, `terminal`, `browser`, `vision`). The header carries an optional `title` and an auto-derived, editable `objective`. Legacy `session-*.json` files are migrated to JSONL on load and preserved as `.json.bak`.
+Sessions are mode-locked (`chat`, `terminal`, `browser`, `vision`). The header carries an optional `title` and an auto-derived `objective`. Legacy `session-*.json` files are migrated to JSONL on load and preserved as `.json.bak`.
 
 Replay restores messages, reasoning, tool cards, attachment cards (with `changed`/`missing` status) and model-facing agent history. It does not restore a live machine: open browser tabs, running shell jobs and automatic screenshots are not replayed; Browser keeps cookies/logins through the persistent Playwright profile, and a resumed Vision session starts a fresh CUA chain. Browser and Vision resumes also receive a deterministic summary derived from the current session's journal; Chat/Terminal use the replayed transcript instead.
 
@@ -309,7 +312,7 @@ Details: [adding_new_llm_provider_guide.md](./adding_new_llm_provider_guide.md) 
   }
   ```
   `ChatWidget` renders and toggles them through `CollapsibleBlockFormatter`; `toggle:<id>:<state>` links are intercepted by the widget.
-- **Attachments and file search:** `@` opens a fuzzy file popup backed by `Indexer`; folders end with `/`; selecting a folder navigates into it. Attachments are read and injected by the controller per mode; the journal stores text only, so attachment bytes are not restored after a restart. Wildcards and glob patterns are not supported.
+- **Attachments and file search:** `@` opens a fuzzy file popup backed by `Indexer`; folders end with `/`; selecting a folder navigates into it. Attachment metadata is journaled per user message; Terminal and Browser receive a reference block and read the path on demand, while Chat inlines text-file contents once. The Session journal displays each attachment's path, size, SHA-256, stored flag and live status. Wildcards and glob patterns are not supported.
 
 ### Cross-platform application handling
 

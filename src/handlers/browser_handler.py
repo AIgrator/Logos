@@ -335,7 +335,7 @@ class BrowserHandler(BaseAgentHandler):
         except Exception:
             pass
 
-    def start_task(self, user_text: str):
+    def start_task(self, user_text: str, attachment_context: str | None = None):
         if self.state == VisionState.IDLE:
             # Stop/Cancel idles the handler without BaseAgentHandler.stop()
             # in the cancel path; drop that stale task's history on the next
@@ -348,6 +348,8 @@ class BrowserHandler(BaseAgentHandler):
             self._consecutive_errors = 0
             self._assessment_sent = False
             self._last_action_sig = None
+        if attachment_context:
+            self.command_history.append(attachment_context)
         super().start_task(user_text)
 
     def _continue_loop(self, last_command_output=None, from_job_wait=False):

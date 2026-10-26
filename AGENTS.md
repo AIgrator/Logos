@@ -53,8 +53,8 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   chat, and terminal/browser `command_history` plus tool cards are rebuilt from
   the same events. Agent `finish` / `communicate_to_user` / `display_message`
   text is persisted as an assistant `message`. `objective` is auto-derived from
-  the first request and can be edited; Browser/Vision resumes get a deterministic
-  session summary derived from this journal.
+  the first request; Browser/Vision resumes get a deterministic session summary
+  derived from this journal.
 - `context/summary.md` - rolling project handoff summary with fixed sections
   (`Objective`, `Done`, `Current`, `Next`, `Files`, `Blockers`),
   `context/summary.json` - its source session/event count/model metadata.
@@ -66,6 +66,14 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   stable source path), deduplicated by SHA-256. Files with a real path are
   referenced in the journal instead of copied; replay marks referenced files
   `changed` or `missing`. Deleting a session removes its attachment folder.
+
+Attachment contents are not re-sent on every agent step. Terminal and Browser
+receive a reference block (name, kind, size, path, status) and read the file on
+demand with `read_files` / `list_directory` / `search_file_content` (Browser
+includes those read-only filesystem tools too). Chat has no tool loop, so text
+files are inlined once in the current request and only referenced afterwards.
+The Session journal shows the recorded path, size, SHA-256, stored flag and live
+status under the message that carried each attachment.
 
 Sessions are mode-locked: `chat`, `terminal`, `browser`, or `vision`. Switching
 mode in a non-empty session starts a new session; switching in an empty session

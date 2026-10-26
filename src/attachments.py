@@ -182,6 +182,104 @@ def record_attachment(project_manager, session_path: str, attachment: dict,
     return _record_reference(path, root, "file")
 
 
+def context_block(records: list, can_read: bool = True) -> str:
+    """Model-facing pointer block for recorded attachments.
+
+    Contents are deliberately left out: agents with filesystem tools read the
+    path on demand, so a large attachment is not retransmitted every step.
+    """
+    lines = []
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        kind = str(record.get("kind") or "file")
+        name = str(record.get("name") or "attachment")
+        path = str(record.get("path") or "")
+        status = str(record.get("status") or "ok")
+        label = f"{name} (`{path}`)" if path and path != name else name
+        details = [kind]
+        if kind != "folder":
+            try:
+                size = int(record.get("size") or 0)
+            except (TypeError, ValueError):
+                size = 0
+            if size:
+                details.append(format_size(size))
+        suffix = f" [{status}]" if status and status != "ok" else ""
+        hint = ""
+        if path and can_read:
+            if kind == "folder":
+                hint = " — inspect with list_directory or search_file_content."
+            elif kind == "file":
+                _, ext = os.path.splitext(path.lower())
+                if ext in IMAGE_EXTENSIONS:
+                    hint = " — image file; not readable as text."
+                else:
+                    hint = " — read with read_files."
+            elif kind == "image":
+                hint = " — image file; not readable as text."
+        lines.append(f"- {label} ({', '.join(details)}){suffix}{hint}")
+    if not lines:
+        return ""
+    header = ("**Attachment references (contents are not inlined; read on "
+              "demand):**" if can_read else "**Attachment references:**")
+    return header + "\n" + "\n".join(lines)
+
+
+def _looks_binary(path: str) -> bool:
+    try:
+        with open(path, "rb") as fh:
+            return b"\x00" in fh.read(4096)
+    except OSError:
+        return True
+
+
+def inline_text_block(records: list, root: str = "",
+                      max_file_chars: int = 100_000,
+                      max_total_chars: int = 300_000) -> str:
+    """One-time contents of text-file attachments.
+
+    Used by Chat, which has no tools to read the referenced path later. Agent
+    modes use :func:`context_block` instead and read on demand.
+    """
+    blocks = []
+    budget = max(0, int(max_total_chars))
+    for record in records or []:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("kind") or "file") != "file":
+            continue
+        if str(record.get("status") or "ok") == "missing":
+            continue
+        path = resolve_path(record, root)
+        if not path or not os.path.isfile(path) or _looks_binary(path):
+            continue
+        try:
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                content = fh.read(min(max_file_chars, budget) + 1)
+        except OSError as exc:
+            logging.warning(f"Could not inline attachment {path}: {exc}")
+            continue
+        limit = min(max_file_chars, budget)
+        truncated = len(content) > limit
+        if truncated:
+            content = content[:limit]
+        if not content:
+            continue
+        shown_path = str(record.get("path") or path)
+        note = "\n… [truncated for context]" if truncated else ""
+        block = (f"--- FILE: `{shown_path}` ---\n{content}{note}\n"
+                 f"--- END OF FILE: `{shown_path}` ---")
+        blocks.append(block)
+        budget -= len(content)
+        if budget <= 0:
+            break
+    if not blocks:
+        return ""
+    return ("**Attached file contents (included once for this request):**\n"
+            + "\n\n".join(blocks))
+
+
 def verify_attachment(project_manager, session_path: str, record: dict,
                       root: str) -> str:
     """Returns ``ok``, ``changed`` or ``missing`` for a recorded attachment."""

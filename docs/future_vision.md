@@ -31,9 +31,9 @@ What changed since the original plan:
   network policy and per-action approvals. This is the `dom` grounding path.
 - **Projects and persistent sessions exist.** Each project owns `.logos/` with
   JSONL session journals, a rolling handoff summary and restored history.
-  Sessions are mode-locked: one session runs one mode. Attachments are still
-  transient (the journal stores text only), and tabs/parallel sessions are
-  deliberately out of scope.
+  Sessions are mode-locked: one session runs one mode. Attachments are durable:
+  stable files are referenced by path and pasted images are copied into the
+  session folder. Tabs/parallel sessions are deliberately out of scope.
 - **The base install is thin.** Removing the ML stack achieved the size/startup
   goal without optional model downloads. If a local grounding backend returns,
   it must stay an optional add-on rather than a base dependency.
@@ -137,8 +137,8 @@ roadmap. Switching sessions is explicit: Logos restores completed history from
 the journal and stops in-flight work instead of pretending to suspend it.
 
 **Current state:** project-scoped sessions, JSONL journals, autosave,
-restore/replay, rename/delete, mode locking, the editable session objective and
-the project-level rolling handoff summary are implemented. Browser/Vision
+restore/replay, rename/delete, mode locking, the auto-derived session objective
+and the project-level rolling handoff summary are implemented. Browser/Vision
 resumes also get a deterministic summary derived from the current session's
 journal. Attachments follow the policy below: files are referenced by path,
 pasted images are copied into `.logos/attachments/<session-id>/` and deduplicated
@@ -148,9 +148,9 @@ by SHA-256.
 
 - **Title.** Derived from the first request and renameable. It is a short label,
   not a mandatory goal form.
-- **Objective.** An auto-derived, editable one-line goal stored in the session
-  header. It starts as the first request. Browser and Vision need it because the
-  project summary may describe other sessions and the live page/desktop is gone.
+- **Objective.** An auto-derived one-line goal stored in the session header. It
+  starts as the first request. Browser and Vision need it because the project
+  summary may describe other sessions and the live page/desktop is gone.
 - **Journal.** Append-only typed events: messages, reasoning, tool calls and
   results, job results, usage, errors. It is the source of truth for replay and
   for rebuilding the model-facing agent history.
@@ -182,6 +182,14 @@ Do not copy the whole project into `.logos`. Use three tiers:
 Attachments appear as cards (name, type, size, changed/missing badge), not as a
 re-sent image on every turn. Deleting a session removes its attachment folder
 after confirmation, and per-file/per-session caps prevent disk bloat.
+
+Model-facing delivery follows the same reference-first rule. Terminal and
+Browser receive a block of attachment references (name, kind, size, path, live
+status) and open the file on demand with `read_files`, `list_directory` or
+`search_file_content`; Browser includes those read-only filesystem tools.
+Chat has no tool loop, so text-file contents are inlined once in the current
+request and only referenced afterwards. The Session journal shows the recorded
+path, size, SHA-256, stored flag and live status under the carrying message.
 
 ### What "resume" means
 
@@ -245,7 +253,7 @@ until the execution core is ready. Voice will dock onto the same
 | 1 | `GroundingBackend` interface + unified Vision+shell toolset | Native CUA shipped; interface not formalized; Vision manifest not wired into the CUA loop. **Next foundation.** |
 | 2 | Browser mode on Playwright | **Shipped** (DOM refs, policy, approvals, budgets). User-entered secrets still pending. |
 | 3 | Native execution for Google, then Anthropic/OpenAI | **Shipped** for all three. |
-| 4 | Long-lived sessions: JSONL store, autosave, summarization, restore, durable attachments, per-session objective/state | **Shipped:** JSONL sessions, autosave, restore/replay, editable objective, deterministic per-session summary for Browser/Vision resume, durable attachments with reference/copy tiers. Tabs, parallel sessions and the screen arbiter were **dropped** (one mode per session). |
+| 4 | Long-lived sessions: JSONL store, autosave, summarization, restore, durable attachments, per-session objective/state | **Shipped:** JSONL sessions, autosave, restore/replay, auto-derived objective, deterministic per-session summary for Browser/Vision resume, durable attachments with reference/copy tiers. Tabs, parallel sessions and the screen arbiter were **dropped** (one mode per session). |
 | 5 | Thin client | **Effective:** ML stack removed; optional backends are no longer needed. Installer/packaging cleanup remains. |
 | 6 | MCP client + Blender cross-mode pilot | **Pending.** |
 | 7 | Replace the local triple pipeline with a single grounding model (UI-TARS / OmniParser V2) | **Obsolete in current form** — the local pipeline was deleted. Revisit only if a `local` backend is reintroduced. |

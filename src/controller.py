@@ -6,10 +6,9 @@ import threading
 import time
 import os
 import uuid
-import pathspec
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QGroupBox, QInputDialog, QLabel, QMessageBox,
+    QDialog, QFileDialog, QGroupBox, QLabel, QMessageBox,
     QProgressBar, QPushButton, QTextBrowser, QVBoxLayout,
 )
 from PIL import Image
@@ -36,7 +35,6 @@ from states import ControllerState, VisionState
 from hotkey_manager import HotkeyManager
 from src.computer.computer import Computer
 from indexer import Indexer
-from src.utils.ignore_patterns import DEFAULT_GLOBAL_IGNORE_PATTERNS
 # Heavy imports are deferred to background threads
 
 class AppController(QObject):
@@ -240,7 +238,6 @@ class AppController(QObject):
         self.ui.project_renamed.connect(self.rename_project)
         self.ui.project_removed.connect(self.remove_project)
         self.ui.session_renamed.connect(self.rename_session)
-        self.ui.session_objective_changed.connect(self.edit_session_objective)
         self.ui.session_deleted.connect(self.delete_session)
         self.ui.context_requested.connect(self._show_context_summary)
         self.ui.journal_requested.connect(self._show_session_journal)
@@ -1153,16 +1150,27 @@ class AppController(QObject):
 
     def _format_event_attachments(self, event: dict) -> str:
         """Model-facing lines for attachments recorded on a user message."""
+        return attachment_store.context_block(
+            self._event_attachment_records(event))
+
+    def _journal_attachment_lines(self, event: dict) -> str:
+        """Debug metadata for attachments, shown under a journal message."""
         lines = []
         for record in self._event_attachment_records(event):
-            kind = str(record.get("kind") or "file")
             name = str(record.get("name") or "attachment")
-            path = str(record.get("path") or record.get("stored_name") or "")
-            status = str(record.get("status") or "")
-            suffix = f" [{status}]" if status and status != "ok" else ""
+            kind = str(record.get("kind") or "file")
+            size = attachment_store.format_size(record.get("size"))
+            digest = str(record.get("sha256") or "(none)")
+            stored = "yes" if record.get("stored") else "no"
+            status = str(record.get("status") or "ok")
+            path = str(record.get("path") or "") or "(none)"
             lines.append(
-                f"- {name} ({kind}){suffix}" + (f": `{path}`" if path else ""))
-        return "\n".join(lines)
+                f"  - {name} [{kind}] size={size} sha256={digest} "
+                f"stored={stored} status={status}\n"
+                f"    path: {path}")
+        if not lines:
+            return ""
+        return "attachments:\n" + "\n".join(lines)
 
     def _replay_tool_event(self, event: dict):
         """Generic fallback for modes without their own event renderer."""
@@ -1454,23 +1462,6 @@ class AppController(QObject):
             return
         self.ui.refresh_project_views()
 
-    def edit_session_objective(self, path: str, objective: str):
-        """Stores the editable one-line goal in the session header."""
-        if self.project_manager is None or not path:
-            return
-        try:
-            saved = self.project_manager.set_session_objective(path, objective)
-        except Exception as e:
-            self._report_project_error(f"Could not save the session objective: {e}")
-            return
-        if not saved:
-            self._report_project_error("The session objective could not be saved.")
-            return
-        if (self.session_file
-                and os.path.abspath(path) == os.path.abspath(self.session_file)):
-            self.session_objective = " ".join(str(objective or "").split())
-        self.ui.refresh_project_views()
-
     def delete_session(self, path: str):
         """Deletes a session file; the open one is replaced with an empty one."""
         if self.project_manager is None or not path:
@@ -1615,31 +1606,31 @@ class AppController(QObject):
         self._persist_session(attachments=attachment_records)
         self._ensure_session_objective(user_text)
 
-        # Process attachments based on the current mode
+        # Process attachments based on the current mode. Agent modes get a
+        # reference block and read the file on demand; Chat has no tools, so
+        # text contents are inlined once for the current request.
+        attachment_context = attachment_store.context_block(attachment_records)
         attachments_for_handler = []
         if self.pending_attachments:
             if self.state == ControllerState.TERMINAL:
+                if attachment_context:
+                    self.terminal_handler.command_history.append(attachment_context)
                 for attachment in self.pending_attachments:
                     try:
                         attachment_type = attachment.get('type')
                         path = attachment.get('path')
                         if attachment_type == 'folder':
-                            file_list_str = self._generate_filtered_file_list(path)
-                            self.terminal_handler.command_history.append(file_list_str)
-                            self.ui.add_message(f"<i>Folder attached for context: <code>{path}</code></i>", force_scroll=True)
-                        elif attachment_type == 'file':
-                            with open(path, encoding='utf-8') as f:
-                                content = f.read()
-                            file_info_for_llm = (
-                                f"**Attached File:** `{path}`\n"
-                                f"**File Content:**\n```\n{content}\n```"
-                            )
-                            self.terminal_handler.command_history.append(file_info_for_llm)
-                            self.ui.add_message(f"<i>File attached for context: <code>{path}</code></i>", force_scroll=True)
+                            self.ui.add_message(
+                                f"<i>Folder attached as a reference: <code>{path}</code></i>",
+                                force_scroll=True)
+                        elif path:
+                            self.ui.add_message(
+                                f"<i>File attached as a reference: <code>{path}</code></i>",
+                                force_scroll=True)
                     except Exception as e:
                         logging.error(f"Error processing attachment for terminal: {e}")
-                        self.ui.add_error_message(f"Error processing attachment {path}: {e}")
-            else: # Chat or Vision mode
+                        self.ui.add_error_message(f"Error processing attachment: {e}")
+            else:
                 attachments_for_handler.extend(self._collect_chat_attachments())
 
         self.pending_attachments.clear()
@@ -1658,7 +1649,9 @@ class AppController(QObject):
                         f"answering as chat]\n"
                         + (f"Recent task history:\n{context}\n\n" if context else "")
                         + f"User question while paused: {user_text}")
-            self.chat_handler.start_chat(question, attachments_for_handler)
+            self.chat_handler.start_chat(
+                self._chat_prompt(question, attachment_records),
+                attachments_for_handler)
             return
 
         if self.state == ControllerState.VISION:
@@ -1669,9 +1662,22 @@ class AppController(QObject):
         elif self.state == ControllerState.TERMINAL:
             self.terminal_handler.start_task(user_text)
         elif self.state == ControllerState.BROWSER:
-            self.browser_handler.start_task(user_text)
+            self.browser_handler.start_task(user_text, attachment_context)
         else:
-            self.chat_handler.start_chat(user_text, attachments_for_handler)
+            self.chat_handler.start_chat(
+                self._chat_prompt(user_text, attachment_records),
+                attachments_for_handler)
+
+    def _chat_prompt(self, user_text: str, records: list) -> str:
+        """Chat has no tool loop: inline text files once, keep paths as refs."""
+        parts = [user_text] if user_text else []
+        inline = attachment_store.inline_text_block(records, self.project_root)
+        if inline:
+            parts.append(inline)
+        refs = attachment_store.context_block(records, can_read=False)
+        if refs:
+            parts.append(refs)
+        return "\n\n".join(parts)
 
     def _record_pending_attachments(self) -> list:
         """Journal metadata for the pending attachments of the current send."""
@@ -1694,7 +1700,11 @@ class AppController(QObject):
         return records
 
     def _collect_chat_attachments(self, while_streaming: bool = False) -> list:
-        """Reads pending attachments into LLM-ready payloads for chat/vision.
+        """Reads pending image attachments into LLM-ready payloads.
+
+        Text files are handled by ``inline_text_block`` instead: providers
+        convert every attachment as an image, so raw text bytes cannot be
+        passed through this path.
 
         ``while_streaming`` suppresses the (chat-bubble) error notice, which
         would otherwise reset the active stream state when a queued message's
@@ -1710,7 +1720,11 @@ class AppController(QObject):
                     payloads.append(attachment)
                     continue
                 if attachment_type == 'file':
-                    with open(attachment.get('path'), 'rb') as f:
+                    path = attachment.get('path') or ""
+                    _, ext = os.path.splitext(path.lower())
+                    if ext not in attachment_store.IMAGE_EXTENSIONS:
+                        continue
+                    with open(path, 'rb') as f:
                         payloads.append(f.read())
                 elif attachment_type == 'image':
                     payloads.append(attachment.get('data'))
@@ -1770,7 +1784,9 @@ class AppController(QObject):
         self._persist_session(attachments=item.get('attachment_records') or [])
         self._ensure_session_objective(item['text'])
         logging.info(f"Dequeuing chat message ({len(self.chat_queue)} left).")
-        self.chat_handler.start_chat(item['text'], item.get('attachments') or [])
+        prompt = self._chat_prompt(
+            item['text'], item.get('attachment_records') or [])
+        self.chat_handler.start_chat(prompt, item.get('attachments') or [])
         return True
 
     def _clear_chat_queue(self):
@@ -2517,56 +2533,6 @@ class AppController(QObject):
         total_count = len(self.pending_attachments)
         self.ui.update_attachment_menu_state(image_count, total_count)
 
-    def _generate_filtered_file_list(self, path: str) -> str:
-        """
-        Scans a directory, filters out ignored files/folders using .gitignore
-        or a global default list, and returns a structured string listing
-        the contents for the LLM context.
-        """
-        # Find the .gitignore file
-        gitignore_path = None
-        current_dir = path
-        while current_dir and current_dir != os.path.dirname(current_dir):
-            potential_gitignore = os.path.join(current_dir, '.gitignore')
-            if os.path.exists(potential_gitignore):
-                gitignore_path = potential_gitignore
-                break
-            current_dir = os.path.dirname(current_dir)
-
-        patterns = []
-        if gitignore_path:
-            try:
-                with open(gitignore_path, encoding='utf-8') as f:
-                    patterns = f.readlines()
-                logging.info(f"Using .gitignore from: {gitignore_path}")
-            except Exception as e:
-                logging.warning(f"Could not read .gitignore at {gitignore_path}: {e}")
-                patterns = DEFAULT_GLOBAL_IGNORE_PATTERNS
-        else:
-            patterns = DEFAULT_GLOBAL_IGNORE_PATTERNS
-            logging.info("No .gitignore found, using default global ignore patterns.")
-
-        spec = pathspec.PathSpec.from_lines('gitwildmatch', patterns)
-
-        file_paths = []
-        for root, _, files in os.walk(path):
-            for file in files:
-                full_path = os.path.join(root, file)
-                relative_path = os.path.relpath(full_path, path)
-
-                # Use pathspec to check if the file should be ignored
-                if not spec.match_file(relative_path):
-                    file_paths.append(relative_path)
-
-        if not file_paths:
-            return f"**Attached Folder:** `{path}` (The folder is empty or contains only ignored files)."
-
-        file_list_str = "\n".join(f"- `{f}`" for f in sorted(file_paths))
-        return (
-            f"**Attached Folder:** `{path}`\n"
-            f"**Files within the folder:**\n{file_list_str}"
-        )
-
     def _add_attachments_from_paths(self, paths: list):
         """
         A unified method to handle adding files and folders as attachments.
@@ -2809,28 +2775,10 @@ class AppController(QObject):
         browser.setOpenExternalLinks(False)
         browser.setPlainText(text)
         layout.addWidget(browser)
-        edit_button = QPushButton("Edit objective…", dialog)
-        edit_button.setEnabled(bool(self.session_file))
-        edit_button.clicked.connect(
-            lambda: (self._edit_active_objective(), dialog.accept()))
-        layout.addWidget(edit_button)
         close_button = QPushButton("Close", dialog)
         close_button.clicked.connect(dialog.accept)
         layout.addWidget(close_button)
         dialog.exec()
-
-    def _edit_active_objective(self):
-        if not self.session_file:
-            return
-        objective, ok = QInputDialog.getText(
-            self.ui.main_window, "Session Objective", "One-line goal:",
-            text=self.session_objective or "")
-        if not ok:
-            return
-        objective = " ".join((objective or "").split())
-        if not objective:
-            return
-        self.edit_session_objective(self.session_file, objective)
 
     def _session_journal_text(self) -> str:
         """Plain-text journal of every recorded session event."""
@@ -2845,6 +2793,9 @@ class AppController(QObject):
             stamp = str(event.get("ts") or "")
             if event_type == "message":
                 detail = f"{event.get('role') or 'message'}: {event_text(event)}"
+                attachments = self._journal_attachment_lines(event)
+                if attachments:
+                    detail += "\n" + attachments
             elif event_type == "tool_call":
                 args = event.get("input") or {}
                 detail = (f"{event.get('name') or 'action'} "

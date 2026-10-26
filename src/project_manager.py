@@ -477,7 +477,7 @@ class ProjectManager:
         return self._update_session_header(path, "title", title)
 
     def set_session_objective(self, path: str, objective: str) -> bool:
-        """Stores the editable one-line goal in the session header."""
+        """Stores the auto-derived one-line goal in the session header."""
         return self._update_session_header(path, "objective", objective)
 
     def session_id(self, path: str) -> str:

@@ -286,6 +286,8 @@ class Executor:
             output = raw.get("message", "") or ""
         elif isinstance(raw, str):
             output = raw
+        elif isinstance(raw, (list, tuple)):
+            output = "\n".join(str(item) for item in raw)
         return ActionResult(
             ok=True, kind=self._kind_of(name), output_text=output,
             duration_ms=duration_ms, extra={"raw": raw},
