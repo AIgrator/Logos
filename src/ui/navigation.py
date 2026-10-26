@@ -426,7 +426,6 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
     home_requested = Signal()
     project_selected = Signal(str)
-    open_project_requested = Signal()
     new_session_requested = Signal()
     context_requested = Signal()
     journal_requested = Signal()
@@ -496,12 +495,6 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.project_list.customContextMenuRequested.connect(
             self._show_project_item_menu)
         root.addWidget(self.project_list, 1)
-
-        self.add_button = QPushButton("Add project")
-        self.add_button.setIcon(qta.icon("fa5s.plus", color=colors["text"]))
-        self.add_button.setToolTip("Add project folder")
-        self.add_button.clicked.connect(self.open_project_requested.emit)
-        root.addWidget(self.add_button)
 
         self.new_session_button = QPushButton("New session")
         self.new_session_button.setIcon(qta.icon("fa5s.pen", color=colors["text"]))
@@ -576,7 +569,6 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         """)
         self.collapse_button.setIcon(qta.icon("fa5s.bars", color=colors["muted"]))
         self.home_button.setIcon(qta.icon("fa5s.home", color=colors["text"]))
-        self.add_button.setIcon(qta.icon("fa5s.plus", color=colors["text"]))
         self.new_session_button.setIcon(qta.icon("fa5s.pen", color=colors["text"]))
         self.context_button.setIcon(qta.icon("fa5s.file-alt", color=colors["text"]))
         self.journal_button.setIcon(qta.icon("fa5s.list", color=colors["text"]))
@@ -591,7 +583,6 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.setFixedWidth(self.COLLAPSED_WIDTH if self.collapsed else self.EXPANDED_WIDTH)
         self.collapse_button.setToolTip("Expand sidebar" if self.collapsed else "Collapse sidebar")
         self.home_button.setText("" if self.collapsed else "Home")
-        self.add_button.setText("" if self.collapsed else "Add project")
         self.new_session_button.setText("" if self.collapsed else "New session")
         self.context_button.setText("" if self.collapsed else "Context")
         self.journal_button.setText("" if self.collapsed else "Journal")

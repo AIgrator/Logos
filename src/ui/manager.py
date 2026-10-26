@@ -366,7 +366,6 @@ class UIManager(QWidget):
         self.home_page.session_deleted.connect(self.session_deleted.emit)
         self.sidebar.home_requested.connect(self.home_requested.emit)
         self.sidebar.project_selected.connect(self.project_switch_requested.emit)
-        self.sidebar.open_project_requested.connect(self.project_open_requested.emit)
         self.sidebar.new_session_requested.connect(self.new_session_requested.emit)
         self.sidebar.context_requested.connect(self.context_requested.emit)
         self.sidebar.journal_requested.connect(self.journal_requested.emit)
