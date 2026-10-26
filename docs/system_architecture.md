@@ -256,19 +256,19 @@ Chat is separate: providers with `supports_streaming_tools` can emit typed `tool
 A project is a folder on disk. All app-owned data lives in `<project>/.logos/`:
 
 - `project.json` — id, display name, timestamps. Renaming a project changes the display name only.
-- `sessions/` — one append-only JSONL per session. The first line is a `session` header (`schema_version`, `id`, `mode`, optional `title`); later lines are events (`message`, `reasoning`, `tool_call`, `tool_result`, `job_result`, `usage`, `error`). Credentials are redacted before writing; oversized events are capped.
+- `sessions/` — one append-only JSONL per session. The first line is a `session` header (`schema_version`, `id`, `mode`, optional `title`, optional `objective`); later lines are events (`message`, `reasoning`, `tool_call`, `tool_result`, `job_result`, `usage`, `error`). User `message` events may carry attachment metadata. Credentials are redacted before writing; oversized events are capped.
 - `context/summary.md`, `summary.json` — rolling handoff summary and its provenance.
-- `attachments/` — reserved for durable session attachments. The directory is created, but the current journal does not write into it.
+- `attachments/<session-id>/` — copies of pasted images and other bytes with no stable source path, deduplicated by SHA-256. Files that already exist on disk are referenced from the journal instead of copied.
 
-Sessions are mode-locked (`chat`, `terminal`, `browser`, `vision`). The header currently carries an optional `title` only; there is no per-session `objective` or session-level summary yet. Legacy `session-*.json` files are migrated to JSONL on load and preserved as `.json.bak`.
+Sessions are mode-locked (`chat`, `terminal`, `browser`, `vision`). The header carries an optional `title` and an auto-derived, editable `objective`. Legacy `session-*.json` files are migrated to JSONL on load and preserved as `.json.bak`.
 
-Replay restores messages, reasoning, tool cards and model-facing agent history. It does not restore a live machine: open browser tabs, running shell jobs and automatic screenshots are not replayed; Browser keeps cookies/logins through the persistent Playwright profile, and a resumed Vision session starts a fresh CUA chain with the project handoff summary.
+Replay restores messages, reasoning, tool cards, attachment cards (with `changed`/`missing` status) and model-facing agent history. It does not restore a live machine: open browser tabs, running shell jobs and automatic screenshots are not replayed; Browser keeps cookies/logins through the persistent Playwright profile, and a resumed Vision session starts a fresh CUA chain. Browser and Vision resumes also receive a deterministic summary derived from the current session's journal; Chat/Terminal use the replayed transcript instead.
 
 The project root, not the install directory, is the working directory for Terminal/Browser and the root for `Indexer`. `.logos` is ignored by the indexer. Startup resolves the remembered project; the HomePage and sidebar are the navigation surfaces for projects and sessions.
 
 ### Rolling handoff summary
 
-`src/context/handoff.py` keeps a fixed-shape summary (`Objective`, `Done`, `Current`, `Next`, `Files`, `Blockers`) for the project. A deterministic extractive fallback is written immediately; when the context threshold is crossed (`context.summary_threshold_ratio`, default 0.6) an LLM refresh runs in the worker thread. Before summarizing, old tool outputs are pruned to head/tail excerpts while the recent tail stays verbatim. The summary is injected when continuing in a different session or mode, and on a fresh Vision chain. It is project-level, not session-level: a long-lived Browser/Vision session can therefore see context from other sessions in the same project.
+`src/context/handoff.py` keeps a fixed-shape summary (`Objective`, `Done`, `Current`, `Next`, `Files`, `Blockers`) for the project. A deterministic extractive fallback is written immediately; when the context threshold is crossed (`context.summary_threshold_ratio`, default 0.6) an LLM refresh runs in the worker thread. Before summarizing, old tool outputs are pruned to head/tail excerpts while the recent tail stays verbatim. The summary is injected when continuing in a different session or mode, and on a fresh Vision chain. It is project-level, not session-level: a long-lived Browser/Vision session can therefore see context from other sessions in the same project. The session's own state is derived separately from its journal by `session_summary()` and injected first on Browser/Vision resume.
 
 ### Context accounting
 

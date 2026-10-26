@@ -111,6 +111,15 @@ def _ask_session_title(parent, current: str) -> str:
     return "" if title == current else title
 
 
+def _ask_session_objective(parent, current: str) -> str:
+    objective, ok = QInputDialog.getText(
+        parent, "Session Objective", "One-line goal:", text=current or "")
+    if not ok:
+        return ""
+    objective = " ".join((objective or "").split())
+    return "" if objective == current else objective
+
+
 def _confirm_session_deletion(parent, title: str) -> bool:
     box = QMessageBox(parent)
     box.setIcon(QMessageBox.Warning)
@@ -166,6 +175,7 @@ class HomePage(_ProjectMenuMixin, QWidget):
     project_renamed = Signal(str, str)   # project path, new name
     project_removed = Signal(str, bool)  # project path, delete .logos data
     session_renamed = Signal(str, str)   # session path, new title
+    session_objective_changed = Signal(str, str)  # session path, new objective
     session_deleted = Signal(str)        # session path
 
     def __init__(self, project_manager, theme_manager, parent=None):
@@ -371,7 +381,12 @@ class HomePage(_ProjectMenuMixin, QWidget):
             icon = make_letter_icon(project, 24)
             item = QListWidgetItem(icon, _truncate(title, 90))
             item.setData(Qt.UserRole, session.get("path", ""))
-            item.setToolTip(f"{project}\n{title}\n{session.get('path', '')}")
+            objective = session.get("objective") or ""
+            tooltip = f"{project}\n{title}"
+            if objective:
+                tooltip += f"\nGoal: {objective}"
+            tooltip += f"\n{session.get('path', '')}"
+            item.setToolTip(tooltip)
             self.session_list.addItem(item)
         if not self._sessions:
             empty = QListWidgetItem("No sessions yet.")
@@ -403,6 +418,7 @@ class HomePage(_ProjectMenuMixin, QWidget):
             return
         menu = QMenu(self)
         rename_action = menu.addAction("Rename...")
+        objective_action = menu.addAction("Edit objective...")
         reveal_action = menu.addAction("Show in Explorer")
         menu.addSeparator()
         delete_action = menu.addAction("Delete Session...")
@@ -413,6 +429,12 @@ class HomePage(_ProjectMenuMixin, QWidget):
             title = _ask_session_title(self, current)
             if title:
                 self.session_renamed.emit(path, title)
+        elif chosen is objective_action:
+            info = self._session_info(path)
+            current = info.get("objective") or info.get("title") or ""
+            objective = _ask_session_objective(self, current)
+            if objective:
+                self.session_objective_changed.emit(path, objective)
         elif chosen is reveal_action:
             _reveal_in_explorer(path)
         elif chosen is delete_action:

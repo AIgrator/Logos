@@ -1266,19 +1266,30 @@ class VisionHandler(BaseAgent):
             return False
 
     def _task_with_handoff(self, task: str) -> str:
-        """Seed a fresh CUA chain with the project handoff summary."""
+        """Seed a fresh CUA chain with session state and the project handoff."""
         task = task or ""
+        blocks = []
+        session_prompt = getattr(self.controller, "session_context_prompt", None)
+        if callable(session_prompt):
+            try:
+                block = session_prompt()
+            except Exception as e:
+                logging.warning(f"Could not read Vision session context: {e}")
+                block = ""
+            if block and "Current session context" not in task:
+                blocks.append(block)
         prompt = getattr(self.controller, "handoff_prompt", None)
-        if not callable(prompt):
+        if callable(prompt):
+            try:
+                block = prompt(include_same_session=True)
+            except Exception as e:
+                logging.warning(f"Could not read Vision handoff context: {e}")
+                block = ""
+            if block and "Handoff context from earlier work" not in task:
+                blocks.append(block)
+        if not blocks:
             return task
-        try:
-            block = prompt(include_same_session=True)
-        except Exception as e:
-            logging.warning(f"Could not read Vision handoff context: {e}")
-            return task
-        if not block or "Handoff context from earlier work" in task:
-            return task
-        return f"{task}\n\n{block}".strip()
+        return "\n\n".join([task, *blocks]).strip()
 
     def _cua_system_prompt(self) -> str:
         if getattr(self, "_cua_system_cache", None) is None:

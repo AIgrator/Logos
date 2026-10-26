@@ -39,9 +39,12 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
 - `project.json` - id, name, timestamps. `name` may be a custom display name set
   from the project context menu; the folder itself is never renamed.
 - `sessions/` - one append-only JSONL file per session; the first line is a
-  `session` header (`schema_version`, `id`, `mode`, optional `title`) and later
+  `session` header (`schema_version`, `id`, `mode`, optional `title`, optional
+  `objective`) and later
   lines are typed events (`message`, `reasoning`, `tool_call`, `tool_result`,
-  `job_result`, `usage`, `error`). `usage` events carry normalized provider token
+  `job_result`, `usage`, `error`). `message` events may carry an `attachments`
+  list (name, kind, path, size, SHA-256, stored flag/status). `usage` events
+  carry normalized provider token
   counts
   (input/output/reasoning/cache/total); they are counted in context statistics
   but never replayed as chat text. No prices are stored or computed. Credentials
@@ -49,7 +52,9 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   restored at startup: messages are replayed into the
   chat, and terminal/browser `command_history` plus tool cards are rebuilt from
   the same events. Agent `finish` / `communicate_to_user` / `display_message`
-  text is persisted as an assistant `message`.
+  text is persisted as an assistant `message`. `objective` is auto-derived from
+  the first request and can be edited; Browser/Vision resumes get a deterministic
+  session summary derived from this journal.
 - `context/summary.md` - rolling project handoff summary with fixed sections
   (`Objective`, `Done`, `Current`, `Next`, `Files`, `Blockers`),
   `context/summary.json` - its source session/event count/model metadata.
@@ -57,7 +62,10 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   worker thread and is injected as chat system context, the first
   terminal/browser history entry, or the first task of a fresh Vision/CUA chain
   when continuing in a different session/mode.
-- `attachments/` - reserved for project-scoped attachments
+- `attachments/<session-id>/` - copies of pasted images (and other bytes with no
+  stable source path), deduplicated by SHA-256. Files with a real path are
+  referenced in the journal instead of copied; replay marks referenced files
+  `changed` or `missing`. Deleting a session removes its attachment folder.
 
 Sessions are mode-locked: `chat`, `terminal`, `browser`, or `vision`. Switching
 mode in a non-empty session starts a new session; switching in an empty session

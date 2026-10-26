@@ -137,10 +137,12 @@ roadmap. Switching sessions is explicit: Logos restores completed history from
 the journal and stops in-flight work instead of pretending to suspend it.
 
 **Current state:** project-scoped sessions, JSONL journals, autosave,
-restore/replay, rename/delete, mode locking and the rolling handoff summary are
-implemented. The summary is project-level; there is no per-session objective or
-session summary yet. Attachments are still transient: `.logos/attachments/` is
-created but never written, and the journal stores text only.
+restore/replay, rename/delete, mode locking, the editable session objective and
+the project-level rolling handoff summary are implemented. Browser/Vision
+resumes also get a deterministic summary derived from the current session's
+journal. Attachments follow the policy below: files are referenced by path,
+pasted images are copied into `.logos/attachments/<session-id>/` and deduplicated
+by SHA-256.
 
 ### Session contents
 
@@ -163,10 +165,11 @@ created but never written, and the journal stores text only.
 
 Do not copy the whole project into `.logos`. Use three tiers:
 
-1. **Project files referenced with `@` or a path are not copied.** The journal
-   records the name, project-relative path, size and content hash. On reopen a
-   changed file is marked "changed", a missing one "missing". The project folder
-   stays the source of truth.
+1. **Files with a stable source path are referenced, not copied.** The journal
+   records the name, project-relative path when the file is inside the project
+   (absolute otherwise), size and content hash. On reopen a changed file is
+   marked "changed", a missing one "missing". The source stays the source of
+   truth.
 2. **Pasted images and explicit user attachments with no stable source path** are
    copied to `.logos/attachments/<session-id>/` and deduplicated by SHA-256.
    Without a copy these bytes are lost on restart; Claude Code solves the same
@@ -242,7 +245,7 @@ until the execution core is ready. Voice will dock onto the same
 | 1 | `GroundingBackend` interface + unified Vision+shell toolset | Native CUA shipped; interface not formalized; Vision manifest not wired into the CUA loop. **Next foundation.** |
 | 2 | Browser mode on Playwright | **Shipped** (DOM refs, policy, approvals, budgets). User-entered secrets still pending. |
 | 3 | Native execution for Google, then Anthropic/OpenAI | **Shipped** for all three. |
-| 4 | Long-lived sessions: JSONL store, autosave, summarization, restore, durable attachments, per-session objective/state | Sessions/journal/handoff/autosave/restore **shipped on JSONL**. Durable attachments and a per-session objective/summary for Browser/Vision remain; resume semantics are documented above. Tabs, parallel sessions and the screen arbiter were **dropped** (one mode per session). |
+| 4 | Long-lived sessions: JSONL store, autosave, summarization, restore, durable attachments, per-session objective/state | **Shipped:** JSONL sessions, autosave, restore/replay, editable objective, deterministic per-session summary for Browser/Vision resume, durable attachments with reference/copy tiers. Tabs, parallel sessions and the screen arbiter were **dropped** (one mode per session). |
 | 5 | Thin client | **Effective:** ML stack removed; optional backends are no longer needed. Installer/packaging cleanup remains. |
 | 6 | MCP client + Blender cross-mode pilot | **Pending.** |
 | 7 | Replace the local triple pipeline with a single grounding model (UI-TARS / OmniParser V2) | **Obsolete in current form** — the local pipeline was deleted. Revisit only if a `local` backend is reintroduced. |

@@ -53,9 +53,64 @@ def _normalize_lists(content: str) -> str:
     return "\n".join(normalized)
 
 
+def _format_attachment_size(size) -> str:
+    try:
+        size = max(0, int(size or 0))
+    except (TypeError, ValueError):
+        size = 0
+    if not size:
+        return ""
+    if size < 1024:
+        return f"{size} B"
+    value = float(size)
+    for unit in ("KB", "MB", "GB"):
+        value /= 1024.0
+        if value < 1024 or unit == "GB":
+            return f"{value:.1f} {unit}"
+    return f"{value:.1f} GB"
+
+
+def render_attachment_chips(attachments, background: str, border: str,
+                            text_color: str, warning_color: str = "#9a6700",
+                            error_color: str = "#cf222e") -> str:
+    """Compact transcript chips for attachments recorded on a message."""
+    import html
+
+    chips = []
+    for record in attachments or []:
+        if not isinstance(record, dict):
+            continue
+        name = html.escape(str(record.get("name") or "attachment"))
+        kind = html.escape(str(record.get("kind") or "file"))
+        size = _format_attachment_size(record.get("size"))
+        meta = kind + (f" · {size}" if size else "")
+        status = str(record.get("status") or "")
+        badge = ""
+        if status == "missing":
+            badge = (f' <span style="color: {error_color}; font-weight: 600;">'
+                     'missing</span>')
+        elif status == "changed":
+            badge = (f' <span style="color: {warning_color}; font-weight: 600;">'
+                     'changed</span>')
+        chips.append(
+            f'<span style="display: inline; background-color: {background}; '
+            f'border: 1px solid {border}; border-radius: 8px; '
+            f'padding: 1px 7px; margin-right: 5px; color: {text_color}; '
+            f'font-size: 11px;">{name} '
+            f'<span style="color: {text_color};">({meta})</span>{badge}</span>')
+    if not chips:
+        return ""
+    return ('<div style="margin-top: 6px;">'
+            + "".join(chips)
+            + "</div>")
+
+
 def render_user_message(content: str, background: str, border: str, text_color: str,
                         label_color: str, label: str = "You", queued: bool = False,
-                        queued_color: str = "#8b949e") -> str:
+                        queued_color: str = "#8b949e", attachments=None,
+                        attachment_bg: str = "", attachment_border: str = "",
+                        attachment_text: str = "", warning_color: str = "#9a6700",
+                        error_color: str = "#cf222e") -> str:
     """Render a user prompt as a safe, line-preserving card."""
     import html
 
@@ -64,13 +119,21 @@ def render_user_message(content: str, background: str, border: str, text_color: 
     queued_html = ""
     if queued:
         queued_html = f' <span style="color: {queued_color};">(queued)</span>'
+    chips = render_attachment_chips(
+        attachments,
+        attachment_bg or background,
+        attachment_border or border,
+        attachment_text or text_color,
+        warning_color,
+        error_color,
+    )
     return (
         f'<div style="background-color: {background}; border-left: 4px solid {border}; '
         'padding: 10px 12px; margin: 6px 0;">'
         f'<div style="color: {label_color}; font-weight: 600; margin-bottom: 4px;">'
         f'{html.escape(label)}{queued_html}</div>'
         f'<div style="color: {text_color}; white-space: pre-wrap; line-height: 1.35;">'
-        f'{escaped}</div></div>'
+        f'{escaped}{chips}</div></div>'
     )
 
 

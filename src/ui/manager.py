@@ -277,6 +277,7 @@ class UIManager(QWidget):
     project_removed = Signal(str, bool)
     session_open_requested = Signal(str)
     session_renamed = Signal(str, str)
+    session_objective_changed = Signal(str, str)
     session_deleted = Signal(str)
     new_session_requested = Signal()
     context_requested = Signal()
@@ -363,6 +364,8 @@ class UIManager(QWidget):
         self.home_page.project_renamed.connect(self.project_renamed.emit)
         self.home_page.project_removed.connect(self.project_removed.emit)
         self.home_page.session_renamed.connect(self.session_renamed.emit)
+        self.home_page.session_objective_changed.connect(
+            self.session_objective_changed.emit)
         self.home_page.session_deleted.connect(self.session_deleted.emit)
         self.sidebar.home_requested.connect(self.home_requested.emit)
         self.sidebar.project_selected.connect(self.project_switch_requested.emit)
@@ -1359,7 +1362,8 @@ class UIManager(QWidget):
         self.add_file_action.setEnabled(can_add_files)
         self.add_folder_action.setEnabled(can_add_files)
 
-    def build_user_message_html(self, content: str, queued: bool = False) -> str:
+    def build_user_message_html(self, content: str, queued: bool = False,
+                                attachments=None) -> str:
         """Build a safe, line-preserving user prompt card."""
         theme = self.controller.theme_manager
         return render_user_message(
@@ -1371,12 +1375,21 @@ class UIManager(QWidget):
                          else theme.get_style("USER_LABEL_COLOR")),
             queued=queued,
             queued_color=theme.get_style("COLLAPSIBLE_META"),
+            attachments=attachments,
+            attachment_bg=theme.get_style("COLLAPSIBLE_BG"),
+            attachment_border=theme.get_style("COLLAPSIBLE_BORDER"),
+            attachment_text=theme.get_style("COLLAPSIBLE_META"),
+            warning_color=theme.get_style("WARNING_COLOR"),
+            error_color=theme.get_style("ERROR_COLOR"),
         )
 
-    def add_user_message(self, content: str, queued: bool = False):
+    def add_user_message(self, content: str, queued: bool = False,
+                         attachments=None):
         """Add the user's own prompt as a safe, readable card."""
-        self.add_message(self.build_user_message_html(content, queued=queued),
-                         force_scroll=True, role='user')
+        self.add_message(
+            self.build_user_message_html(
+                content, queued=queued, attachments=attachments),
+            force_scroll=True, role='user')
 
     def add_error_message(self, message, force_scroll=True):
         error_style = self.controller.theme_manager.get_style("ERROR_MESSAGE_STYLE")

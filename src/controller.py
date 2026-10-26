@@ -9,8 +9,8 @@ import uuid
 import pathspec
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QGroupBox, QLabel, QMessageBox, QProgressBar,
-    QPushButton, QTextBrowser, QVBoxLayout,
+    QDialog, QFileDialog, QGroupBox, QInputDialog, QLabel, QMessageBox,
+    QProgressBar, QPushButton, QTextBrowser, QVBoxLayout,
 )
 from PIL import Image
 
@@ -20,6 +20,7 @@ from llm.error_formatter import CONTINUE_LINK
 from llm.llm_worker import LLMWorker
 from llm.mode_capabilities import ModeCapabilities, SUBSECTIONS
 from project_manager import event_text
+import attachments as attachment_store
 from context import context_stats, handoff
 from context.tokens import ModelMetadata
 from settings_manager import SettingsManager
@@ -76,8 +77,10 @@ class AppController(QObject):
             self.project_root = os.path.abspath(self.project_root)
         self.working_directory = self.project_root
         self.session_file = ""
+        self.session_id = ""
         self.session_mode = "chat"
         self.session_turn_id = ""
+        self.session_objective = ""
         self.session_events = []
         self._session_event_count = 0
         self._persisted_message_count = 0
@@ -237,6 +240,7 @@ class AppController(QObject):
         self.ui.project_renamed.connect(self.rename_project)
         self.ui.project_removed.connect(self.remove_project)
         self.ui.session_renamed.connect(self.rename_session)
+        self.ui.session_objective_changed.connect(self.edit_session_objective)
         self.ui.session_deleted.connect(self.delete_session)
         self.ui.context_requested.connect(self._show_context_summary)
         self.ui.journal_requested.connect(self._show_session_journal)
@@ -531,12 +535,29 @@ class AppController(QObject):
     def _create_new_session(self, mode: str = ""):
         mode = self._valid_mode(mode or self._current_mode())
         self.session_file = self.project_manager.new_session_file(mode=mode)
+        self.session_id = self.project_manager.session_id(self.session_file)
+        self.session_objective = ""
         self.session_mode = mode
         self.session_turn_id = ""
         self.session_events = []
         self._session_event_count = 0
         self._persisted_message_count = 0
         return self.session_file
+
+    def _ensure_session_objective(self, user_text: str):
+        """Derives the session goal from the first request unless one is set."""
+        if (self.session_objective or not self.session_file
+                or self.project_manager is None):
+            return
+        text = " ".join(str(user_text or "").split())
+        if not text:
+            return
+        objective = text[:200] + ("..." if len(text) > 200 else "")
+        try:
+            if self.project_manager.set_session_objective(self.session_file, objective):
+                self.session_objective = objective
+        except Exception as e:
+            logging.warning(f"Could not store session objective: {e}")
 
     def _prepare_session_for_mode(self, mode: str):
         """Keep one mode per session; a non-empty mode change starts a new one."""
@@ -584,6 +605,8 @@ class AppController(QObject):
     def _load_project_session(self):
         """Restores the most recent session stored in the project."""
         self.session_file = ""
+        self.session_id = ""
+        self.session_objective = ""
         self.session_events = []
         self._session_event_count = 0
         self._persisted_message_count = 0
@@ -611,6 +634,8 @@ class AppController(QObject):
         messages = data.get("messages") or []
         events = data.get("events") or []
         self.session_file = path
+        self.session_id = data.get("id") or self.project_manager.session_id(path)
+        self.session_objective = data.get("objective") or ""
         self.session_mode = self._valid_mode(data.get("mode") or "chat")
         self.session_turn_id = ""
         self.session_events = list(events)
@@ -656,9 +681,10 @@ class AppController(QObject):
             logging.warning(f"Could not append session event '{event_type}': {e}")
             return None
 
-    def _persist_session(self):
+    def _persist_session(self, attachments: list = None):
         if self.project_manager is None or not self.project_manager.get_active_root():
             return
+        pending_attachments = list(attachments or [])
         try:
             snapshot = self._session_snapshot()
             if not self.session_file or not os.path.exists(self.session_file):
@@ -672,11 +698,16 @@ class AppController(QObject):
                 self.session_turn_id = uuid.uuid4().hex
             while self._persisted_message_count < len(snapshot):
                 item = snapshot[self._persisted_message_count]
+                extra = {}
+                if pending_attachments:
+                    extra["attachments"] = pending_attachments
+                    pending_attachments = []
                 event = self.append_session_event(
                     "message",
                     turn_id=self.session_turn_id,
                     role=item["role"],
                     content=[{"type": "text", "text": item["content"]}],
+                    **extra,
                 )
                 if event is None:
                     break
@@ -768,6 +799,20 @@ class AppController(QObject):
                 and not handoff.should_inject(self._handoff_meta, self.session_file)):
             return ""
         return handoff.injection_block(self._handoff_summary, self.session_mode)
+
+    def session_context_prompt(self) -> str:
+        """Objective and journal-derived state of the session being resumed.
+
+        Only Browser and Vision need it: their live page/desktop cannot be
+        replayed, while Chat and Terminal rebuild their history from events.
+        """
+        if self.session_mode not in ("browser", "vision"):
+            return ""
+        if not self.session_events and not self.session_objective:
+            return ""
+        summary = handoff.session_summary(
+            self.session_events, objective=self.session_objective)
+        return handoff.session_injection_block(summary, self.session_mode)
 
     def _capture_handoff_summary(self) -> str:
         """Freeze a summary before the active session is left behind."""
@@ -1029,10 +1074,11 @@ class AppController(QObject):
         handler = self._handler_for_mode(self.session_mode)
         if handler is None:
             return
+        session_block = self.session_context_prompt()
         if not self.session_events:
-            block = self.handoff_prompt()
-            if block:
-                handler.command_history = [block]
+            blocks = [block for block in (session_block, self.handoff_prompt()) if block]
+            if blocks:
+                handler.command_history = blocks
             return
         history = []
         last_user_request = None
@@ -1043,9 +1089,14 @@ class AppController(QObject):
                 if event.get("role") != "user":
                     continue
                 text = event_text(event)
+                attachments = self._format_event_attachments(event)
                 if text:
                     last_user_request = text
                     history.append(f"**User Request:** {text}")
+                elif not attachments:
+                    continue
+                if attachments:
+                    history.append(f"**Attachments:**\n{attachments}")
             elif event_type == "reasoning":
                 text = event_text(event)
                 if text:
@@ -1070,9 +1121,8 @@ class AppController(QObject):
                 message = str(event.get("message") or "").strip()
                 if message:
                     history.append(f"**Error:** {message}")
-        block = self.handoff_prompt()
-        if block:
-            history.insert(0, block)
+        blocks = [block for block in (session_block, self.handoff_prompt()) if block]
+        history[0:0] = blocks
         handler.command_history = history
         if last_user_request:
             handler.original_user_request = last_user_request
@@ -1082,6 +1132,37 @@ class AppController(QObject):
         logging.info(
             f"Rebuilt {mode_name} history with {len(history)} entries "
             f"from {len(self.session_events)} session events.")
+
+    def _event_attachment_records(self, event: dict) -> list:
+        """Attachment metadata with its current on-disk status."""
+        records = []
+        for record in event.get("attachments") or []:
+            if not isinstance(record, dict):
+                continue
+            item = dict(record)
+            if self.project_manager is not None:
+                try:
+                    item["status"] = attachment_store.verify_attachment(
+                        self.project_manager, self.session_file, item,
+                        self.project_root)
+                except Exception as e:
+                    logging.warning(f"Could not verify attachment: {e}")
+                    item["status"] = "missing"
+            records.append(item)
+        return records
+
+    def _format_event_attachments(self, event: dict) -> str:
+        """Model-facing lines for attachments recorded on a user message."""
+        lines = []
+        for record in self._event_attachment_records(event):
+            kind = str(record.get("kind") or "file")
+            name = str(record.get("name") or "attachment")
+            path = str(record.get("path") or record.get("stored_name") or "")
+            status = str(record.get("status") or "")
+            suffix = f" [{status}]" if status and status != "ok" else ""
+            lines.append(
+                f"- {name} ({kind}){suffix}" + (f": `{path}`" if path else ""))
+        return "\n".join(lines)
 
     def _replay_tool_event(self, event: dict):
         """Generic fallback for modes without their own event renderer."""
@@ -1139,12 +1220,15 @@ class AppController(QObject):
             event_type = event.get("type")
             if event_type == "message":
                 text = event_text(event)
-                if not text:
-                    continue
                 role = event.get("role")
                 if role == "user":
-                    self.ui.add_message(
-                        self.ui.build_user_message_html(text), role="user")
+                    records = self._event_attachment_records(event)
+                    if text or records:
+                        self.ui.add_message(
+                            self.ui.build_user_message_html(
+                                text, attachments=records), role="user")
+                elif not text:
+                    continue
                 elif role == "assistant":
                     self.ui.add_message(
                         render_text(text, prefix_html=prefix, markdown_ok=True))
@@ -1263,6 +1347,8 @@ class AppController(QObject):
             logging.warning(f"Could not clear attachments on project switch: {e}")
 
         self.session_file = ""
+        self.session_id = ""
+        self.session_objective = ""
         self._set_project_context(target)
         if session_file:
             self._load_session_file(session_file)
@@ -1327,6 +1413,8 @@ class AppController(QObject):
             self.project_root = ""
             self.working_directory = ""
             self.session_file = ""
+            self.session_id = ""
+            self.session_objective = ""
             self.session_events = []
             self._session_event_count = 0
             self._persisted_message_count = 0
@@ -1366,6 +1454,23 @@ class AppController(QObject):
             return
         self.ui.refresh_project_views()
 
+    def edit_session_objective(self, path: str, objective: str):
+        """Stores the editable one-line goal in the session header."""
+        if self.project_manager is None or not path:
+            return
+        try:
+            saved = self.project_manager.set_session_objective(path, objective)
+        except Exception as e:
+            self._report_project_error(f"Could not save the session objective: {e}")
+            return
+        if not saved:
+            self._report_project_error("The session objective could not be saved.")
+            return
+        if (self.session_file
+                and os.path.abspath(path) == os.path.abspath(self.session_file)):
+            self.session_objective = " ".join(str(objective or "").split())
+        self.ui.refresh_project_views()
+
     def delete_session(self, path: str):
         """Deletes a session file; the open one is replaced with an empty one."""
         if self.project_manager is None or not path:
@@ -1384,6 +1489,8 @@ class AppController(QObject):
             return
         if is_open:
             self.session_file = ""
+            self.session_id = ""
+            self.session_objective = ""
             self.session_events = []
             self._session_event_count = 0
             self._persisted_message_count = 0
@@ -1421,6 +1528,8 @@ class AppController(QObject):
             self._update_attachment_menu()
         except Exception as e:
             logging.warning(f"Could not clear attachments for new session: {e}")
+        self.session_id = ""
+        self.session_objective = ""
         try:
             self._create_new_session(self._current_mode())
         except Exception as e:
@@ -1499,10 +1608,12 @@ class AppController(QObject):
             self._enqueue_chat_message(user_text)
             return
 
+        attachment_records = self._record_pending_attachments()
         self.session_turn_id = uuid.uuid4().hex
-        self.ui.add_user_message(user_text)
+        self.ui.add_user_message(user_text, attachments=attachment_records)
         self.conversation_history.append({'role': 'user', 'content': user_text})
-        self._persist_session()
+        self._persist_session(attachments=attachment_records)
+        self._ensure_session_objective(user_text)
 
         # Process attachments based on the current mode
         attachments_for_handler = []
@@ -1562,6 +1673,26 @@ class AppController(QObject):
         else:
             self.chat_handler.start_chat(user_text, attachments_for_handler)
 
+    def _record_pending_attachments(self) -> list:
+        """Journal metadata for the pending attachments of the current send."""
+        if not self.pending_attachments or self.project_manager is None:
+            return []
+        if not self.session_file:
+            try:
+                self._create_new_session(self.session_mode)
+            except Exception as e:
+                logging.warning(f"Could not create a session for attachments: {e}")
+                return []
+        root = self.project_root or self.project_manager.get_active_root()
+        records = []
+        for attachment in self.pending_attachments:
+            try:
+                records.append(attachment_store.record_attachment(
+                    self.project_manager, self.session_file, attachment, root))
+            except Exception as e:
+                logging.warning(f"Could not record attachment: {e}")
+        return records
+
     def _collect_chat_attachments(self, while_streaming: bool = False) -> list:
         """Reads pending attachments into LLM-ready payloads for chat/vision.
 
@@ -1604,18 +1735,22 @@ class AppController(QObject):
                 pass
             return
 
+        attachment_records = self._record_pending_attachments()
         attachments = self._collect_chat_attachments(while_streaming=True)
         self.pending_attachments.clear()
         self.ui.clear_thumbnails()
         self._update_attachment_menu()
 
         label = user_text if user_text.strip() else "(attachment)"
-        raw_html = self.ui.build_user_message_html(label)
-        display_html = self.ui.build_user_message_html(label, queued=True)
+        raw_html = self.ui.build_user_message_html(
+            label, attachments=attachment_records)
+        display_html = self.ui.build_user_message_html(
+            label, queued=True, attachments=attachment_records)
         handle = self.ui.add_queued_message(raw_html, display_html)
         self.chat_queue.append({
             'text': user_text,
             'attachments': attachments,
+            'attachment_records': attachment_records,
             'ui_handle': handle,
         })
         logging.info(f"Chat message queued (position {len(self.chat_queue)}).")
@@ -1632,7 +1767,8 @@ class AppController(QObject):
         self.current_handler = self.chat_handler
         self.session_turn_id = uuid.uuid4().hex
         self.conversation_history.append({'role': 'user', 'content': item['text']})
-        self._persist_session()
+        self._persist_session(attachments=item.get('attachment_records') or [])
+        self._ensure_session_objective(item['text'])
         logging.info(f"Dequeuing chat message ({len(self.chat_queue)} left).")
         self.chat_handler.start_chat(item['text'], item.get('attachments') or [])
         return True
@@ -2659,7 +2795,7 @@ class AppController(QObject):
         self.ui.add_message("<i>Compacting the project context…</i>")
 
     def _show_session_journal(self):
-        if not self.session_events:
+        if not self.session_events and not self.session_file:
             QMessageBox.information(
                 self.ui.main_window, "Session journal",
                 "This session has no recorded events yet.")
@@ -2673,16 +2809,35 @@ class AppController(QObject):
         browser.setOpenExternalLinks(False)
         browser.setPlainText(text)
         layout.addWidget(browser)
+        edit_button = QPushButton("Edit objective…", dialog)
+        edit_button.setEnabled(bool(self.session_file))
+        edit_button.clicked.connect(
+            lambda: (self._edit_active_objective(), dialog.accept()))
+        layout.addWidget(edit_button)
         close_button = QPushButton("Close", dialog)
         close_button.clicked.connect(dialog.accept)
         layout.addWidget(close_button)
         dialog.exec()
+
+    def _edit_active_objective(self):
+        if not self.session_file:
+            return
+        objective, ok = QInputDialog.getText(
+            self.ui.main_window, "Session Objective", "One-line goal:",
+            text=self.session_objective or "")
+        if not ok:
+            return
+        objective = " ".join((objective or "").split())
+        if not objective:
+            return
+        self.edit_session_objective(self.session_file, objective)
 
     def _session_journal_text(self) -> str:
         """Plain-text journal of every recorded session event."""
         lines = [
             f"Session: {os.path.basename(self.session_file or '(new)')}",
             f"Mode: {self.session_mode}",
+            f"Objective: {self.session_objective or '(not set)'}",
             "",
         ]
         for event in self.session_events:

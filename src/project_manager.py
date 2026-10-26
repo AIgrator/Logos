@@ -213,6 +213,13 @@ class ProjectManager:
         root = root or self._active_root
         return os.path.join(self.project_dir(root), "attachments")
 
+    def session_attachments_dir(self, session_path: str) -> str:
+        session_id = self.session_id(session_path)
+        root = self.session_project_root(session_path)
+        if not session_id or not root:
+            return ""
+        return os.path.join(self.attachments_dir(root), session_id)
+
     @staticmethod
     def _write_json_atomic(path: str, data) -> None:
         tmp = f"{path}.tmp"
@@ -420,16 +427,12 @@ class ProjectManager:
             return False
         return True
 
-    def set_session_title(self, path: str, title: str) -> bool:
-        """Stores a custom session title in the session header.
-
-        The whole JSONL file is rewritten atomically; malformed lines abort the
-        update instead of being silently dropped. Legacy JSON sessions store the
-        title in the same top-level object.
-        """
-        text = " ".join(str(title or "").split())
+    def _update_session_header(self, path: str, field: str, value: str) -> bool:
+        """Rewrites one header field atomically; legacy JSON uses the top level."""
+        text = " ".join(str(value or "").split())
         if not text or not path or not os.path.isfile(path):
             return False
+        updated_key = f"{field}_updated_at"
         if path.endswith(LEGACY_SESSION_EXT):
             try:
                 with open(path, encoding="utf-8") as fh:
@@ -439,12 +442,12 @@ class ProjectManager:
                 return False
             if not isinstance(data, dict):
                 return False
-            data["title"] = text
-            data["title_updated_at"] = _now_iso()
+            data[field] = text
+            data[updated_key] = _now_iso()
             try:
                 self._write_json_atomic(path, data)
             except Exception as exc:
-                logging.warning(f"Could not update session title {path}: {exc}")
+                logging.warning(f"Could not update session {field} {path}: {exc}")
                 return False
             return True
         if not path.endswith(SESSION_EXT):
@@ -460,26 +463,56 @@ class ProjectManager:
         header = records[0]
         if header.get("type") != "session":
             return False
-        header["title"] = text
-        header["title_updated_at"] = _now_iso()
+        header[field] = text
+        header[updated_key] = _now_iso()
         try:
             self._write_jsonl_atomic(path, records)
         except Exception as exc:
-            logging.warning(f"Could not update session title {path}: {exc}")
+            logging.warning(f"Could not update session {field} {path}: {exc}")
             return False
         return True
 
+    def set_session_title(self, path: str, title: str) -> bool:
+        """Stores a custom session title in the session header."""
+        return self._update_session_header(path, "title", title)
+
+    def set_session_objective(self, path: str, objective: str) -> bool:
+        """Stores the editable one-line goal in the session header."""
+        return self._update_session_header(path, "objective", objective)
+
+    def session_id(self, path: str) -> str:
+        """Reads the session id from the header without loading the journal."""
+        if not path or not os.path.isfile(path):
+            return ""
+        if path.endswith(LEGACY_SESSION_EXT):
+            return str(self.load_session_data(path).get("id") or "")
+        try:
+            with open(path, encoding="utf-8") as fh:
+                for line in fh:
+                    if not line.strip():
+                        continue
+                    record = json.loads(line)
+                    if isinstance(record, dict) and record.get("type") == "session":
+                        return str(record.get("id") or "")
+                    break
+        except Exception as exc:
+            logging.warning(f"Could not read session id from {path}: {exc}")
+        return ""
+
     def delete_session(self, path: str) -> bool:
-        """Deletes one session file. Never touches the project folder."""
+        """Deletes one session file and its copied attachments."""
         if not path or not os.path.isfile(path):
             return False
         if not path.endswith((SESSION_EXT, LEGACY_SESSION_EXT)):
             return False
+        attachment_dir = self.session_attachments_dir(path)
         try:
             os.remove(path)
         except OSError as exc:
             logging.warning(f"Could not delete session {path}: {exc}")
             return False
+        if attachment_dir and os.path.isdir(attachment_dir):
+            shutil.rmtree(attachment_dir, ignore_errors=True)
         logging.info(f"Deleted session: {path}")
         return True
 
@@ -525,6 +558,7 @@ class ProjectManager:
                 "project_root": root,
                 "project_name": self.project_display_name(root),
                 "title": data.get("title") or _session_title(messages),
+                "objective": data.get("objective") or "",
                 "message_count": len(messages),
                 "mode": data.get("mode") or "chat",
                 "mtime": mtime,
@@ -595,6 +629,7 @@ class ProjectManager:
             "mode": header.get("mode") or "chat",
             "created_at": header.get("created_at") or "",
             "title": header.get("title") or "",
+            "objective": header.get("objective") or "",
             "messages": messages,
             "events": events,
         }
@@ -606,7 +641,7 @@ class ProjectManager:
         except Exception as exc:
             logging.warning(f"Could not load legacy session {path}: {exc}")
             return {"path": path, "id": "", "mode": "chat", "created_at": "",
-                    "title": "", "messages": [], "events": []}
+                    "title": "", "objective": "", "messages": [], "events": []}
         if not isinstance(data, dict):
             data = {}
         raw_messages = data.get("messages")
@@ -630,6 +665,7 @@ class ProjectManager:
             "mode": data.get("mode") or "chat",
             "created_at": data.get("created_at") or "",
             "title": data.get("title") or "",
+            "objective": data.get("objective") or "",
             "messages": [m for m in (self._message_from_event(e) for e in events)
                          if m is not None],
             "events": events,
@@ -638,7 +674,7 @@ class ProjectManager:
     def load_session_data(self, path: str) -> dict:
         if not path or not os.path.exists(path):
             return {"path": path, "id": "", "mode": "chat", "created_at": "",
-                    "title": "", "messages": [], "events": []}
+                    "title": "", "objective": "", "messages": [], "events": []}
         if path.endswith(SESSION_EXT):
             return self._load_jsonl_session(path)
         return self._load_legacy_session(path)
@@ -662,6 +698,10 @@ class ProjectManager:
         )
         if data.get("created_at"):
             header["created_at"] = data["created_at"]
+        if data.get("title"):
+            header["title"] = data["title"]
+        if data.get("objective"):
+            header["objective"] = data["objective"]
         records = [header]
         for message in data.get("messages") or []:
             if not isinstance(message, dict):
@@ -693,6 +733,10 @@ class ProjectManager:
                     existing.get("mode") or "chat", root)
                 if existing.get("created_at"):
                     header["created_at"] = existing["created_at"]
+                if existing.get("title"):
+                    header["title"] = existing["title"]
+                if existing.get("objective"):
+                    header["objective"] = existing["objective"]
                 records = [header]
                 for message in messages or []:
                     if not isinstance(message, dict):

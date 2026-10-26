@@ -326,6 +326,22 @@ def normalize_summary(text: str, fallback: str = "") -> str:
     return result
 
 
+def session_summary(events: list, objective: str = "") -> str:
+    """State block for resuming one session (deterministic, no LLM call)."""
+    text = fallback_summary(events)
+    objective = " ".join(str(objective or "").split())
+    if not objective:
+        return text
+    sections = _split_sections(text)
+    sections["Objective"] = objective
+    parts = []
+    for name in SUMMARY_SECTIONS:
+        body = sections.get(name) or (
+            "- None." if name in ("Done", "Next", "Files", "Blockers") else "(not set)")
+        parts.append(f"## {name}\n{body}")
+    return normalize_summary("\n\n".join(parts))
+
+
 def _recent_boundary(events: list) -> int:
     """Index from which events are kept verbatim (bounded recent tail)."""
     total = 0
@@ -504,4 +520,24 @@ def injection_block(summary: str, mode: str = "") -> str:
         f"{summary}\n\n"
         "Use this as background. The current user request is authoritative; "
         "do not repeat completed steps unless verification is needed."
+    )
+
+
+def session_injection_block(
+    summary: str,
+    mode: str = "",
+) -> str:
+    """Prompt prefix for resuming the live session itself."""
+    summary = (summary or "").strip()
+    if not summary:
+        return ""
+    label = "Current session context"
+    if mode:
+        label += f" ({mode} mode)"
+    return (
+        f"**{label}:**\n\n"
+        f"{summary}\n\n"
+        "Resume from this state. The live browser tabs or desktop are not "
+        "replayed; observe the current screen/page and continue with the "
+        "user's latest request."
     )
