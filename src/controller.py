@@ -3174,6 +3174,9 @@ class AppController(QObject):
             if compacted_at:
                 compacted_label += f" (last {compacted_at})"
             box.addWidget(QLabel(compacted_label, group))
+        auto_label = self._auto_compaction_diagnostic(window)
+        if auto_label:
+            box.addWidget(QLabel(auto_label, group))
         payload_tokens = int(stats.get("payload_tokens") or 0)
         if payload_tokens:
             components = stats.get("payload_components") or {}
@@ -3231,31 +3234,97 @@ class AppController(QObject):
         ))
         usage_events = int(stats.get("usage_events") or 0)
         if usage_events:
+            latest_total = int(stats.get("latest_usage_tokens") or 0)
+            if latest_total:
+                cache_read = int(stats.get("latest_cache_read") or 0)
+                cache_write = int(stats.get("latest_cache_write") or 0)
+                prompt = f"input {int(stats.get('latest_input_tokens') or 0):,}"
+                cache_parts = []
+                if cache_read:
+                    share = stats.get("latest_cache_share")
+                    share_text = (
+                        f", {float(share) * 100:.0f}% of prompt" if share else "")
+                    cache_parts.append(f"cache read {cache_read:,}{share_text}")
+                if cache_write:
+                    cache_parts.append(f"cache write {cache_write:,}")
+                if cache_parts:
+                    prompt += f" ({'; '.join(cache_parts)})"
+                box.addWidget(QLabel(
+                    f"Latest request: {prompt} · "
+                    f"output {int(stats.get('latest_output') or 0):,} · "
+                    f"reasoning {int(stats.get('latest_reasoning') or 0):,} · "
+                    f"total {latest_total:,}",
+                    group,
+                ))
+                latest_provider = str(stats.get("latest_provider") or "")
+                latest_model = str(stats.get("latest_model") or "")
+                if latest_provider and (
+                        latest_provider != str(stats.get("provider_id") or "")
+                        or latest_model != str(stats.get("model_id") or "")):
+                    box.addWidget(QLabel(
+                        f"Latest usage from: {latest_provider}::{latest_model}",
+                        group,
+                    ))
+            session_parts = [
+                f"input {int(stats.get('actual_input') or 0):,}",
+                f"output {int(stats.get('actual_output') or 0):,}",
+                f"reasoning {int(stats.get('actual_reasoning') or 0):,}",
+            ]
+            session_cache_read = int(stats.get("actual_cache_read") or 0)
+            session_cache_write = int(stats.get("actual_cache_write") or 0)
+            if session_cache_read:
+                session_parts.append(f"cache read {session_cache_read:,}")
+            if session_cache_write:
+                session_parts.append(f"cache write {session_cache_write:,}")
             box.addWidget(QLabel(
-                f"Provider-reported: input {int(stats.get('actual_input') or 0):,} · "
-                f"output {int(stats.get('actual_output') or 0):,} · "
-                f"reasoning {int(stats.get('actual_reasoning') or 0):,} · "
-                f"cache read {int(stats.get('actual_cache_read') or 0):,} · "
-                f"cache write {int(stats.get('actual_cache_write') or 0):,}",
+                f"Session totals ({usage_events:,} provider calls): "
+                + " · ".join(session_parts)
+                + f" · total {int(stats.get('actual_tokens') or 0):,}",
                 group,
             ))
-            box.addWidget(QLabel(
-                f"Session total: {int(stats.get('actual_tokens') or 0):,} tokens "
-                f"across {usage_events:,} provider call(s)",
-                group,
-            ))
+            summary_calls = int(stats.get("summary_usage_calls") or 0)
+            if summary_calls:
+                box.addWidget(QLabel(
+                    f"Summary calls: {summary_calls:,} · "
+                    f"{int(stats.get('summary_usage_tokens') or 0):,} tokens "
+                    "(not part of the current context)",
+                    group,
+                ))
         if stats.get("first_ts"):
             box.addWidget(QLabel(
                 f"Session: {str(stats.get('first_ts'))[:19]} → "
                 f"{str(stats.get('last_ts'))[:19]}",
                 group,
             ))
+        provider_id = str(stats.get("provider_id") or "")
+        model_id = str(stats.get("model_id") or "")
         box.addWidget(QLabel(
             f"Context source: {source_label} · "
-            f"{stats.get('provider_id') or '?'}::{stats.get('model_id') or '?'}",
+            f"{provider_id or '?'}::{model_id or '?'}",
             group,
         ))
+        summary_provider, summary_model = self._summary_model_ids()
+        if summary_model and (summary_provider, summary_model) != (
+                provider_id, model_id):
+            box.addWidget(QLabel(
+                f"Summary model: {summary_provider}::{summary_model}", group))
         return group
+
+    def _auto_compaction_diagnostic(self, window: int) -> str:
+        context_cfg = self._summary_settings()
+        if self.session_mode not in ("chat", "terminal", "browser"):
+            return "Auto-compaction: not used in this mode"
+        if not context_cfg.get("handoff_enabled", True):
+            return "Auto-compaction: off (handoff is disabled in Settings → Context)"
+        if not context_cfg.get("auto_compact", True):
+            return "Auto-compaction: off (Settings → Context)"
+        if not window:
+            return "Auto-compaction: on"
+        headroom = max(
+            context_stats.DEFAULT_MIN_HEADROOM_TOKENS,
+            int(window * context_stats.DEFAULT_HEADROOM_RATIO))
+        return (f"Auto-compaction: on · starts at ≤{headroom:,} free tokens "
+                "once the step settles with ≥4 new events")
 
     def _show_context_summary(self):
         summary = handoff.read_summary(self.session_file) if self.session_file else ""

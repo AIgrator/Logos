@@ -918,11 +918,24 @@ class UIManager(QWidget):
             "estimated": "journal estimate",
         }.get(source, source)
         approximate = "" if source == "actual" else "~"
+        cache_bits = []
+        latest_cache_read = int(stats.get("latest_cache_read") or 0)
+        latest_cache_write = int(stats.get("latest_cache_write") or 0)
+        if latest_cache_read:
+            share = stats.get("latest_cache_share")
+            share_text = f" ({float(share) * 100:.0f}% of prompt)" if share else ""
+            cache_bits.append(f"read {latest_cache_read:,}{share_text}")
+        if latest_cache_write:
+            cache_bits.append(f"written {latest_cache_write:,}")
+        cache_line = (
+            "\nLast request cache: " + " · ".join(cache_bits)
+            if cache_bits else "")
         self.context_indicator_button.setText(f"{percent:.0f}%")
         self.tooltip_manager.install(
             self.context_indicator_button,
             f"Context {approximate}{percent:.0f}% full\n"
-            f"{approximate}{used:,} / {window:,} tokens · {source_label}\n"
+            f"{approximate}{used:,} / {window:,} tokens · {source_label}"
+            f"{cache_line}\n"
             "Click to open Session context")
         self._style_context_indicator(percent)
         was_hidden = self.context_indicator_button.isHidden()

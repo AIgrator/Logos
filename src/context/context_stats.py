@@ -48,9 +48,16 @@ def _to_int(value) -> int:
 def _aggregate_usage(events: list) -> dict:
     totals = {"input": 0, "output": 0, "reasoning": 0,
               "cache_read": 0, "cache_write": 0}
+    latest = {"input": 0, "output": 0, "reasoning": 0,
+              "cache_read": 0, "cache_write": 0}
     latest_tokens = 0
     latest_input_tokens = 0
+    latest_provider = ""
+    latest_model = ""
     session_total = 0
+    completion_calls = 0
+    summary_calls = 0
+    summary_tokens = 0
     for event in events:
         tokens = {key: _to_int(event.get(key)) for key in totals}
         for key, value in tokens.items():
@@ -58,18 +65,31 @@ def _aggregate_usage(events: list) -> dict:
         event_total = _to_int(event.get("total")) or sum(tokens.values())
         session_total += event_total
         purpose = str(event.get("purpose") or "completion")
+        if purpose == "summary":
+            summary_calls += 1
+            summary_tokens += event_total
+        elif purpose == "completion":
+            completion_calls += 1
         if purpose == "completion" and event_total:
+            latest = tokens
             latest_tokens = event_total
+            latest_provider = str(event.get("provider") or "")
+            latest_model = str(event.get("model") or "")
             # Anthropic reports cache tokens outside input_tokens; for other
             # providers the cached part is already inside the prompt count.
-            latest_input_tokens = _to_int(event.get("input"))
-            if "anthropic" in str(event.get("provider") or "").lower():
+            latest_input_tokens = tokens["input"]
+            if "anthropic" in latest_provider.lower():
                 latest_input_tokens += (
-                    _to_int(event.get("cache_read"))
-                    + _to_int(event.get("cache_write")))
+                    tokens["cache_read"] + tokens["cache_write"])
     totals["total"] = session_total
     totals["latest_tokens"] = latest_tokens
     totals["latest_input_tokens"] = latest_input_tokens
+    totals["latest"] = latest
+    totals["latest_provider"] = latest_provider
+    totals["latest_model"] = latest_model
+    totals["completion_calls"] = completion_calls
+    totals["summary_calls"] = summary_calls
+    totals["summary_tokens"] = summary_tokens
     return totals
 
 
@@ -147,6 +167,10 @@ def build_session_stats(
     estimated_used = estimate_tokens("\n".join(lines))
     actual = _aggregate_usage(usage_events)
     latest_tokens = actual["latest_tokens"]
+    latest_cache_share = None
+    if actual["latest"]["cache_read"] and actual["latest_input_tokens"]:
+        latest_cache_share = (
+            actual["latest"]["cache_read"] / actual["latest_input_tokens"])
     if latest_tokens:
         context_tokens = latest_tokens
         context_source = "actual"
@@ -182,6 +206,16 @@ def build_session_stats(
         "actual_cache_read": actual["cache_read"],
         "actual_cache_write": actual["cache_write"],
         "actual_tokens": actual["total"],
+        "latest_output": actual["latest"]["output"],
+        "latest_reasoning": actual["latest"]["reasoning"],
+        "latest_cache_read": actual["latest"]["cache_read"],
+        "latest_cache_write": actual["latest"]["cache_write"],
+        "latest_cache_share": latest_cache_share,
+        "latest_provider": actual["latest_provider"],
+        "latest_model": actual["latest_model"],
+        "completion_calls": actual["completion_calls"],
+        "summary_usage_calls": actual["summary_calls"],
+        "summary_usage_tokens": actual["summary_tokens"],
         "usage_events": len(usage_events),
         "estimated_used": estimated_used,
         "estimated_input": (groups["user"] + groups["system"]
