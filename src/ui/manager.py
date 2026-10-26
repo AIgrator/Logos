@@ -1147,9 +1147,13 @@ class UIManager(QWidget):
             self.mode_model_layout.removeWidget(w)
 
         if single:
-            # Insert after the three left icons, before the stretch (index 3).
+            # Keep the mode/model dropdowns next to the attach button (left
+            # side), before the stretch that pushes Send to the right.
+            anchor = self.bottom_toolbar_layout.indexOf(self.attachment_button)
+            if anchor < 0:
+                anchor = 1
             for offset, w in enumerate(extras):
-                self.bottom_toolbar_layout.insertWidget(3 + offset, w)
+                self.bottom_toolbar_layout.insertWidget(anchor + 1 + offset, w)
             self.mode_model_container.setVisible(False)
         else:
             self.mode_model_layout.addWidget(self.mode_button)
