@@ -271,13 +271,13 @@ The project root, not the install directory, is the working directory for Termin
 
 ### Rolling handoff summary
 
-`src/context/handoff.py` keeps a fixed-shape summary (`Objective`, `Done`, `Current`, `Next`, `Files`, `Blockers`) for the project. A deterministic extractive fallback is written immediately; when the context threshold is crossed (`context.summary_threshold_ratio`, default 0.6) an LLM refresh runs in the worker thread. Before summarizing, old tool outputs are pruned to head/tail excerpts while the recent tail stays verbatim. The summary is injected when continuing in a different session or mode, and on a fresh Vision chain. It is project-level, not session-level: a long-lived Browser/Vision session can therefore see context from other sessions in the same project. The session's own state is derived separately from its journal by `session_summary()` and injected first on Browser/Vision resume.
+`src/context/handoff.py` keeps a fixed-shape summary (`Objective`, `Done`, `Current`, `Next`, `Files`, `Blockers`) for the project. A deterministic extractive fallback is written immediately; when the context threshold is crossed (`context.summary_threshold_ratio`, default 0.6) an LLM refresh runs in the worker thread. Before summarizing, old tool outputs are pruned to head/tail excerpts while the recent tail stays verbatim. The summary is injected when continuing in a different session or mode, and on a fresh Vision chain. It is project-level, not session-level: a long-lived Browser/Vision session can therefore see context from other sessions in the same project. The session's own state is derived separately from its journal by `session_summary()` and injected first on Browser/Vision resume. Moving the summary to session scope is the main remaining item in [context_handoff_plan.md](./context_handoff_plan.md).
 
 ### Context accounting
 
 `src/context/context_stats.py` and `src/context/tokens.py` combine provider-reported `usage` events (input/output/reasoning/cache/total) with a character-based estimate when usage is absent. The Context dialog shows actual or estimated fill, the model window, the threshold, session totals and the usage breakdown. No prices are stored or shown. At 80% fill a non-blocking warning is shown once per session. "Compact now" forces a summary refresh; failed LLM compactions back off (15–300 s) instead of looping.
 
-See [context_window_plan.md](./context_window_plan.md) for the UI/statistics details and [context_handoff_plan.md](./context_handoff_plan.md) for the original design log.
+See [context_window_plan.md](./context_window_plan.md) for the UI/statistics details and [context_handoff_plan.md](./context_handoff_plan.md) for the current context scheme and remaining work.
 
 ---
 
@@ -374,5 +374,5 @@ def on_settings_changed(self, new_settings: dict):
 - [hybrid_web_search_guide.md](./hybrid_web_search_guide.md) — provider-native search and local fallback.
 - [file_search_guide.md](./file_search_guide.md) — `@` fuzzy search behavior and limits.
 - [context_window_plan.md](./context_window_plan.md) — usage statistics, thresholds, compaction UI.
-- [context_handoff_plan.md](./context_handoff_plan.md) — historical design log for the rolling handoff.
+- [context_handoff_plan.md](./context_handoff_plan.md) — three memory layers, current handoff behavior, remaining work (session-scoped summary, AGENTS.md baseline).
 - [future_vision.md](./future_vision.md) — planned evolution (grounding backends, long-lived sessions, MCP, thin client).

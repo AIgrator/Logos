@@ -118,7 +118,7 @@ opencode, а затем использовать это для своеврем�
   `src/llm/providers/*.py` - сбор и передача usage.
 - `src/handlers/vision_handler.py` - usage из CUA-воркера.
 - `src/project_manager.py` - JSONL `usage`-event.
-- `docs/context_handoff_plan.md` - исходный план handoff.
+- `docs/context_handoff_plan.md` - текущая схема контекста и оставшаяся работа.
 
 ## Риски
 
