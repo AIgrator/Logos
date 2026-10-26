@@ -23,18 +23,12 @@ bash ./setup_ubuntu.sh
 
 ### Manual Dependency Installation
 
-If you prefer to install dependencies manually, follow these steps:
+If you prefer to install dependencies manually, sync the environment from the lockfile:
 
-1. **PyTorch with CUDA (if your GPU supports it):**
-   ```bash
-   uv pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
-   ```
+```bash
+uv sync
+```
 
-2. **Other dependencies:**
-   ```bash
-   uv pip install -r requirements.txt
-   ```
-   
 ## Getting a Free API Key (Google Gemini Example)
 
 The assistant requires an API key from an AI provider to function. If you don't have one yet, here's how to get one for free (the "gemini-2.5-flash" model is recommended):
@@ -70,11 +64,9 @@ If you installed using the setup script (setup_windows.ps1 or setup_ubuntu.sh), 
 logos
 ```
 
-### Working in a Specific Directory (Terminal Mode)
+### Working in a Specific Directory
 
-The program accepts a folder path as an argument, which becomes the working directory for the terminal mode. All file operations and shell commands are executed relative to this folder.
-
-You can specify the working directory for the **terminal mode** by passing the folder path as an argument. All file operations and shell commands will be executed relative to this folder.
+The program accepts a folder path as an argument and opens that folder as the active project. The project root is the working directory for **Terminal** and **Browser** modes, the root for `@`-file search and indexing, and the place where project data is stored in `.logos/`.
 
 If you have integrated the application with the Windows context menu (an option available during the first setup), you can right-click any folder and select "Open with Logos" to launch the assistant in that directory.
 
@@ -87,15 +79,15 @@ python main.py /home/user/my_project
 ```powershell
 python main.py C:\Users\User\Documents\my_project
 ```
-If no path is specified, the working directory will be the one from which the application was launched.
+If no path is specified, the remembered active project is used. When there is no usable remembered project, the full-screen **Home** page opens and lets you pick or add one.
 
 ### Modes of Operation
 
-The application has three main modes, each designed for different types of tasks:
+The application has four main modes, each designed for different types of tasks:
 
-*   **Chat Mode:** A simple chat with the LLM. You can converse and send files for analysis. The LLM can independently perform web searches or fetch page context if it deems it necessary. This is a **streaming** mode, where responses are generated in real-time.
+*   **Chat Mode:** A simple chat with the LLM. You can converse and send files for analysis. When the selected provider supports native web search, the model can search the web on its own during the response; Chat does not run a local tool loop. This is a **streaming** mode, where responses are generated in real-time.
 
-*   **Vision Mode:** In this mode, the assistant uses computer vision models to "see" the screen, understand the graphical user interface, and interact with it using the mouse and keyboard. This is a **stateful** mode that operates based on a **plan**. Before executing a task, the LLM creates a step-by-step plan that you can review, edit, and approve. It is ideal for automating tasks in GUI applications.
+*   **Vision Mode:** In this mode, the assistant uses the selected provider's native **Computer Use** capability to see the screen and interact with it using the mouse and keyboard. It runs on the same plan-free agent loop as Terminal and Browser mode — observe, act, assess — and requires a CUA-capable provider (OpenAI, Anthropic, or Google). It is ideal for automating tasks in GUI applications.
 
 *   **Terminal Mode:** In this mode, the assistant acts as an AI agent in the command line. This is also a **stateful** mode, but it operates **without a predefined plan**. The LLM autonomously determines the next step, executes the command, and analyzes the result, iteratively moving towards the goal. It does not have access to the visual interface but can execute shell commands, work with the file system, run scripts, and interact with web resources. Long-running commands can be launched as background jobs (`run_in_background`, `poll_shell_job` / `stop_shell_job` / `wait_seconds`). This mode is designed for tasks related to development, file management, and console automation.
 
@@ -120,21 +112,22 @@ Logos supports a wide range of models from leading AI providers. You can easily 
 
 ### Adding Files to Context
 
-In all modes, you can add file content to the context by simply typing `@` and starting to type the file name. The assistant will suggest matching files. For more advanced searches using special characters, refer to the [**file search guide**](./docs/file_search_guide.md).
+In all modes, you can add file content to the context by simply typing `@` and starting to type the file name. The assistant suggests matching files with a fuzzy, case-sensitive search over the active project; wildcards and glob patterns are not supported. See the [**file search guide**](./docs/file_search_guide.md) for details.
 
 ## Features (Tools)
 
 The assistant comes with a set of built-in tools, grouped by their mode of operation:
 
 #### Chat Mode Tools
-*   `web_search`, `web_fetchs` (internet search and page context retrieval).
+Chat mode does not execute client-side tools. Web search, when available, is performed natively by the provider inside the response stream.
 
 #### Vision Mode Tools
-*   **Mouse**: `click`, `double_click`, `drag_and_drop`, `scroll`, `scroll_page`.
-*   **Keyboard**: `write_text`, `press_key`, `hotkey`, `key_down`, `key_up`.
-*   **System**: `get_clipboard_content`, `launch_app`, `wait_element`, `execute_shell`, `finish`.
-*   **File System (read/write)**: `list_directory`, `read_files`, `write_file`.
-*   **User Interaction**: `communicate_to_user`, `display_message`, `show_warning`.
+Vision mode does not use a local tool manifest. Actions come from the provider's native Computer Use interface and are executed by Logos:
+
+*   **Pointer**: `click`, `double_click`, `triple_click`, `move`, `drag`, `left_mouse_down`, `left_mouse_up`, `scroll`, `cursor_position`.
+*   **Keyboard**: `type`, `keypress`, `hold_key`.
+*   **Observation**: `screenshot`, `zoom`.
+*   **Control**: `wait`, plus the `ask_user` function tool for questions that need a human answer.
 
 #### Terminal Mode Tools
 *   **File System**: `list_directory`, `read_files`, `write_file`, `search_file_content`, `find_files`, `create_directory`, `delete_files`, `move_files`, `copy_files`, `path_exists`.
@@ -155,20 +148,18 @@ The assistant comes with a set of built-in tools, grouped by their mode of opera
 
 ### Known Issues
 
-In the process of working with LLMs, situations may arise where the model returns an incorrectly formatted JSON response, which is especially relevant for **Vision Mode**, where strictly structured data is required for plan building and execution.
+In the process of working with LLMs, situations may arise where the model returns an incorrectly formatted JSON response. This is most relevant for the agent modes (**Terminal** and **Browser**), which require strictly structured tool calls.
 
 Our application is equipped with an intelligent mechanism for correcting errors in LLM's JSON responses, described in the section [**"Reliable Handling of Structured LLM Responses"**](./docs/system_architecture.md#reliable-handling-of-structured-llm-responses) of the system architecture documentation.
 
-However, if automatic correction fails, you may see an error message similar to the following:
+However, if automatic correction fails, you may see a validation error card that names the tool schema, for example:
 
 ```
-Pydantic validation failed for schema 'strategic_plan':
-1 validation error for Evaluation
-payload.tasks
-  list[dict] is not a valid list
+Pydantic validation failed for schema 'terminal_tool_code':
+...
 ```
 
-If this occurs, try repeating your request or task for plan creation. Often, a retry helps the LLM form a correct response.
+If this occurs, repeat the request. Often, a retry helps the LLM form a correct response.
 
 
-For a comprehensive understanding of the project's internal workings, data flows, and advanced concepts like self-correction mechanisms, please refer to the [**System Architecture Overview**](./docs/system_architecture.md).
+For a comprehensive understanding of the project's internal workings and data flows, please refer to the [**System Architecture Overview**](./docs/system_architecture.md).

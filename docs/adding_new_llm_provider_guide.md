@@ -1,174 +1,285 @@
 # Guide: Adding a New LLM Provider
 
-The architecture has been completely redesigned for maximum modularity and ease of extension. Now, to add a new LLM provider, you only need to create **one file** that contains all its logic, configuration, and UI description. The system will automatically detect and integrate it on the next launch.
+A provider is one self-contained module in `src/llm/providers/`. The application
+discovers it automatically, shows it in Settings, and imports its SDK only when
+that provider is actually selected. Adding a provider does not require editing
+the controller, the settings UI, or the worker.
 
-**Concept:** Each provider is a self-contained class, inherited from `BaseLLMProvider`, that "tells" the system about itself through a set of static methods and correctly handles errors.
+The base contract lives in [`src/llm/base_provider.py`](../src/llm/base_provider.py).
+The lazy discovery mechanism is described in
+[LLM Provider Loading Flow](./llm_provider_loading_flow.md).
 
 ---
 
-## Steps to Add a New Provider (Example: `Groq`)
+## 1. Create the module
 
-### 1. Create the Provider File
+Place the file at:
 
-In the `src/llm/` directory, create a new file with the `_provider.py` suffix. For example, `src/llm/groq_provider.py`.
+```
+src/llm/providers/<provider_id>_provider.py
+```
 
-### 2. Implement the Provider Class
+Rules that the loader relies on:
 
-Inside the file, create a class inherited from `BaseLLMProvider` and implement its abstract methods.
+- The filename **must** end with `_provider.py`; other modules in the folder are
+  ignored.
+- The filename (without `_provider`) is the provider id used during discovery.
+  Keep it equal to `get_provider_id()`.
+- The module must define exactly one concrete subclass of `BaseLLMProvider`.
+- `get_provider_id()` and `get_display_name()` must return string literals.
+  Discovery parses the source without importing it, but its AST scan only sees
+  module-level functions; class-based methods are not extracted, so the
+  Settings dropdown currently uses the filename-derived id and name
+  (`openai_provider.py` → id `openai`, caption `Openai`). The static methods
+  are still required by the provider contract and are used whenever the class
+  is loaded.
 
--   **Abstract Static Methods (Configuration):** These methods describe your provider to the rest of the system.
--   **Abstract Instance Methods (Logic):** These methods implement direct API interaction.
+The provider id is a stable key used in `settings.json` (`llm_providers.<id>`),
+in `models.json` (`"<provider_id>::<model_id>"` capability keys), and in the
+settings dropdowns. Do not rename it after release.
 
-### 3. Implement Error Handling (Mandatory Step)
+---
 
-For integration with the assistant's intelligent error handling system, your provider **must** intercept errors and correctly **classify** them, "repackaging" them into one of two custom exceptions: `FatalError` or `RetryableError`.
-
--   **`FatalError`**: Use for **unrecoverable** errors that will not succeed on retry. These are client-side errors, such as an invalid API key, quota exhaustion, or an incorrect request (typically `4xx` errors).
--   **`RetryableError`**: Use for **temporary** errors that might disappear on a retry. These are server-side issues (`5xx`), network connection failures, or timeouts.
-
-This is critically important as `LLMWorker` will use these exception types to decide whether to retry the request or immediately report the error to the user.
-
-#### Approach to Error Classification
-
--   **If the provider has an SDK:** Catch library-specific exceptions (e.g., `AuthenticationError`, `RateLimitError`) and convert them into `FatalError` or `RetryableError`.
--   **If you are working directly with the API (e.g., via `requests`):** Analyze the HTTP status code. `4xx` codes should become `FatalError`, while `5xx` codes and network exceptions should become `RetryableError`. This approach is more universal.
-
-### 4. Full Implementation Example
-
-Here is a complete, minimal example of the `generic_provider.py` file structure, which uses the `requests` library and demonstrates a universal approach to error handling.
+## 2. Implement the class contract
 
 ```python
-# src/llm/generic_provider.py
-import logging
-import requests # <-- Use requests for universality
-from .base_provider import BaseLLMProvider
-from .exceptions import FatalError, RetryableError # <-- 1. Import our exceptions
-from typing import Dict, Any, List, Optional
+from ..base_provider import BaseLLMProvider
+from ..exceptions import FatalError, RetryableError
 
-logger = logging.getLogger(__name__)
 
-class GenericProvider(BaseLLMProvider):
-    """
-    LLM provider for a generic service.
-    """
-    # --- System Configuration ---
-
+class ExampleProvider(BaseLLMProvider):
     @staticmethod
     def get_provider_id() -> str:
-        return "generic"
+        return "example"
 
     @staticmethod
     def get_display_name() -> str:
-        return "Generic"
+        return "Example AI"
 
     @staticmethod
-    def get_default_settings() -> Dict[str, Any]:
-        return { "model": "some-model-v1", "api_key": "" }
-
-    @staticmethod
-    def get_ui_schema() -> Dict[str, Any]:
+    def get_default_settings() -> dict:
         return {
-            "api_key": {"type": "password", "label": "API Key"},
-            "model": {"type": "dropdown", "label": "Model", "options_source": "models.json"}
+            "model": "example-large",
+            "require_json_output": True,
         }
 
     @staticmethod
-    def get_provider_config() -> Dict[str, Any]:
-        return { "supports_cancellation": False }
+    def get_ui_schema() -> dict:
+        return {
+            "api_key": {"type": "password", "label": "API Key"},
+            "model": {
+                "type": "dropdown",
+                "label": "Model",
+                "options_source": "models.json",
+            },
+            "require_json_output": {
+                "type": "checkbox",
+                "label": "Require JSON Output",
+            },
+        }
 
-    # --- Initialization and API Interaction Logic ---
+    @staticmethod
+    def get_provider_config() -> dict:
+        return {
+            "api_url": "https://api.example.com/v1",
+            "supports_cancellation": False,
+            "supports_streaming_tools": False,
+        }
 
-    def __init__(self, provider_config: dict):
-        super().__init__(provider_config)
-        self.session = requests.Session()
-        self.api_url = "https://api.generic-provider.com/v1/chat"
+    def _execute_get_response(self, prompt, attachments=None,
+                              system_prompt=None, history=None,
+                              schema_name=None) -> dict:
+        ...
 
-    def _execute_get_response(
-        self,
-        prompt: str,
-        attachments: Optional[List[Any]] = None,
-        system_prompt: Optional[str] = None,
-        history: Optional[List[Dict[str, Any]]] = None,
-        schema_name: Optional[str] = None
-    ) -> Dict[str, Any]:
-        # 2. Wrap the API call in try...except
-        try:
-            headers = {"Authorization": f"Bearer {self.api_key}"}
-            payload = {"model": self.model, "prompt": prompt} # Simplified payload
-            
-            response = self.session.post(self.api_url, headers=headers, json=payload, timeout=120)
-            response.raise_for_status() # <-- Raises HTTPError for 4xx/5xx codes
-
-            response_data = response.json()
-            # ... your response processing logic ...
-            return {"text": response_data.get("text", ""), "tool_calls": {}}
-
-        # 3. Catch and classify errors
-        except requests.exceptions.HTTPError as e:
-            status_code = e.response.status_code
-            if 400 <= status_code < 500:
-                # Client error (4xx) -> FatalError
-                raise FatalError(f"Generic provider client error ({status_code}): {e.response.text}") from e
-            elif 500 <= status_code < 600:
-                # Server error (5xx) -> RetryableError
-                raise RetryableError(f"Generic provider server error ({status_code}): {e.response.text}") from e
-            else:
-                # Other HTTP errors
-                raise FatalError(f"Generic provider unexpected HTTP error ({status_code}): {e.response.text}") from e
-        
-        except requests.exceptions.RequestException as e:
-            # Network errors (DNS, timeout, no connection) -> RetryableError
-            raise RetryableError(f"Generic provider network error: {e}") from e
-
-        except Exception as e:
-            logger.error(f"An unexpected error occurred in Generic provider: {e}", exc_info=True)
-            # Unexpected errors are considered fatal by default
-            raise FatalError(f"An unexpected error in Generic provider: {e}") from e
-
-    def stream_response(
-        self,
-        prompt: str,
-        attachments: Optional[List[Any]] = None,
-        system_prompt: Optional[str] = None,
-        history: Optional[List[Dict[str, Any]]] = None,
-        callbacks=None
-    ):
-        # Error handling logic for streaming requests will be similar
-        try:
-            # ... your streaming request code ...
-            pass
-        except requests.exceptions.HTTPError as e:
-            status_code = e.response.status_code
-            if 400 <= status_code < 500:
-                raise FatalError(f"Generic provider stream client error ({status_code}): {e.response.text}") from e
-            elif 500 <= status_code < 600:
-                raise RetryableError(f"Generic provider stream server error ({status_code}): {e.response.text}") from e
-            else:
-                raise FatalError(f"Generic provider stream unexpected HTTP error ({status_code}): {e.response.text}") from e
-        except requests.exceptions.RequestException as e:
-            raise RetryableError(f"Generic provider stream network error: {e}") from e
-        except Exception as e:
-            logger.error(f"An unexpected error occurred in Generic provider stream: {e}", exc_info=True)
-            raise FatalError(f"An unexpected error in Generic provider stream: {e}") from e
-
+    def stream_response(self, prompt, attachments=None, system_prompt=None,
+                        history=None, callbacks=None):
+        ...
 ```
 
-### 5. Logging: write nothing.
+### Required static methods
 
-Do NOT add logger lines to your provider file. Every call is journaled
-automatically by `BaseLLMProvider.__init__` (start / duration / exception /
-stream stats, with task tag + turn number) into the single `app.log`
-timeline. Raise `FatalError` / `RetryableError` as above — the worker logs
-the semantic content (prompts, responses, repairs). If you add logging
-anyway, keep it to `logger = logging.getLogger(__name__)` diagnostics;
-never open log files from a provider.
+| Method | Purpose |
+| --- | --- |
+| `get_provider_id()` | Stable id and settings key. Must return a literal string. |
+| `get_display_name()` | Name shown in Settings and the model switcher. Must return a literal string. |
+| `get_default_settings()` | Initial values written to `settings.json` the first time the provider is used. Must include `model`; `require_json_output` is strongly recommended. |
+| `get_ui_schema()` | Field list rendered by `LLMProviderWidget`. Key order is the UI order. |
 
-### 6. That's it!
+### Required instance methods
 
-No more steps are needed. On the next launch of the application:
-- The mechanism in `src/llm/__init__.py` will automatically detect your `GroqProvider`.
-- `SettingsManager` will read its static configuration and create default settings.
-- `LLMProviderWidget` in the settings UI will dynamically generate the necessary fields (`API Key`, `Model`) based on `get_ui_schema`.
-- `LLMWorker` will correctly handle errors generated by your provider.
+| Method | Purpose |
+| --- | --- |
+| `_execute_get_response(...)` | Non-streaming request used by agents. Called through the base wrapper `get_response()`, which also enforces `require_json_output`. |
+| `stream_response(...)` | Streaming request used by Chat. Yields text chunks or typed dict chunks. |
 
-This architecture completely eliminates the need to edit multiple files and makes adding new providers fast and safe.
+`_execute_get_response` receives `schema_name` when the caller expects a
+structured object (terminal/browser tool envelopes, vision plans on legacy
+paths). Return:
+
+```python
+{"text": "...", "tool_calls": {"type": "<schema_name>", "payload": {...}}}
+```
+
+Return `{"text": "...", "tool_calls": {}}` when the model produced no call.
+With `require_json_output=True`, `BaseLLMProvider.get_response()` replaces an
+empty or non-dict `tool_calls` with a structured `error_explanation`, so the
+agent loop can self-correct instead of crashing.
+
+For structured output, providers normally obtain the JSON with the vendor's
+native mechanism (forced tool call, response schema, or MIME type), then run
+[`repair_json_string`](../src/llm/llm_parsing.py) as a safety net and return the
+result as `tool_calls`. Do not parse tool envelopes in the worker.
+
+`stream_response` has two modes, selected by
+`get_provider_config()["supports_streaming_tools"]`:
+
+- **`False`** — yield plain text strings. Chat works, native chat-mode search
+  tools are unavailable for this provider.
+- **`True`** — yield typed chunks:
+  - `{"type": "text", "content": "..."}`
+  - `{"type": "tool_code", "content": {...}}` where the content validates as
+    `ChatFunctionCall` (chat search/fetch tools).
+
+Streaming may also yield the control string
+`"generation_id::<id>"`; the worker captures it so the Cancel button can ask
+the provider to stop server-side generation.
+
+### Optional instance methods
+
+| Method | Purpose |
+| --- | --- |
+| `supports_computer_use()` | Return `True` only if the provider implements native Computer Use. |
+| `wants_first_screenshot()` | First CUA turn should carry an opening screenshot (Google). |
+| `computer_use_turn(...)` | One native computer-use protocol turn; see the docstring in `base_provider.py` for the exact return shape. |
+| `web_search(query)` | Native web search. Return `None` (the base default) when unsupported; the agent then falls back to the local search stack. |
+| `cancel_stream(generation_id)` | Server-side cancellation. Required only when `supports_cancellation` is `True`. |
+| `_record_usage(raw)` | Store normalized token counts for the usage signal. Call it after each API response; `normalize_usage()` in [`src/llm/usage.py`](../src/llm/usage.py) handles provider field differences. |
+
+Computer Use is currently wired only for `openai`, `anthropic`, and `google`
+(`CUA_PROVIDERS` in [`src/llm/mode_capabilities.py`](../src/llm/mode_capabilities.py)).
+A provider can implement `computer_use_turn()` and still be excluded from
+Vision until it is added there and listed in the `vision` capability list in
+`models.json`.
+
+---
+
+## 3. Provider configuration (`get_provider_config`)
+
+This static dictionary is merged into the runtime config when the provider is
+instantiated and when the settings page is built. Recognized keys:
+
+| Key | Meaning |
+| --- | --- |
+| `api_url` | Base endpoint used by SDK/HTTP clients. |
+| `supports_cancellation` | Allows the worker to call `cancel_stream()` on Cancel. |
+| `supports_streaming_tools` | Enables typed `tool_code` streaming chunks for chat search tools. |
+| `show_in_ui` | `False` hides the provider from the Settings dropdown (default `True`). |
+| `provider_properties` | Per-sub-provider overrides (used by OpenRouter for cancellation). |
+
+The final instance config is: static provider config → the lightweight copy in
+`SettingsManager.PROVIDER_CONFIG` → the user's saved settings for that provider
+→ `name` and the selected `model`. The active provider is rejected before
+instantiation if its `api_key` setting is empty, so a keyless local provider
+must either expose an API-key field that the user fills or the check must be
+changed.
+
+---
+
+## 4. UI schema
+
+`get_ui_schema()` is consumed by
+[`src/ui/widgets/llm_provider_widget.py`](../src/ui/widgets/llm_provider_widget.py).
+Supported `type` values:
+
+| Type | Widget |
+| --- | --- |
+| `password` | Masked line edit. |
+| `string` | Plain line edit. |
+| `dropdown` | Editable combo box populated from `models.json` for this provider. Users can also type a model id manually. |
+| `nested_dropdown` | Two editable combo boxes (group → model), used by OpenRouter. Requires `primary_dropdown_label` and `secondary_dropdown_label`. |
+| `checkbox` | Checkbox with the schema `label` as its text. |
+| `note` | Read-only wrapped label for warnings/explanations. |
+
+Each field may define `label` and `tooltip`. The `options_source` key is
+documentation only; model lists always come from `models.json` (see
+[Dynamic LLM Model Management](./system_architecture.md#dynamic-llm-model-management)).
+
+To make a new provider's models selectable in the normal dropdown, the remote
+`models.json` must contain an entry for its provider id. Until then the combo
+box is still usable via manual input.
+
+---
+
+## 5. Error handling (mandatory)
+
+Never let a vendor SDK exception escape `_execute_get_response` or
+`stream_response`. Classify it with the exceptions from
+[`src/llm/exceptions.py`](../src/llm/exceptions.py):
+
+- **`FatalError`** — retrying cannot help: invalid key, exhausted quota,
+  malformed request (`4xx`). `LLMWorker` stops immediately and shows a
+  user-facing error card.
+- **`RetryableError`** — temporary: `5xx`, `529`, network failures, timeouts.
+  `LLMWorker` retries with exponential backoff up to `max_retries`.
+
+Additional rules implemented by the shared classifiers:
+
+- Pass `retry_after` when the provider supplies it:
+  `RetryableError(message, retry_after=extract_retry_after(response=..., message=...))`.
+- `429` is treated as **quota exhausted** (`FatalError`) unless the message is a
+  transient upstream throttle; use `is_transient_throttle()` to distinguish it,
+  as the OpenRouter provider does.
+- HTTP `5xx` and timeouts are retryable; do not retry authentication or
+  validation failures.
+- Wrap unexpected exceptions as `FatalError` so they are not retried forever.
+
+The worker performs structured-output validation and one LLM self-correction
+attempt after a schema mismatch. A provider does not need to implement that
+logic; it only needs to return the model's output faithfully.
+
+---
+
+## 6. Logging: write nothing
+
+Provider files contain **no logger lines**. `BaseLLMProvider.__init__` installs
+an automatic wrapper around both request paths and `computer_use_turn()`, and
+journals start / duration / exception / stream statistics into the single
+`app.log` timeline with the task tag and turn number. The worker logs prompts,
+responses, repairs, and retries.
+
+If you need temporary diagnostics, use `logger = logging.getLogger(__name__)` and
+never open log files or write to `app.log` yourself.
+
+---
+
+## 7. Usage accounting
+
+After a successful call, invoke `self._record_usage(raw_usage_dict)`. The helper
+normalizes input/output/reasoning/cache/total token counts, keeps the raw
+values, and merges streaming usage when `merge=True`. The worker emits the
+normalized result to the UI and session journal; no prices are calculated.
+
+If a provider reports usage in several places (stream start and stream end),
+call `_record_usage(..., merge=True)` for the later reports.
+
+---
+
+## 8. Check the integration
+
+There is no automated test suite. After adding a provider:
+
+1. Start the app. The provider appears in Settings → AI Provider without any
+   registration step.
+2. Its page renders exactly the fields from `get_ui_schema()`.
+3. Enter a key and model, select it as the active provider, and send a Chat
+   message (streaming path).
+4. Run a Terminal task that needs a structured action (non-streaming path with
+   `schema_name`); confirm the action is parsed and executed.
+5. If implemented, verify native web search, Computer Use in Vision, and Cancel
+   (server-side cancellation) separately.
+6. Trigger an invalid key and a network failure to confirm `FatalError` vs
+   `RetryableError` behavior.
+
+No other files need to be changed. The provider is discovered on the next
+application start; its module is imported only when it becomes the active
+provider or when its settings page is opened.

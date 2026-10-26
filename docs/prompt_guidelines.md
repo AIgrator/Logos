@@ -1,122 +1,171 @@
-# Prompt Standardization Guide
+# Prompt Guidelines
 
-All files in the `prompts/` folder should be written exclusively in English. This file simply describes how this should work.
-This document describes a standardized structure for creating and managing prompts for the AI assistant. Adhering to this structure is crucial for ensuring the reliability, predictability, and performance of the model.
+All prompt files live in `prompts/` and are written in English. Prompts are
+loaded lazily and cached for the lifetime of the process, so editing a `.txt`
+file takes effect after an application restart.
 
-## Core Philosophy: System vs. User Prompt
-
-The fundamental principle is a strict separation of responsibilities between the **System Prompt** and the **User Prompt**.
-
-### 1. System Prompt (`*_system.txt`)
-
-**Purpose:** To define the **personality, rules, and capabilities** of the AI for a specific task. This prompt acts as "firmware" or "operating instructions" for the model's role at a particular stage (e.g., planning, execution, evaluation). It should be as static as possible.
-
-**Content:**
-
--   **Role Definition:** The very first line should clearly define the AI's role.
-    -   *Example:* "You are an expert AI assistant specializing in strategic planning."
--   **Main Goal:** A brief description of the primary task for this role.
-    -   *Example:* "Your main mission is to analyze the user's request and the current screen context to create a high-level, step-by-step plan."
--   **Rules and Limitations:** A list of immutable, strict rules that the model must follow. Here we define critical behavior.
-    -   *Example:* "Always prefer keyboard shortcuts (`hotkey`) over mouse clicks.", "Never attempt to re-execute steps with `[DONE]` status."
--   **Available Tools (`{available_tools}`):** A complete list of tools (functions) that this role is allowed to use.
--   **Response Format (`{response_format_instructions}`):** A strict definition of the JSON schema that the model's response must adhere to.
-
-**What to AVOID in the System Prompt:**
-
--   Any dynamic information dependent on a specific user request.
--   Any context from the current screen or environment.
--   Any history or data specific to the current session.
-
-### 2. User Prompt (`*_user.txt`)
-
-**Purpose:** To provide all **real-time dynamic context** that the AI needs to perform the task described in the System Prompt. It should be structured as a clear, well-organized brief for an expert (whose role is defined in the system prompt).
-
-**Content:**
-
-The User Prompt is built around a single, standardized structure called the **Standard Context Block**. This ensures that the model always knows where to find the necessary information, regardless of the current stage.
+The active system is the unified agent loop (Terminal, Browser) plus the native
+Computer Use loop (Vision). There is no separate strategic-planning /
+tactical-execution / evaluation prompt chain anymore.
 
 ---
 
-## Standard Context Block (for main stages)
+## Active prompt map
 
-This is a mandatory structure for User Prompts at the main stages (`strategic_planning`, `tactical_execution`, `evaluation`). It organizes information from the most general (mission) to the most specific (current environment).
+### Terminal agent
 
-```
-### Mission ###
-- Original User Request: {original_request}
+| File | Role |
+| --- | --- |
+| `prompts/terminal/system.txt` | Role, agent loop, rules, tool list, response format. |
+| `prompts/terminal/user.txt` | Mission, OS, working directory, directory listing, command history. |
 
-### Plan Status ###
-{plan_status_str}
+Assembled by `Brain.get_terminal_prompts()` in
+[`src/brain.py`](../src/brain.py), called from
+[`src/handlers/terminal_handler.py`](../src/handlers/terminal_handler.py).
 
-### Last Action Analysis ###
-- Action Performed: {action_description}
-- Action Result: {action_result_or_error}
+Placeholders:
 
-### Current Environment ###
-#### Screen Analysis ####
-{screen_context}
+- system: `{available_tools}`, `{response_format_instructions}`
+- user: `{user_request}`, `{os_info}`, `{current_directory}`,
+  `{directory_listing_command}`, `{directory_listing}`, `{history_str}`
 
-#### System Information ####
-- Screen Resolution: {screen_resolution}
-- Installed Applications:
-  - {app1}
-  - {app2}
-  ...
-```
+`{available_tools}` is the generated `cache/terminal/tools.txt`;
+`{response_format_instructions}` is the generated instructions + example for
+the `terminal_tool_code` schema. Both are produced from the terminal tool
+manifest by [`src/computer/tool_registry.py`](../src/computer/tool_registry.py).
+Never edit the cache files by hand.
+
+`{current_directory}` and `{directory_listing}` currently receive short
+instructional phrases (for example "Use the `dir` command to see the directory
+listing"), not actual values. The model obtains real state by running commands.
+
+### Browser agent
+
+| File | Role |
+| --- | --- |
+| `prompts/browser/system.txt` | Role, agent loop, browser rules, tool list, response format. |
+| `prompts/browser/user.txt` | Mission, OS, current URL, command history. |
+
+Assembled by `Brain.get_browser_prompts()`.
+
+Placeholders:
+
+- system: `{available_tools}`, `{response_format_instructions}`
+- user: `{user_request}`, `{os_info}`, `{current_url}`, `{history_str}`
+
+`{available_tools}` comes from `cache/browser/tools.txt`; the response format
+comes from `cache/browser/response_formats.json` for `browser_tool_code`.
+
+### Vision agent (native Computer Use)
+
+| File | Role |
+| --- | --- |
+| `prompts/vision/cua_system.txt` | Operating rules for the native computer-use loop. |
+
+Loaded by `VisionHandler._cua_system_prompt()` and sent as the `instructions`
+field of a fresh CUA chain. There are no placeholders. The handler appends
+runtime safety paragraphs based on the live Vision settings:
+
+- `allow_system_surfaces` — permits Start menu / Windows Search to launch apps;
+- `restrict_to_allowed_apps` — limits launches to Vision `allowed_apps`;
+- `allow_shell_commands` — permits opening a terminal for read-only ground-truth
+  checks; destructive commands still require approval.
+
+Calling `ask_user` for approval is defined by the prompt and the provider tool
+contract, not by the settings above.
+
+**Fail closed:** if this file is missing or empty, Vision refuses to start
+rather than running without its safety rules.
+
+### Failure assessment notes
+
+| File | When used |
+| --- | --- |
+| `prompts/common/assessment_general.txt` | Consecutive failures reached `max_consecutive_errors`; the model must assess before another action. |
+| `prompts/common/assessment_timeout.txt` | Same, when recent failures include a timeout death. |
+| `prompts/terminal/assessment_timeout.txt` | Terminal-specific override for the timeout variant. |
+
+Loaded by `BaseAgentHandler._assessment_note()`. The per-mode file wins over the
+common file. The note is appended verbatim to the command history; it contains
+no placeholders. Browser uses the common files. Vision has its own pause message
+and does not use assessment turns.
+
+### JSON self-correction
+
+| File | Role |
+| --- | --- |
+| `prompts/correction/system.txt` | Role: fix malformed JSON, output only JSON. |
+| `prompts/correction/user.txt` | Original request, expected schema/example, validation error, malformed response. |
+
+Assembled by `Brain.get_self_correction_prompts()` and used by `LLMWorker` after
+the first Pydantic validation failure. Placeholders:
+`{original_request}`, `{schema_example}`, `{validation_error}`,
+`{malformed_response}`.
 
 ---
 
-## Specialized Prompts (for auxiliary tasks)
+## Legacy prompts (not loaded)
 
-For highly specialized tasks, such as `wait_origin`, `wait_check`, and `error_explanation`, a **lightweight, minimally necessary context structure** is used. Providing a full context block in these cases is redundant "noise" and should be avoided.
+These files remain in the repository but no runtime code path reaches them.
+They belong to removed systems and should not be extended:
 
-### 1. `wait_origin` (Prompt for the "Detective")
+- `prompts/vision/wait_origin_system.txt`, `wait_origin_user.txt`
+- `prompts/vision/wait_check_system.txt`, `wait_check_user.txt`
+- `prompts/vision/error_explanation_system.txt`, `error_explanation_user.txt`
+- `prompts/terminal/web_search_system.txt`, `web_search_user.txt`
+- `prompts/terminal/web_fetch_system.txt`, `web_fetch_user.txt`
 
--   **Task:** To find a single action in recent history that caused a loading indicator to appear.
--   **Required Context:** Action history and screenshots.
--   **Structure of `wait_origin_user.txt`:**
-    ```
-    ### Recent Action History ###
-    - Action 1: {description_1} (see screenshot 1)
-    - Action 2: {description_2} (see screenshot 2)
-    ...
-
-    ### Current Screen Analysis ###
-    {current_screen_context_with_spinner}
-    ```
-
-### 2. `wait_check` (Prompt for the "Observer")
-
--   **Task:** To compare a given condition (e.g., "progress bar should disappear") with the current screen state.
--   **Required Context:** Wait condition and current screen analysis.
--   **Structure of `wait_check_user.txt`:**
-    ```
-    ### Wait Condition ###
-    {wait_context}
-
-    ### Current Screen Analysis ###
-    {new_screen_context}
-    ```
-
-### 3. `error_explanation` (Prompt for the "Explainer")
-
--   **Task:** To explain to the user in simple terms why the assistant is "stuck".
--   **Required Context:** Information about the last action, the reason for the failure, and the user's original goal.
--   **Structure of `error_explanation_user.txt`:**
-    ```
-    ### Mission ###
-    - Original User Request: {original_request}
-
-    ### Last Action Analysis ###
-    - Action Performed: {last_action}
-    - Reason for Failure: {reason}
-    ```
+`Brain` still exposes getters/builders for the Vision files
+(`get_wait_origin_prompts`, `get_wait_check_prompts`,
+`get_error_explanation_prompts`) and for the web files
+(`get_web_search_prompts`, `get_web_fetch_prompts`), but they have no callers.
+The old `wait_element` / plan-evaluation flow and the LLM-summarized web
+delegation were replaced by the native CUA loop and the local
+`ddgs` + `trafilatura` tools respectively.
 
 ---
-### Code Implementation
 
--   **Location:** The logic for assembling these context blocks should reside in `src/brain.py`.
--   **Recommendation:** Create a centralized helper function, e.g., `_build_context_block(**kwargs)`, for assembling the main block. For specialized prompts, formatting occurs within their own functions (`get_wait_check_prompts`, etc.).
+## Writing rules
 
-By strictly following this standardized approach, we reduce the cognitive load on the model, minimize errors, and make the entire system more reliable and easier to debug.
+1. **English only.** Prompts are part of the model contract and are mixed with
+   English schemas and tool descriptions.
+
+2. **System prompt = stable rules.** Define role, loop, constraints, available
+   tools, and the exact response format. Do not put per-request data there.
+
+3. **User prompt = dynamic context.** Mission, environment, history, and
+   attachments go here. Keep sections clearly labelled and ordered from goal to
+   details.
+
+4. **Placeholders use single braces** (`{history_str}`) and are substituted with
+   `str.replace()` in `Brain`, never `str.format()`. JSON examples contain
+   literal braces, so `format()` would break them.
+
+5. **Do not hardcode tools or schemas.** `{available_tools}` and
+   `{response_format_instructions}` are generated from
+   `src/computer/modes/<mode>.py` manifests and Pydantic schemas. If a tool is
+   added or renamed, the prompt block updates automatically on the next registry
+   rebuild.
+
+6. **One action per turn.** Terminal and Browser prompts must require a single
+   tool call in a strict JSON envelope. Tool errors are returned to the model as
+   text so it can correct itself; the prompt should tell it to read the error
+   before retrying.
+
+7. **No stale architecture terms.** Do not reintroduce "strategic plan",
+   "tactical step", "evaluation", `[DONE]` markers, or screenshot-annotation
+   instructions. The current loops are: plan → act → observe → repeat for
+   Terminal/Browser, and native provider turn → execute → screenshot → repeat
+   for Vision.
+
+8. **Assessment notes are facts, not orders.** They tell the model to assess
+   significance against the user's goal and then communicate; they do not
+   prescribe a specific next tool.
+
+9. **Missing-file behavior matters.** Terminal/Browser prompt builders return
+   `(None, None)` when a required file is missing, and the handler reports an
+   error. Vision refuses to start. Keep that behavior in mind when renaming
+   files.
+
+10. **Caching.** `Brain._get_cached_prompt()` and the CUA system-prompt cache
+    keep the first read for the whole process. Restart after editing.

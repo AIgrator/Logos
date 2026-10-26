@@ -1,122 +1,144 @@
 # Future Vision: Grounding Backends, New Modes, Thin Client
 
 This document records the agreed evolution plan for Logos AI Assistant
-(discussed October 2026). It explains the principles, not the implementation.
-Implementation details belong in per-step technical docs.
+(discussed October 2026, status updated 2026-10-26). It explains the principles
+and what is already done, not the implementation details. Implementation details
+belong in per-step technical docs; current behavior is in
+[system_architecture.md](./system_architecture.md).
 
 ## Where we stand
 
-Logos today is a provider-agnostic desktop agent with four modes
+Logos is a provider-agnostic desktop agent with four modes
 (Chat / Vision / Terminal / Browser) and a "conductor, not performer" philosophy:
-the LLM plans and evaluates, deterministic code executes, the user reviews
-and approves plans. Screen understanding is a local pipeline
-(YOLO icon detection + EasyOCR + Florence-2 captions) wired directly
-into `ParserAdapter`. Toolsets are mutually exclusive per mode
-(`src/computer/modes/vision.py` vs `terminal.py` vs `browser.py`, plus web tools for `chat.py`).
+the model plans and evaluates, deterministic code executes, the user reviews or
+approves risky steps.
 
-Two structural limitations follow from this:
+What changed since the original plan:
 
-1. **Vision plans cannot mix clicks with shell/file commands.** The
-   reference architectures for native computer-use (Anthropic:
-   `computer + bash + text_editor` in one loop; OpenAI CUA sample:
-   `native` + `code` modes) assume a single agent loop with both.
-   Our mode manifests forbid it.
-2. **Native provider toolsets don't fit the plan-approval loop.**
-    `computer_call` (OpenAI), `computer_toolset` (Anthropic) and
-    `computer_use` (Google Gemini 3.x) stream actions without an
-    upfront user-approved plan, which conflicts with the conductor concept.
-    DECIDED (Oct 2026): the plan-approval loop is dropped entirely — Vision
-    moves to the agent loop (observe → act → assess) like Terminal/Browser,
-    so this limitation dissolves; escalation replaces plan approval as the
-    safety valve.
+- **Vision is on the agent loop.** The strategic plan, the plan-approval screen,
+  `strategic_plan` / `evaluation` schemas and the old Vision FSM are gone.
+  `VisionHandler` uses the same observe → act → assess discipline as
+  Terminal/Browser and grounds through the provider's native Computer Use
+  protocol. Escalation (`communicate_to_user`, safety dialogs, pause on repeated
+  failure) replaces plan approval as the safety valve.
+- **The local screen-recognition stack is gone.** Torch/OCR/YOLO/Florence,
+  EasyOCR language management and the OmniParser analyzer were removed from the
+  code and manifests. There is no background model loading; Vision mode is ready
+  immediately and works through `native` grounding only. xAI, OpenRouter and
+  other providers without a computer-use tool cannot drive Vision today.
+- **Browser mode is shipped.** It uses a persistent Playwright Chromium profile,
+  DOM snapshots with stable element refs, screenshots with ref badges, URL/private
+  network policy and per-action approvals. This is the `dom` grounding path.
+- **Projects and persistent sessions exist.** Each project owns `.logos/` with
+  JSONL session journals, a rolling handoff summary, restored history and
+  attachments. Sessions are mode-locked. There are still no tabs and no screen
+  arbiter.
+- **The base install is thin.** Removing the ML stack achieved the size/startup
+  goal without optional model downloads. If a local grounding backend returns,
+  it must stay an optional add-on rather than a base dependency.
+
+Two structural limitations from the original note are therefore resolved:
+
+1. Vision no longer needs a separate planning universe; it runs the same loop
+   and can be extended with shell/file tools.
+2. Native provider toolsets no longer conflict with plan approval, because plan
+   approval no longer exists.
 
 ## Principle 1: separate grounding from execution
 
-Introduce a `GroundingBackend` interface — "where do coordinates come from?"
-with three implementations:
+The intended interface is still `GroundingBackend` — "where do coordinates come
+from?" — with three possible implementations:
 
-- `local` — the current YOLO + OCR + Florence pipeline (kept for
-  xAI/OpenRouter/other providers and offline use);
-- `native` — coordinates returned by the provider's own computer-use
-  tool (`computer_call` / `computer_toolset` / `computer_use`);
-- `dom` — Playwright accessibility tree for web pages (precise
-  selectors for forms, free of charge, no pixels involved).
+- `native` — coordinates/actions from the provider's own computer-use tool
+  (`computer_use_turn`: OpenAI computer, Anthropic computer toolset, Google
+  Gemini 3.x computer use). **Implemented and currently the only Vision
+  backend.**
+- `dom` — Playwright accessibility/DOM refs for web pages. **Implemented inside
+  Browser mode** (`BrowserManager`), though not yet expressed as a shared
+  `GroundingBackend` implementation.
+- `local` — a recognizer service (UI-TARS / OmniParser V2 or another model) for
+  providers without native computer use. **Not implemented.** The old local
+  triple pipeline was deleted, not extracted.
 
-`VisionHandler` is rebuilt on the `BaseAgent` loop (same as Terminal/Browser):
-no strategic plan, no `strategic_plan`/`evaluation` schemas, no plan-review UI.
-Only the coordinate source changes. DECIDED order (Oct 2026): **first native
-Computer Use, then the recognizer service** — i.e. `native` backend first,
-`local` extracted into a sidecar service second (with a stable element schema
-and a conformance test so any recognizer plugs in). Native providers
-currently capable: **OpenAI, Anthropic, Google** (Gemini 3.x has a
-built-in `computer_use` tool with desktop/browser/mobile environments,
-normalized 0–999 coordinates, safety decisions and prompt-injection
-detection). xAI, OpenRouter (a proxy) and Chinese API providers expose
-no equivalent tool — for them `local`/service remains.
+`VisionHandler` is already on the shared agent loop: no strategic plan, no
+`strategic_plan`/`evaluation` schemas, no plan-review UI. The remaining work is to
+formalize the backend seam and make the coordinate source switchable again
+without changing the loop.
+
+Order of work: **native first (done), then the recognizer service** if demand for
+non-CUA providers justifies it. The service must expose a stable element schema
+and a conformance test so any recognizer can plug in.
 
 ## Principle 2: modes differ by toolset, not by universe
 
-New modes reuse the same handler core and the same correction protocol:
+New modes reuse the same handler core and the same correction/escalation
+protocol:
 
-- **Browser mode** (`backend=dom`, Playwright): open site → authenticate
-  → fill and submit forms. Authentication follows the OpenAI
-  `browser_authentication` pattern: secrets are entered by the user
-  in our UI, the model never sees them. Strategy: DOM first,
-  pixels as fallback for exotic widgets.
-- **Native execution** inside Vision mode (`backend=native`): pilot with
-  the Google provider, then Anthropic and OpenAI behind a settings flag.
-- **Unified Vision+shell toolset**: a plan step may mix clicks and
-  `execute_shell`/file tools, mirroring the Anthropic reference loop.
-  This resolves limitation (1) above.
-- **MCP as a toolset source**: an `MCPClientManager` exposes tools from
+- **Browser mode** (`backend=dom`, Playwright): open site → authenticate → fill
+  and submit forms. **Shipped.** The OpenAI `browser_authentication` idea —
+  secrets entered by the user in our UI, never shown to the model — is not
+  implemented yet; the current approval flow protects password fields but the
+  model still supplies the value. This is the next Browser hardening step.
+- **Native execution inside Vision mode** (`backend=native`): **shipped** for
+  Google, Anthropic and OpenAI through `supports_computer_use()` /
+  `computer_use_turn()`. Provider-specific behavior is documented in the
+  provider files and the CUA prompt.
+- **Unified Vision+shell toolset**: **partially prepared, not active.** The
+  `vision` manifest already contains shell and file tools, and Vision settings
+  gate `allow_shell_commands`; the CUA loop does not read that manifest. The
+  model still acts only through provider-native computer actions. Wiring the
+  manifest into the CUA loop would resolve the last part of limitation (1).
+- **MCP as a toolset source**: an `MCPClientManager` exposing tools from
   user-configured MCP servers (`mcp__<server>__<tool>`) into Terminal
-  (execution) and Chat (read-only first). Servers are allowlisted in
-  settings, side effects require confirmation, hung servers are isolated
-  by a circuit breaker. No per-app integrations are written by hand.
+  (execution) and Chat (read-only first). Servers are allowlisted in settings,
+  side effects require confirmation, hung servers are isolated by a circuit
+  breaker. **Not implemented.** No per-app integrations are written by hand.
 - **Cross-mode pilot (Blender)**: Terminal builds through Blender MCP
-  (`create_object`, transforms, materials — headless, no GUI), Vision
-  verifies the result via a rendered preview through the existing
-  screen-evaluation loop. First scenario where two modes cooperate.
+  (`create_object`, transforms, materials — headless, no GUI), Vision verifies
+  the result via a rendered preview through the screen-evaluation loop.
+  **Not implemented**; depends on MCP.
 
 ## Principle 3: thin client distribution
 
-Heavy ML dependencies (torch/CUDA, transformers, EasyOCR models)
-become **optional offline backends**, downloaded on demand via the
-existing setup wizard. The base install (PySide6 + app code) stays at
-hundreds of megabytes instead of ~9 GB, starts instantly, and works
-fully through native/DOM backends. Consequences:
+The heavy ML dependencies (torch/CUDA, transformers, EasyOCR models) are
+**removed**, not optional. The base install is PySide6 plus app code and starts
+without model loading. Consequences:
 
-- No more one-file PyInstaller bundles with the whole `.venv` + CUDA
-  + Hugging Face caches (the cause of the 9 GB unstartable build).
-- Use one-dir builds wrapped in an Inno Setup installer while the
-  thin-client refactor is in progress; portable ZIP + launcher script
-  as the zero-friction option (no terminal needed by end users).
+- No more one-file PyInstaller bundles with the whole `.venv` + CUDA + Hugging
+  Face caches.
+- Use one-dir builds wrapped in an Inno Setup installer; portable ZIP + launcher
+  script remains the zero-friction option.
+- If `local` grounding returns, it must be downloaded on demand via the setup
+  wizard and never become a required dependency.
 
 ## Principle 4: long-lived sessions and tabs
 
-One-off tasks ("empty the recycle bin") stay as they are. Alongside them,
-Logos grows **persistent sessions**: named tasks with a goal, a history of
-what was done, and attached artifacts (letters, requirements, screenshots),
-living for weeks and surviving restarts. Returning to a session restores
-full context; watch-type sessions (e.g. tracking a developer console)
-additionally diff incoming items since the last visit. The mechanism is
-domain-independent: the Play-console example is just one instance.
+One-off tasks ("empty the recycle bin") stay as they are. Alongside them, Logos
+grows **persistent sessions**: named tasks with a goal, a history of what was
+done, and attached artifacts (letters, requirements, screenshots), living for
+weeks and surviving restarts. Returning to a session restores full context;
+watch-type sessions (e.g. tracking a developer console) additionally diff
+incoming items since the last visit.
 
-Sessions are presented as **tabs** (one handler + chat log per tab, any
-mode). Tab switching serializes and pauses handler state
-(Vision: plan, `current_task_index`, evaluation history) and resumes it
-losslessly. Constraint: **one display — one active Vision task** (there is
-a single physical mouse). A screen arbiter grants the display to one
-Vision session; the rest wait paused with explicit indication.
-Terminal/Chat sessions may run in the background.
+**Current state:** project-scoped sessions, JSONL journals, restore/replay,
+attachments and the rolling handoff summary are implemented. Sessions are
+mode-locked; switching mode in a non-empty session starts a new one. There is no
+tabbed UI and no screen arbiter yet.
 
-Escape hatch (future, proven in prototype): **virtual displays**. If the
-user installs virtual-display drivers, a session can be moved from the
-main screen to a virtual one — each display then runs its own Vision
-task in parallel (clicks on a secondary display were already demonstrated
-in the video-lecture project). Not on the near-term roadmap; recorded
-here so the arbiter is designed display-aware from the start
-(session → display binding, not a global singleton lock).
+Sessions should be presented as **tabs** (one handler + chat log per tab, any
+mode). Tab switching serializes and pauses handler state; resuming restores it
+losslessly. Constraint: **one display — one active Vision task** (there is a
+single physical mouse). A screen arbiter grants the display to one Vision
+session; the rest wait paused with explicit indication. Terminal/Chat sessions
+may run in the background.
+
+Escape hatch (future, proven in prototype): **virtual displays**. If the user
+installs virtual-display drivers, a session can be moved from the main screen to
+a virtual one — each display then runs its own Vision task in parallel (clicks on
+a secondary display were already demonstrated in the video-lecture project). Not
+on the near-term roadmap; recorded here so the arbiter is designed
+display-aware from the start (session → display binding, not a global singleton
+lock).
 
 ## Guiding scenario: "tell the computer, get the result"
 
@@ -133,22 +155,18 @@ explicitly out of scope for now — text input carries the full design
 until the execution core is ready. Voice will dock onto the same
 `start_task(user_text)` entry point later without architectural changes.
 
-## Agreed build order
+## Status of the agreed build order
 
-1. `GroundingBackend` interface + unified Vision+shell toolset
-   (foundation; unblocks everything, near-zero risk to current behavior).
-2. Browser mode on Playwright (most visible user value: sites, logins, forms).
-3. Native execution pilot for the Google provider, then Anthropic, OpenAI.
-4. Sessions + tabs: SQLite session store with autosave, history
-   summarization, per-tab handlers, pause/resume, display-aware screen
-   arbiter. Testable per piece without touching execution quality.
-5. Thin client (needs step 3 to make torch optional; benefits from step 4
-   since sessions already survive restarts and reinstalls).
-6. MCP client + Blender cross-mode pilot.
-7. Replace the local triple pipeline with a single grounding model
-   (UI-TARS / OmniParser V2) once `local` serves only remaining providers.
-8. Virtual displays for parallel Vision tasks (only on demand; requires
-   the arbiter from step 4 to be display-aware).
+| # | Step | Status |
+|---|---|---|
+| 1 | `GroundingBackend` interface + unified Vision+shell toolset | Native CUA shipped; interface not formalized; Vision manifest not wired into the CUA loop. **Next foundation.** |
+| 2 | Browser mode on Playwright | **Shipped** (DOM refs, policy, approvals, budgets). User-entered secrets still pending. |
+| 3 | Native execution for Google, then Anthropic/OpenAI | **Shipped** for all three. |
+| 4 | Sessions + tabs: SQLite or JSONL store, autosave, summarization, per-tab handlers, pause/resume, display-aware arbiter | Sessions/journal/handoff/autosave **shipped on JSONL**. Tabs, per-tab pause/resume and screen arbiter **pending**. |
+| 5 | Thin client | **Effective:** ML stack removed; optional backends are no longer needed. Installer/packaging cleanup remains. |
+| 6 | MCP client + Blender cross-mode pilot | **Pending.** |
+| 7 | Replace the local triple pipeline with a single grounding model (UI-TARS / OmniParser V2) | **Obsolete in current form** — the local pipeline was deleted. Revisit only if a `local` backend is reintroduced. |
+| 8 | Virtual displays for parallel Vision tasks | **Pending**; requires the arbiter from step 4 to be display-aware. |
 
 ## Backlog: known execution gaps (low priority, tracked — do not lose)
 
@@ -158,33 +176,30 @@ until the execution core is ready. Voice will dock onto the same
   the worker thread with no time bound and do not honor cancellation: a long or hung
   call blocks subsequent dispatches (they queue behind it), and `quit()` cannot release
   a thread blocked inside `run()` (`QThread.terminate()` is forbidden — state corruption).
-  Fix direction (ONLY when it becomes a priority, not now): cooperative cancellation —
-  long tools check `Computer.cancel_event` per file/batch. Infinite loops are
-  structurally impossible (no loop tool; shell loops die at the timeout). Proven painless
-  so far (76s copy completed, no hangs observed); revisit only on real hangs.
+  `ToolExecWorker.cancel()` only prevents delivery of a late result; it cannot stop the
+  running function. Fix direction (ONLY when it becomes a priority, not now):
+  cooperative cancellation — long tools check `Computer.cancel_event` per file/batch.
+  Infinite loops are structurally impossible (no loop tool; shell loops die at the
+  timeout). Proven painless so far (76s copy completed, no hangs observed); revisit
+  only on real hangs.
 
-- **Client-side streaming tool execution (Chat first).** As of Oct 2026 all six
-  providers support streaming tool calls: OpenAI/Anthropic/Google server-side
-  (already used — vendor executes, nothing to do client-side); OpenRouter/xAI/HF
-  client-side (documented: `delta.tool_calls`, Responses API). Today the client-side
-  path is a dead end: `tool_call_received` has no subscribers, `all_tool_calls` is
-  only logged (xAI parses then drops; OpenRouter/HF send no `tools` in stream).
-  Reliability win over hand-formed JSON: the call arrives framed (name + arguments
-  as separate fields, JSON parsed server-side or accumulated to `stop` event), so
-  envelope errors (quotes/brackets) are structurally impossible; semantic correctness
-  (right tool, right values) stays the model's job, guarded by our `json.loads`
-  fallback + pydantic `ChatFunctionCall` + skip. Work items (Chat only — agent modes
-  need whole validated actions per turn, not fragments): send `tools` in stream
-  requests, accumulate `delta.tool_calls` per index, connect execution, feed results
-  back into the conversation, flip `supports_streaming_tools`. HF additionally blocked
-  by billing (402 on accounts without credits).
+- **Client-side streaming tool execution (Chat first).** Provider-side streaming
+  tool calls are used where the vendor executes them (OpenAI, Anthropic, Google
+  server-side search; xAI Live Search). The client-side path is still a dead end:
+  `tool_call_received` has no subscribers and `all_tool_calls` is only logged.
+  Current state per provider: OpenAI, Anthropic, Google and xAI declare
+  `supports_streaming_tools` and yield typed chunks; OpenRouter and Hugging Face
+  do not send `tools` in the stream. Reliability win over hand-formed JSON: the
+  call arrives framed (name + arguments as separate fields, JSON parsed
+  server-side or accumulated to `stop`), so envelope errors (quotes/brackets) are
+  structurally impossible; semantic correctness (right tool, right values) stays
+  the model's job, guarded by our `json.loads` fallback + pydantic
+  `ChatFunctionCall` + skip. Work items (Chat only — agent modes need whole
+  validated actions per turn, not fragments): connect `tool_call_received` to
+  execution, feed results back into the conversation, and make OpenRouter/HF
+  send `tools`. HF additionally blocked by billing (402 on accounts without
+  credits).
 
-- **Project / working-directory concept (opencode-style).** No project picker
-  tab, no per-project working folder yet: the terminal inherits the launch
-  CWD, the file indexer still points at the app root. Needed before the
-  indexer retarget: a picker (per-project terminal CWD + chat @-files +
-  index root), startup default, and persistence. Design first, then move
-  `Indexer('.')`.
 - **Per-task folders + cross-mode handoff.** A task ("check the news")
   gets its own folder accumulating all context (chat transcript, turn
   screenshots, traces, downloaded artifacts); later modes reuse it
@@ -193,8 +208,9 @@ until the execution core is ready. Voice will dock onto the same
   into the folder, vision/terminal pick them up) covers most cases and
   is simpler than cross-mode orchestration. Seeds exist
   (per-task `cua_<tag>/` shots, command_history, trace lines) but no
-  folder lifecycle, no handoff protocol, no UI. After the project
-  concept lands.
+  folder lifecycle, no handoff protocol, no UI. Project sessions and the
+  handoff summary cover part of the context problem; task-level artifact
+  folders remain separate work.
 
 ## Non-goals (explicitly deferred)
 

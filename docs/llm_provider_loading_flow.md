@@ -1,45 +1,175 @@
-# Architecture: Two-Phase LLM Provider Loading for Fast Startup
+# Architecture: LLM Provider Discovery and Loading
 
-The system uses a sophisticated, two-phase mechanism for discovering and integrating LLM providers. This approach is designed to ensure the application starts as quickly as possible, with the user interface (UI) appearing almost instantly, while deferring the "heavy" work of loading provider modules to a background thread.
+Logos supports several LLM providers, but a normal launch must not pay the cost
+of importing every vendor SDK. The provider layer therefore separates
+**discovery** (cheap, source-only) from **import** (on demand, one provider at a
+time).
 
-### Phase 1: Lazy Discovery (On Initial Import)
+The current implementation is "lazy discovery + active-provider import". Earlier
+design notes described a mandatory second phase that eagerly imported all
+providers; that phase (`import_real_provider_classes()` in
+[`src/llm/__init__.py`](../src/llm/__init__.py)) still exists in the module but
+is **never called**. `LLMWorker.prepare_provider()` imports only the selected
+provider.
 
--   **Entry Point**: `src/llm/__init__.py`
--   **Trigger**: The first time any part of the application imports the `llm` package.
--   **Process**:
-    1.  The `_discover_provider_modules_lazily()` function is executed.
-    2.  It scans the `src/llm/providers/` directory for files ending in `_provider.py`.
-    3.  **Crucially, it does NOT import these modules.** Instead, it reads the raw source code of each file and uses Abstract Syntax Tree (AST) parsing to find and extract the `provider_id` and `display_name`.
-    4.  For each provider found, it creates a lightweight `LazyProviderProxy` object. This object stores the metadata but does not hold a reference to the actual provider class.
-    5.  The global `PROVIDERS` dictionary is populated with these `LazyProviderProxy` objects.
+---
 
--   **Result**: The application starts very quickly because no heavy modules (like `anthropic`, `google-generativeai`, etc.) are loaded into memory. The UI has immediate access to the list of all available providers and their names.
+## Startup sequence
 
-### Step 2: Base Configuration Assembly
+```
+main.py
+  ├─ import llm.model_config_manager
+  │    ├─ import settings_manager
+  │    │    └─ import llm  ──► lazy discovery of provider files
+  │    └─ import llm.mode_capabilities / context.tokens
+  ├─ ModelConfigManager.initialize()
+  │    └─ merge cached models.json into the provider config
+  ├─ settings_manager = SettingsManager()
+  │    └─ ensure defaults for the active provider (imports that one module)
+  └─ AppController()
+       ├─ LLMWorker(...)
+       ├─ worker.moveToThread(thread)
+       └─ thread.started ──► LLMWorker.prepare_provider()
+            └─ get_provider_class(active) ──► import active provider only
+```
 
--   **Entry Point**: `src/settings_manager.py`
--   **Process**:
-    1.  `SettingsManager` imports the `PROVIDERS` dictionary, which at this stage contains only `LazyProviderProxy` objects.
-    2.  It iterates through this dictionary. When it calls static methods like `get_display_name()` or `get_provider_config()`, it's calling them on the proxy object.
-    3.  The proxy object smartly handles these calls:
-        -   For `get_display_name()`, it returns the metadata extracted via AST, avoiding an import.
-        -   For methods like `get_provider_config()` or `get_default_settings()`, the proxy will perform a **just-in-time, single-module import** to get the necessary data. This is still very fast as it only loads one small module at a time as needed.
-    4.  Based on this information, `SettingsManager` builds the `PROVIDER_CONFIG` and `DEFAULTS['llm_providers']` structures.
+---
 
-### Phase 2: Eager Import (In Background Thread)
+## Phase 1 — source-only discovery
 
--   **Entry Point**: `src/llm/llm_worker.py`
--   **Trigger**: When the `LLMWorker` starts in its dedicated background thread.
--   **Process**:
-    1.  The `prepare_provider` method in `LLMWorker` makes an explicit call to `llm.import_real_provider_classes()`.
-    2.  This function iterates through all provider modules again, but this time it **fully imports** each one.
-    3.  As each module is imported, it finds the actual `BaseLLMProvider` subclass within it.
-    4.  It then **replaces** the corresponding `LazyProviderProxy` object in the global `PROVIDERS` dictionary with the real, fully-loaded provider class.
+Entry point: [`src/llm/__init__.py`](../src/llm/__init__.py), executed the first
+time any module imports the `llm` package.
 
--   **Result**: By the time the user needs to make their first LLM call, the `PROVIDERS` dictionary has been seamlessly updated in the background with the actual, operational provider classes, ready for instantiation.
+`_discover_provider_modules_lazily()`:
 
-### Step 3 & 4: Model Loading and UI Generation
+1. Scans `src/llm/providers/` for modules whose name ends with `_provider.py`.
+2. Reads each file's source and parses it with `ast` — **the module is not
+   imported**, so no SDK, client library, or network-capable code runs.
+3. Tries to extract literal return values of `get_provider_id()` and
+   `get_display_name()` from the parsed source. The scan only visits
+   module-level functions; provider methods are class members, so in practice
+   the loader falls back to the filename:
+   - provider id = filename without `_provider` (`x-ai_provider.py` → `x-ai`);
+   - display name = id with underscores replaced and title-cased
+     (`huggingface` → `Huggingface`).
+4. Creates a `ProviderInfo` and a `LazyProviderProxy` per module, stored in
+   `PROVIDER_METADATA` and `PROVIDERS`.
 
-These steps proceed as before, but with the added benefit of the fast initial startup. The UI Settings window can be opened immediately, as it can build itself using the metadata from the `LazyProviderProxy` objects without waiting for the full import to complete.
+A `LazyProviderProxy` delegates the static configuration methods
+(`get_display_name`, `get_provider_config`, `get_default_settings`, and any
+other attribute) to the real class. The first such call imports that single
+module and caches the class in the proxy. `get_provider_id()` is answered from
+metadata without an import.
 
-**Conclusion:** This two-phase architecture provides the best of both worlds: an extremely fast application start and a fully dynamic, modular provider system. It solves the critical circular dependency problem and ensures the main thread is never blocked by slow module imports.
+**Result:** the UI can list providers immediately, and no vendor SDK is loaded
+during a normal startup unless it belongs to the active provider.
+
+> The module docstring in `src/llm/__init__.py` still describes the old
+> two-phase design. The executable behavior above is authoritative.
+
+---
+
+## Base configuration assembly
+
+`SettingsManager` builds a deliberately lightweight class-level
+`PROVIDER_CONFIG` from `PROVIDER_METADATA` only:
+
+```python
+{
+    "display_name": "<from metadata>",
+    "models": [],   # filled later by ModelConfigManager
+}
+```
+
+It does **not** call provider-specific `get_provider_config()` here, because
+that would import every provider module during startup. The static provider
+configuration (`api_url`, cancellation flags, streaming flags) is merged later,
+at the points where it is actually needed:
+
+- `LLMWorker._create_llm_provider()` — when instantiating the active provider;
+- `LLMProviderWidget` — when the Settings page is built.
+
+Provider defaults are also lazy. `SettingsManager.__init__` calls
+`_ensure_provider_defaults(active_provider)`: the proxy imports that one module
+and writes its `get_default_settings()` into `settings.json` if the provider has
+no saved entry yet. Other providers receive defaults when they are selected or
+when their Settings page is built.
+
+API keys are not stored in `settings.json`. `SettingsManager` keeps them in the
+OS keyring and injects them into the in-memory settings on load.
+
+---
+
+## Model configuration merge
+
+`ModelConfigManager.initialize()` runs before `SettingsManager()` is created and
+before the UI exists. It:
+
+1. Deep-copies `SettingsManager.PROVIDER_CONFIG`.
+2. Loads `cache/models.json` (downloaded from the models repository; see
+   [Dynamic LLM Model Management](./system_architecture.md#dynamic-llm-model-management)).
+3. Merges each provider's `models` or `models_by_provider` list into the copy.
+4. Applies built-in fallback lists when a cached provider list is empty or
+   incomplete, so dropdowns never go blank.
+5. Installs `mode_capabilities` into `ModeCapabilities` (which models support
+   chat/terminal/browser vs Vision/Computer Use) and `model_metadata` into
+   `ModelMetadata` (context window, reasoning, input modalities).
+6. Stores the result as `ModelConfigManager.PROVIDER_CONFIG`.
+
+The Settings UI and the model-switch popup read model lists from
+`ModelConfigManager.PROVIDER_CONFIG`. `SettingsManager.PROVIDER_CONFIG` remains
+the lightweight startup copy.
+
+"Update Models" re-downloads `models.json`, rejects junk payloads (fewer than
+two usable providers), rewrites the cache, and re-runs the merge. Provider
+modules are not involved.
+
+---
+
+## Phase 2 — active provider import
+
+Entry point: `LLMWorker.prepare_provider()`, connected to
+`QThread.started` in [`src/controller.py`](../src/controller.py).
+
+```python
+def prepare_provider(self):
+    if self.provider:
+        return
+    self.provider = self._create_llm_provider(self.settings)
+    self.provider_ready = self.provider is not None
+```
+
+`_create_llm_provider()`:
+
+1. Reads `active_provider` and that provider's saved settings.
+2. Refuses to instantiate if no API key is present.
+3. Calls `get_provider_class(active_provider)`. For a proxy this imports the
+   module on first use, finds the concrete `BaseLLMProvider` subclass, and
+   replaces the proxy's cached class; `PROVIDERS` itself still holds the proxy.
+4. Merges, in order: `provider_class.get_provider_config()` → the lightweight
+   `SettingsManager.PROVIDER_CONFIG` entry → the user's saved settings →
+   `name` / selected `model`.
+5. Instantiates the provider.
+
+Switching to another provider calls the same factory for the new id, importing
+only that module. The previous provider instance is discarded.
+
+Opening Settings is the other lazy-import trigger: `LLMProviderWidget` iterates
+all `PROVIDERS` and calls `get_provider_config()`, `get_ui_schema()`, and
+`get_default_settings()` to build every provider page. That imports all
+provider modules, but only after the user explicitly opens the settings window.
+
+---
+
+## Why not import everything up front?
+
+The vendor SDKs (OpenAI, Anthropic, Google GenAI, xAI, Hugging Face, plus
+`requests`/`httpx`) are heavy and can perform slow top-level initialization.
+Importing all of them in the worker delayed the first request by seconds for
+providers the user may never select. Source-only discovery keeps startup and
+model switching fast while preserving the "drop in one file" extension model.
+
+The trade-off: any code that needs static provider configuration must trigger a
+single-module import through the proxy. That is why `SettingsManager` stores
+only metadata and why the worker explicitly merges
+`provider_class.get_provider_config()` before instantiation.
