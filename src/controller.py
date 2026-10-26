@@ -8,7 +8,7 @@ import os
 import uuid
 from PySide6.QtCore import QObject, QThread, QTimer, Signal, Slot
 from PySide6.QtWidgets import (
-    QDialog, QFileDialog, QGroupBox, QLabel, QMessageBox,
+    QDialog, QFileDialog, QGroupBox, QLabel, QLineEdit, QMessageBox,
     QProgressBar, QPushButton, QTextBrowser, QVBoxLayout,
 )
 from PIL import Image
@@ -55,6 +55,8 @@ class AppController(QObject):
 
     # How many messages may wait in the chat queue while a reply streams.
     CHAT_QUEUE_MAX = 5
+    # Minimum pause between automatic compactions of the same session.
+    AUTO_COMPACT_COOLDOWN_SECONDS = 120.0
 
     def __init__(self, app, settings_manager: SettingsManager, local_server=None, working_directory=None,
                  project_manager=None):
@@ -88,12 +90,23 @@ class AppController(QObject):
         self._summary_force = False
         self._summary_request_context = None
         self._manual_compact_pending = False
+        self._compaction_trigger = ""
+        self._manual_compact_focus = ""
+        self._auto_compact_last_at = 0.0
         self._summary_failures = 0
         self._summary_retry_at = 0.0
         self._context_warning_file = ""
         self._summary_timer = QTimer(self)
         self._summary_timer.setSingleShot(True)
         self._summary_timer.timeout.connect(self._maybe_refresh_summary)
+        # Auto-compaction is checked only when work has settled; the debounce
+        # keeps it from firing in the middle of a burst of journal events.
+        self._auto_compact_timer = QTimer(self)
+        self._auto_compact_timer.setSingleShot(True)
+        self._auto_compact_timer.timeout.connect(self._maybe_auto_compact)
+        self._context_indicator_timer = QTimer(self)
+        self._context_indicator_timer.setSingleShot(True)
+        self._context_indicator_timer.timeout.connect(self._refresh_context_indicator)
 
         # --- Single Instance Lock ---
         self.local_server = local_server
@@ -544,6 +557,9 @@ class AppController(QObject):
         self._handoff_meta = {}
         self._summary_force = False
         self._manual_compact_pending = False
+        self._compaction_trigger = ""
+        self._manual_compact_focus = ""
+        self._schedule_context_indicator_update()
         return self.session_file
 
     def _ensure_session_objective(self, user_text: str):
@@ -653,12 +669,15 @@ class AppController(QObject):
             1 for event in events if event.get("type") == "message")
         self._summary_force = False
         self._manual_compact_pending = False
+        self._compaction_trigger = ""
+        self._manual_compact_focus = ""
         self.conversation_history.clear()
         self.conversation_history.extend(messages)
         if getattr(self, "chat_handler", None) is not None:
             self._restore_session_mode(self.session_mode)
         self._load_handoff_state()
         self._restore_agent_history()
+        self._schedule_context_indicator_update()
         logging.info(f"Loaded session with {len(messages)} messages from {path}")
 
     def _session_snapshot(self) -> list:
@@ -687,6 +706,8 @@ class AppController(QObject):
                 return None
             self.session_events.append(stored)
             self._session_event_count += 1
+            self._schedule_context_indicator_update()
+            self._schedule_auto_compact_check()
             return stored
         except Exception as e:
             logging.warning(f"Could not append session event '{event_type}': {e}")
@@ -917,8 +938,8 @@ class AppController(QObject):
         kept.insert(position, model_context.COMPACTION_MARKER)
         handler.command_history = kept
 
-    def _apply_manual_compaction(self, covered: int,
-                                 history_cut: int | None = None) -> bool:
+    def _apply_compaction(self, covered: int,
+                          history_cut: int | None = None) -> bool:
         """Persist the boundary and cut the live history at it."""
         covered = int(covered or 0)
         if not self.session_file or covered <= 0:
@@ -930,21 +951,21 @@ class AppController(QObject):
             self.session_file, event_id, covered)
         if not meta:
             return False
+        trigger = self._compaction_trigger or "manual"
+        self._clear_pending_compaction(cooldown=True)
         self._handoff_meta = meta
         self._apply_compaction_marker(
             self._history_cut_key() if history_cut is None else history_cut)
         self._refresh_agent_context()
-        self.ui.add_message(
-            f"<i>Session context compacted: {covered:,} of "
-            f"{len(self.session_events):,} events are now represented by "
-            "the summary.</i>")
+        self._add_compaction_message(trigger, covered, len(self.session_events))
+        self._schedule_context_indicator_update()
         return True
 
-    def _maybe_finish_manual_compaction(self, from_timer: bool = False):
+    def _maybe_finish_pending_compaction(self, from_timer: bool = False):
         if not self._manual_compact_pending:
             return
         if not self.session_file or not self.session_events:
-            self._manual_compact_pending = False
+            self._clear_pending_compaction()
             return
         busy = self._compaction_busy_reason()
         if busy:
@@ -953,7 +974,34 @@ class AppController(QObject):
                 self.ui.add_message(
                     "<i>Compaction is waiting for the current step to finish…</i>")
             return
-        self._request_summary_update(force=True, manual_compact=True)
+        trigger = self._compaction_trigger or "manual"
+        self._request_summary_update(
+            force=True, advance_boundary=True, trigger=trigger,
+            focus=self._manual_compact_focus)
+
+    def _clear_pending_compaction(self, *, cooldown: bool = False):
+        self._manual_compact_pending = False
+        self._compaction_trigger = ""
+        self._manual_compact_focus = ""
+        if cooldown:
+            self._auto_compact_last_at = time.monotonic()
+
+    @staticmethod
+    def _compaction_failure_message(trigger: str, detail: str) -> str:
+        label = ("Automatic compaction failed" if trigger == "auto"
+                 else "Compaction failed")
+        return f"<i>{label}: {detail}</i>"
+
+    def _add_compaction_message(self, trigger: str, covered: int, total: int):
+        if trigger == "auto":
+            self.ui.add_message(
+                f"<i>Context was running low, so older events were compacted "
+                f"automatically: {covered:,} of {total:,} events are now "
+                "represented by the summary.</i>")
+        else:
+            self.ui.add_message(
+                f"<i>Session context compacted: {covered:,} of {total:,} "
+                "events are now represented by the summary.</i>")
 
     def _compaction_busy_reason(self) -> str:
         """Why live compaction must wait, or an empty string."""
@@ -972,6 +1020,89 @@ class AppController(QObject):
             return ("Wait for the background job to report before "
                     "compacting the session context.")
         return ""
+
+    def _is_agent_idle(self) -> bool:
+        """Whether the active mode has no reply, tool or job in progress."""
+        if self.session_mode == "chat":
+            return bool(
+                self.state == ControllerState.IDLE
+                and not self.thinking_timer.isActive()
+                and not self.chat_queue)
+        handler = self._handler_for_mode(self.session_mode)
+        if handler is None:
+            return False
+        return str(getattr(handler.state, "name", "")) == "IDLE"
+
+    def _schedule_auto_compact_check(self):
+        timer = getattr(self, "_auto_compact_timer", None)
+        if timer is not None and not timer.isActive():
+            timer.start(1500)
+
+    def _maybe_auto_compact(self):
+        context_settings = self._summary_settings()
+        if not context_settings.get("auto_compact", True):
+            return
+        if not context_settings.get("handoff_enabled", True):
+            return
+        if self.session_mode not in ("chat", "terminal", "browser"):
+            return
+        if not self.project_manager or not self.project_root or not self.session_file:
+            return
+        if (not self.session_events or self._summary_pending
+                or self._manual_compact_pending):
+            return
+        if time.monotonic() < self._summary_retry_at:
+            return
+        if (time.monotonic() - self._auto_compact_last_at
+                < self.AUTO_COMPACT_COOLDOWN_SECONDS):
+            return
+        if not self._is_agent_idle() or self._compaction_busy_reason():
+            return
+        covered = self._compacted_event_count()
+        if len(self.session_events) - covered < handoff.MIN_EVENTS_FOR_SUMMARY:
+            return
+        stats = self._context_stats_snapshot()
+        if not context_stats.needs_auto_compaction(stats):
+            return
+        logging.info(
+            "Auto-compacting session context: %s of %s tokens used.",
+            int(stats.get("context_tokens") or 0),
+            int(stats.get("window") or 0))
+        self._auto_compact_last_at = time.monotonic()
+        self._manual_compact_pending = True
+        self._compaction_trigger = "auto"
+        self._manual_compact_focus = ""
+        self.ui.add_message(
+            "<i>Context window is almost full: compacting older events "
+            "into the session summary…</i>")
+        self._request_summary_update(
+            force=True, advance_boundary=True, trigger="auto")
+
+    def _schedule_context_indicator_update(self):
+        timer = getattr(self, "_context_indicator_timer", None)
+        if timer is not None:
+            timer.start(300)
+        else:
+            self._refresh_context_indicator()
+
+    def _refresh_context_indicator(self):
+        setter = getattr(getattr(self, "ui", None), "set_context_indicator", None)
+        if not callable(setter):
+            return
+        if not self.session_events:
+            setter(None)
+            return
+        provider_id, model_id = self._active_model_ids()
+        if not provider_id or not model_id:
+            setter(None)
+            return
+        try:
+            stats = self._context_stats_snapshot()
+        except Exception as e:
+            logging.debug(
+                "Could not refresh the context indicator: %s", e, exc_info=True)
+            return
+        setter(stats or None)
 
     def handoff_prompt(self, include_same_session: bool = False) -> str:
         """Summary block for a mode that did not produce the current journal.
@@ -1071,7 +1202,7 @@ class AppController(QObject):
                 or not self.session_events or self._summary_pending):
             return
         if self._manual_compact_pending:
-            self._maybe_finish_manual_compaction(from_timer=True)
+            self._maybe_finish_pending_compaction(from_timer=True)
             return
         context_settings = self._summary_settings()
         if not context_settings.get("handoff_enabled", True):
@@ -1096,15 +1227,27 @@ class AppController(QObject):
         self._request_summary_update(force=force)
 
     def _request_summary_update(self, force: bool = False,
-                                manual_compact: bool = False):
+                                advance_boundary: bool = False,
+                                trigger: str = "",
+                                focus: str = ""):
         if self._summary_pending:
-            if manual_compact:
+            if advance_boundary:
                 self._manual_compact_pending = True
+                self._compaction_trigger = trigger or "manual"
+                self._manual_compact_focus = (focus or "").strip()
             self._summary_force = True
             return
         session_file = self.session_file
         if not session_file or not self.session_events:
             return
+        if advance_boundary:
+            trigger = trigger or "manual"
+            focus = (focus or "").strip()
+            self._compaction_trigger = trigger
+            self._manual_compact_focus = focus
+        else:
+            trigger = "background"
+            focus = ""
         previous = handoff.read_summary(session_file) or self._handoff_summary
         meta = handoff.read_meta(session_file)
         same_session = bool(
@@ -1114,12 +1257,11 @@ class AppController(QObject):
         processed = int(meta.get("event_count") or 0) if (
             same_session and meta.get("source") == "llm") else 0
         new_events = self.session_events[processed:]
-        if not new_events:
+        if not new_events and not focus:
             self._summary_force = False
-            if manual_compact:
+            if advance_boundary:
                 covered = handoff.summary_coverage(meta, self.session_events)
-                self._manual_compact_pending = False
-                self._apply_manual_compaction(
+                self._apply_compaction(
                     covered, self._history_cut_key())
             return
         provider_id, model_id = self._summary_model_ids()
@@ -1131,6 +1273,7 @@ class AppController(QObject):
             project_name=self.project_manager.get_active_name() if self.project_manager else "",
             mode=self.session_mode,
             max_tokens=max_tokens,
+            focus=focus,
         )
         event_count = len(self.session_events)
         self._summary_request_context = {
@@ -1140,8 +1283,10 @@ class AppController(QObject):
             "event_id": str(self.session_events[event_count - 1].get("id") or ""),
             "provider": provider_id,
             "model": model_id,
-            "manual_compact": bool(manual_compact),
-            "history_cut": self._history_cut_key() if manual_compact else 0,
+            "advance_boundary": bool(advance_boundary),
+            "trigger": trigger,
+            "focus": focus,
+            "history_cut": self._history_cut_key() if advance_boundary else 0,
         }
         self._summary_pending = True
         self._summary_force = False
@@ -1156,23 +1301,26 @@ class AppController(QObject):
             return
         self._summary_failures = 0
         self._summary_retry_at = 0.0
-        manual = bool(context.get("manual_compact"))
+        advance = bool(context.get("advance_boundary"))
+        trigger = str(context.get("trigger") or ("manual" if advance else "background"))
         session_file = context.get("session_file") or ""
         if not session_file or not os.path.exists(session_file):
-            if manual:
-                self._manual_compact_pending = False
-                self.ui.add_message(
-                    "<i>Compaction failed: the session is no longer available.</i>")
+            if advance:
+                self._clear_pending_compaction(cooldown=(trigger == "auto"))
+                self.ui.add_message(self._compaction_failure_message(
+                    trigger, "the session is no longer available."))
+            self._schedule_context_indicator_update()
             return
         previous = handoff.read_summary(session_file)
         normalized = handoff.normalize_summary(text, fallback=previous)
         if not normalized:
             logging.warning("Handoff summary was empty after normalization.")
-            if manual:
-                self._manual_compact_pending = False
-                self.ui.add_message(
-                    "<i>Compaction failed: the summary came back empty. "
-                    "Nothing was removed.</i>")
+            if advance:
+                self._clear_pending_compaction(cooldown=(trigger == "auto"))
+                self.ui.add_message(self._compaction_failure_message(
+                    trigger,
+                    "the summary came back empty. Nothing was removed."))
+            self._schedule_context_indicator_update()
             return
         event_count = int(context.get("event_count") or 0)
         event_id = str(context.get("event_id") or "")
@@ -1184,60 +1332,66 @@ class AppController(QObject):
             provider=context.get("provider", ""),
             model=context.get("model", ""),
             source="llm",
-            compacted_through=event_id if manual else "",
-            compacted_event_count=event_count if manual else 0,
+            compacted_through=event_id if advance else "",
+            compacted_event_count=event_count if advance else 0,
         )
         if not written:
-            if manual:
-                self._manual_compact_pending = False
-                self.ui.add_message(
-                    "<i>Compaction failed: the summary could not be saved. "
-                    "Nothing was removed.</i>")
+            if advance:
+                self._clear_pending_compaction(cooldown=(trigger == "auto"))
+                self.ui.add_message(self._compaction_failure_message(
+                    trigger,
+                    "the summary could not be saved. Nothing was removed."))
+            self._schedule_context_indicator_update()
             return
         if session_file == self.session_file:
             self._handoff_summary = written
             self._handoff_meta = handoff.read_meta(session_file)
-            if manual:
-                self._manual_compact_pending = False
+            if advance:
+                trigger = str(context.get("trigger") or "manual")
+                self._clear_pending_compaction(cooldown=True)
                 covered = handoff.compacted_event_count(
                     self._handoff_meta, self.session_events)
                 if covered:
                     self._apply_compaction_marker(
                         int(context.get("history_cut") or 0))
-                    self.ui.add_message(
-                        f"<i>Session context compacted: {covered:,} of "
-                        f"{len(self.session_events):,} events are now "
-                        "represented by the summary.</i>")
+                    self._add_compaction_message(
+                        trigger, covered, len(self.session_events))
                 else:
-                    self.ui.add_message(
-                        "<i>Compaction failed: the boundary could not be "
-                        "recorded. Nothing was removed.</i>")
+                    self.ui.add_message(self._compaction_failure_message(
+                        trigger,
+                        "the boundary could not be recorded. Nothing was removed."))
                 self._refresh_agent_context()
             else:
                 self._refresh_agent_context()
-        elif manual:
-            self._manual_compact_pending = False
-            logging.info("Manual compaction finished for a session that is no "
+        elif advance:
+            self._clear_pending_compaction(cooldown=True)
+            logging.info("Compaction finished for a session that is no "
                          "longer active: %s", session_file)
         logging.info("Handoff summary updated (%d chars).", len(written))
+        self._schedule_context_indicator_update()
         if self._manual_compact_pending:
-            self._maybe_finish_manual_compaction()
-        if self._summary_force:
+            self._maybe_finish_pending_compaction()
+        elif self._summary_force:
             self._schedule_summary_refresh(force=True)
+        else:
+            self._schedule_auto_compact_check()
 
     def _handle_summary_error(self, message: str):
         self._summary_request_context = None
         self._summary_pending = False
-        manual = self._manual_compact_pending
-        self._manual_compact_pending = False
+        pending = self._manual_compact_pending
+        trigger = self._compaction_trigger or "manual"
+        if pending:
+            self._clear_pending_compaction()
+            self.ui.add_message(self._compaction_failure_message(
+                trigger,
+                "the session summary could not be refreshed. "
+                "Nothing was removed."))
         self._summary_failures += 1
         self._summary_force = False
         delay = min(300.0, 15.0 * (2 ** min(self._summary_failures - 1, 4)))
         self._summary_retry_at = time.monotonic() + delay
-        if manual:
-            self.ui.add_message(
-                "<i>Compaction failed: the session summary could not be "
-                "refreshed. Nothing was removed.</i>")
+        self._schedule_context_indicator_update()
         logging.warning(
             "Handoff summary update failed (%d); retry in %.0fs: %s",
             self._summary_failures, delay, message)
@@ -1268,10 +1422,15 @@ class AppController(QObject):
         if ratio < 0.8:
             return
         self._context_warning_file = self.session_file
+        hint = ("Use Compact now in Session context to replace older history "
+                "with the summary.")
+        if (self._summary_settings().get("auto_compact", True)
+                and self.session_mode in ("chat", "terminal", "browser")):
+            hint = ("Use Compact now in Session context, or let the automatic "
+                    "compaction run once the current step finishes.")
         self.ui.add_message(
             f"<i>Context window is {ratio * 100:.0f}% full "
-            f"({total:,} / {window:,} tokens). Use Compact now in Session "
-            "context to replace older history with the summary.</i>")
+            f"({total:,} / {window:,} tokens). {hint}</i>")
 
     def _handle_usage(self, usage: dict):
         if not isinstance(usage, dict) or not usage:
@@ -1858,6 +2017,10 @@ class AppController(QObject):
     def _set_state(self, new_state: ControllerState):
         logging.info(f"AppController state changed from {self.state.name} to {new_state.name}")
         self.state = new_state
+        self._schedule_context_indicator_update()
+        if new_state in (ControllerState.IDLE, ControllerState.TERMINAL,
+                         ControllerState.BROWSER):
+            self._schedule_auto_compact_check()
 
     def handle_user_input(self, user_text):
         if not self.llm_worker.provider:
@@ -2536,8 +2699,10 @@ class AppController(QObject):
             notice = (f"<i>Switched to <b>{title_string}</b> (this session only). "
                       f"The new model takes over from your next message.</i>")
         self.ui.add_message(notice, force_scroll=True, keep_stream=True)
+        self._schedule_context_indicator_update()
         if self._summary_settings().get("handoff_on_model_switch", True):
             self._schedule_summary_refresh(force=True)
+        self._schedule_auto_compact_check()
         # Only kick the queue when nothing is in flight; an in-flight reply
         # drains it when it finishes, and start_chat would abort that reply.
         if not self.thinking_timer.isActive():
@@ -3118,16 +3283,30 @@ class AppController(QObject):
                 "No handoff summary yet. It will be generated from the journal.",
                 dialog,
             ))
+        focus_label = QLabel("Compaction focus (optional):", dialog)
+        layout.addWidget(focus_label)
+        focus_input = QLineEdit(dialog)
+        focus_input.setMaxLength(handoff.FOCUS_MAX_CHARS)
+        focus_input.setPlaceholderText(
+            "What the summary should keep in detail, e.g. the API changes "
+            "and open test failures")
+        layout.addWidget(focus_input)
         refresh_button = QPushButton("Compact now", dialog)
-        refresh_button.clicked.connect(
-            lambda: (self._request_manual_summary_refresh(), dialog.accept()))
+
+        def _request_from_dialog():
+            focus = focus_input.text()
+            self._request_manual_summary_refresh(focus=focus)
+            dialog.accept()
+
+        refresh_button.clicked.connect(_request_from_dialog)
         layout.addWidget(refresh_button)
         close_button = QPushButton("Close", dialog)
         close_button.clicked.connect(dialog.accept)
         layout.addWidget(close_button)
         dialog.exec()
 
-    def _request_manual_summary_refresh(self):
+    def _request_manual_summary_refresh(self, focus: str = ""):
+        focus = (focus or "").strip()[:handoff.FOCUS_MAX_CHARS]
         if not self.session_events or not self.session_file:
             QMessageBox.information(
                 self.ui.main_window, "Session context",
@@ -3141,13 +3320,16 @@ class AppController(QObject):
         if self._summary_pending:
             # Compaction will follow once the in-flight summary lands.
             self._manual_compact_pending = True
+            self._compaction_trigger = "manual"
+            self._manual_compact_focus = focus
             self.ui.add_message("<i>Compacting the session context…</i>")
             return
         meta = handoff.read_meta(self.session_file)
         covered = handoff.summary_coverage(meta, self.session_events)
-        if (covered >= len(self.session_events)
+        if (not focus and covered >= len(self.session_events)
                 and handoff.read_summary(self.session_file)):
-            if not self._apply_manual_compaction(
+            self._compaction_trigger = "manual"
+            if not self._apply_compaction(
                     covered, self._history_cut_key()):
                 QMessageBox.warning(
                     self.ui.main_window, "Session context",
@@ -3155,7 +3337,10 @@ class AppController(QObject):
                     "The session is unchanged.")
             return
         self._manual_compact_pending = True
-        self._request_summary_update(force=True, manual_compact=True)
+        self._compaction_trigger = "manual"
+        self._manual_compact_focus = focus
+        self._request_summary_update(
+            force=True, advance_boundary=True, trigger="manual", focus=focus)
         self.ui.add_message("<i>Compacting the session context…</i>")
 
     def _show_session_journal(self):

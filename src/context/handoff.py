@@ -53,6 +53,7 @@ MIN_EVENTS_FOR_SUMMARY = 4
 MAX_PROMPT_CHARS = 40_000
 MAX_EVENT_CHARS = 2_400
 MAX_SUMMARY_CHARS = 16_000
+FOCUS_MAX_CHARS = 500
 # opencode-style compaction: keep the recent tail intact, prune older tool
 # output to head/tail excerpts, and cap what one event may contribute.
 RECENT_TAIL_CHARS = 20_000
@@ -577,8 +578,14 @@ def build_summary_prompts(
     project_name: str = "",
     mode: str = "",
     max_tokens: int = DEFAULT_MAX_TOKENS,
+    focus: str = "",
 ) -> tuple[str, str]:
-    """Prompts for a rolling update of the existing handoff summary."""
+    """Prompts for a rolling update of the existing handoff summary.
+
+    ``focus`` is an optional user instruction for a manual compaction; it
+    biases what the summary keeps rather than changing its fixed sections.
+    """
+    focus = (focus or "").strip()
     system_prompt = (
         "You maintain a compact handoff summary for a local desktop agent. "
         "The event journal is the source of truth. Update the previous summary "
@@ -610,11 +617,22 @@ def build_summary_prompts(
         f"- Stay under {int(max_tokens)} tokens.\n"
         "- Never include passwords, API keys or access tokens."
     )
+    if focus:
+        system_prompt += (
+            "\n- The user asked to focus this compaction on: "
+            f"{focus[:FOCUS_MAX_CHARS]}\n"
+            "  Keep everything needed for that focus in detail; compress "
+            "unrelated parts more aggressively while keeping the sections."
+        )
     user_prompt = (
         f"Project: {project_name or '(unnamed)'}\n"
         f"Session mode: {mode or 'unknown'}\n\n"
         "Previous summary:\n"
         f"{previous.strip() or '(none)'}\n\n"
+    )
+    if focus:
+        user_prompt += f"Compaction focus:\n{focus[:FOCUS_MAX_CHARS]}\n\n"
+    user_prompt += (
         "New events:\n"
         f"{_select_event_lines(events) or '(none)'}"
     )

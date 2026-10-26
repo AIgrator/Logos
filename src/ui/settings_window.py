@@ -293,6 +293,7 @@ class SettingsWindow(QDialog):
         self.handoff_enabled_checkbox.setChecked(bool(context_settings.get("handoff_enabled", True)))
         self.handoff_mode_switch_checkbox.setChecked(bool(context_settings.get("handoff_on_mode_switch", True)))
         self.handoff_model_switch_checkbox.setChecked(bool(context_settings.get("handoff_on_model_switch", True)))
+        self.auto_compact_checkbox.setChecked(bool(context_settings.get("auto_compact", True)))
         self.summary_max_tokens_spinbox.setValue(int(context_settings.get("summary_max_tokens", 1200)))
         self.summary_threshold_spinbox.setValue(float(context_settings.get("summary_threshold_ratio", 0.6)))
         self.summary_model_lineedit.setText(str(context_settings.get("summary_model") or ""))
@@ -389,6 +390,7 @@ class SettingsWindow(QDialog):
             "handoff_enabled": self.handoff_enabled_checkbox.isChecked(),
             "handoff_on_mode_switch": self.handoff_mode_switch_checkbox.isChecked(),
             "handoff_on_model_switch": self.handoff_model_switch_checkbox.isChecked(),
+            "auto_compact": self.auto_compact_checkbox.isChecked(),
             "summary_max_tokens": self.summary_max_tokens_spinbox.value(),
             "summary_threshold_ratio": round(self.summary_threshold_spinbox.value(), 2),
             "summary_model": self.summary_model_lineedit.text().strip(),
@@ -950,6 +952,17 @@ class SettingsWindow(QDialog):
         context_layout.addWidget(QLabel("Summarizer model:"), 9, 0)
         context_layout.addWidget(self._create_help_label(summary_model_tooltip), 9, 1, Qt.AlignLeft)
         context_layout.addWidget(self.summary_model_lineedit, 9, 2, 1, 2)
+
+        self.auto_compact_checkbox = QCheckBox()
+        auto_compact_tooltip = (
+            "When free space in the model window drops to the response buffer "
+            "(~15% of the window, at least 16k tokens), older events are "
+            "compacted into the session summary automatically once the current "
+            "step finishes. Chat, Terminal and Browser only."
+        )
+        context_layout.addWidget(QLabel("Auto-compact on low headroom:"), 10, 0)
+        context_layout.addWidget(self._create_help_label(auto_compact_tooltip), 10, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.auto_compact_checkbox, 10, 3)
 
         return group
 

@@ -51,8 +51,11 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   are redacted before events are written. The newest is
   restored at startup: messages are replayed into the
   chat, and terminal/browser `command_history` plus tool cards are rebuilt from
-  the same events. After a manual compaction only events after the recorded
-  boundary are rebuilt; the summary block stands in for the compacted prefix. Agent `finish` / `communicate_to_user` / `display_message`
+  the same events. After a manual or automatic compaction only events after the
+  recorded boundary are rebuilt; the summary block stands in for the compacted
+  prefix (automatic compaction runs at idle when free context space drops to
+  `max(15% of the window, 16k tokens)`; disabled by `context.auto_compact`).
+  Agent `finish` / `communicate_to_user` / `display_message`
   text is persisted as an assistant `message`. `objective` is auto-derived from
   the first request; Browser/Vision resumes get a deterministic session summary
   derived from this journal.

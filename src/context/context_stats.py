@@ -210,6 +210,29 @@ def build_session_stats(
     }
 
 
+DEFAULT_HEADROOM_RATIO = 0.15
+DEFAULT_MIN_HEADROOM_TOKENS = 16000
+
+
+def needs_auto_compaction(
+    stats: dict,
+    *,
+    headroom_ratio: float = DEFAULT_HEADROOM_RATIO,
+    min_headroom_tokens: int = DEFAULT_MIN_HEADROOM_TOKENS,
+) -> bool:
+    """Whether free context space is down to the response/compaction buffer."""
+    window = _to_int((stats or {}).get("window"))
+    used = _to_int((stats or {}).get("context_tokens"))
+    if not window or not used:
+        return False
+    try:
+        ratio = float(headroom_ratio)
+    except (TypeError, ValueError):
+        ratio = DEFAULT_HEADROOM_RATIO
+    headroom = max(_to_int(min_headroom_tokens), int(window * max(0.0, ratio)))
+    return max(0, window - used) <= headroom
+
+
 def format_breakdown(stats: dict) -> str:
     """Compact one-line category breakdown for the dialog."""
     groups = (stats or {}).get("groups") or {}

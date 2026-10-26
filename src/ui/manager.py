@@ -515,6 +515,19 @@ class UIManager(QWidget):
             IconHoverFilter(self.controller.theme_manager, 'fa5s.stop', parent=self.cancel_button)
         )
 
+        self.context_indicator_button = QPushButton()
+        self.context_indicator_button.setObjectName("ContextIndicator")
+        self.context_indicator_button.setFixedHeight(22)
+        self.context_indicator_button.setMinimumWidth(44)
+        self.context_indicator_button.setCursor(Qt.PointingHandCursor)
+        self.context_indicator_button.setFocusPolicy(Qt.NoFocus)
+        self.context_indicator_button.setVisible(False)
+        self.context_indicator_button.clicked.connect(self.context_requested.emit)
+        self.tooltip_manager.install(
+            self.context_indicator_button,
+            "Context window usage. Click to open Session context.")
+        self._context_indicator_stats = None
+
 
 
         self.bottom_toolbar_layout.addWidget(self.toggle_button)
@@ -537,6 +550,7 @@ class UIManager(QWidget):
         # One morphing action button: Stop while thinking with empty input,
         # Send otherwise (sending cancels the in-flight response).
         self._thinking_active = False
+        self.bottom_toolbar_layout.addWidget(self.context_indicator_button)
         self.bottom_toolbar_layout.addWidget(self.send_button)
         self.bottom_toolbar_layout.addWidget(self.cancel_button)
         self.cancel_button.setVisible(False)
@@ -884,6 +898,64 @@ class UIManager(QWidget):
         self.icon_spinner_vision = qta.icon('fa5s.spinner', color=icon_color, animation=self.vision_mode_spinner)
         current_toggle_icon = self.toggle_icon_maximize if self.is_compact else self.toggle_icon_minimize
         self.toggle_button.setIcon(current_toggle_icon)
+        self._style_context_indicator()
+
+    def set_context_indicator(self, stats: dict | None):
+        """Shows the model-facing context fill next to Send; None hides it."""
+        if not stats:
+            self._context_indicator_stats = None
+            self.context_indicator_button.setVisible(False)
+            self._schedule_toolbar_reflow()
+            return
+        self._context_indicator_stats = dict(stats)
+        used = int(stats.get("context_tokens") or 0)
+        window = int(stats.get("window") or 0)
+        percent = float(stats.get("percent") or 0.0)
+        source = str(stats.get("context_source") or "estimated")
+        source_label = {
+            "actual": "provider-reported",
+            "payload": "model payload estimate",
+            "estimated": "journal estimate",
+        }.get(source, source)
+        approximate = "" if source == "actual" else "~"
+        self.context_indicator_button.setText(f"{percent:.0f}%")
+        self.tooltip_manager.install(
+            self.context_indicator_button,
+            f"Context {approximate}{percent:.0f}% full\n"
+            f"{approximate}{used:,} / {window:,} tokens · {source_label}\n"
+            "Click to open Session context")
+        self._style_context_indicator(percent)
+        was_hidden = self.context_indicator_button.isHidden()
+        self.context_indicator_button.setVisible(True)
+        if was_hidden:
+            self._schedule_toolbar_reflow()
+
+    def _style_context_indicator(self, percent: float | None = None):
+        if percent is None:
+            stats = self._context_indicator_stats or {}
+            percent = float(stats.get("percent") or 0.0)
+        theme = self.controller.theme_manager
+        if percent >= 95.0:
+            color = theme.get_style("ERROR_COLOR")
+        elif percent >= 80.0:
+            color = theme.get_style("WARNING_COLOR")
+        else:
+            color = theme.get_style("COLLAPSIBLE_META")
+        hover = theme.get_style("ICON_COLOR")
+        self.context_indicator_button.setStyleSheet(f"""
+            QPushButton#ContextIndicator {{
+                background: transparent;
+                border: 1px solid {color};
+                border-radius: 9px;
+                color: {color};
+                font-size: 11px;
+                padding: 0px 7px;
+            }}
+            QPushButton#ContextIndicator:hover {{
+                border-color: {hover};
+                color: {hover};
+            }}
+        """)
 
     def on_settings_changed(self, new_settings):
         if 'compact_mode' in new_settings:
@@ -1069,6 +1141,8 @@ class UIManager(QWidget):
             self.toggle_button, self.attachment_button,
             self.mode_button, self.model_button, self.send_button,
         ]
+        if not self.context_indicator_button.isHidden():
+            widgets.append(self.context_indicator_button)
         if not self.pause_task_button.isHidden():
             widgets.append(self.pause_task_button)
         if not self.cancel_button.isHidden():

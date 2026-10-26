@@ -209,6 +209,7 @@ class SettingsManager(QObject):
             "handoff_enabled": True,
             "handoff_on_model_switch": True,
             "handoff_on_mode_switch": True,
+            "auto_compact": True,
             "summary_model": "",
             "summary_max_tokens": 1200,
             "summary_threshold_ratio": 0.6
