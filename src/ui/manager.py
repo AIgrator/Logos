@@ -8,8 +8,8 @@ import sys
 import qtawesome as qta
 from PIL import Image
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import (QBuffer, QIODevice, QEasingCurve, QMimeData, QPropertyAnimation,
-                            QRect, QSize, Qt, Signal, QTimer, Slot)
+from PySide6.QtCore import (QBuffer, QIODevice, QEasingCurve, QMimeData, QPoint,
+                            QPropertyAnimation, QRect, QSize, Qt, Signal, QTimer, Slot)
 from PySide6.QtGui import (QActionGroup, QColor, QIcon, QImage, QPainter, QPen, QPixmap,
                            QTextCursor, QTextOption)
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QListWidget, QListWidgetItem, QMainWindow,
@@ -451,17 +451,17 @@ class UIManager(QWidget):
         self.attachment_button = QPushButton()
         self.attachment_button.setIconSize(QSize(20, 20))
         self.attachment_button.setFixedSize(QSize(36, 36))
-        self.tooltip_manager.install(self.attachment_button, "Attach context")
+        self.tooltip_manager.install(self.attachment_button, "Add attachment")
         self.attachment_button.installEventFilter(
-            IconHoverFilter(self.controller.theme_manager, 'fa5s.paperclip', parent=self.attachment_button)
+            IconHoverFilter(self.controller.theme_manager, 'fa5s.plus', parent=self.attachment_button)
         )
+        self.attachment_button.clicked.connect(self._show_attachment_menu)
 
         self.attachment_menu = QMenu(self.attachment_button)
         self.add_file_action = self.attachment_menu.addAction("Add File...")
         self.add_folder_action = self.attachment_menu.addAction("Add Folder...")
         self.attachment_menu.addSeparator()
         self.screenshot_action = self.attachment_menu.addAction("Take Screenshot")
-        self.attachment_button.setMenu(self.attachment_menu)
         self.add_folder_action.setVisible(False)
 
         self.mode_button = QPushButton("Chat")
@@ -1343,6 +1343,13 @@ class UIManager(QWidget):
     def clear_thumbnails(self):
         while self.attachment_thumbnails:
             self.remove_thumbnail(0)
+
+    def _show_attachment_menu(self):
+        """Open the attach menu above the button (which has no arrow of its own)."""
+        menu = self.attachment_menu
+        menu.adjustSize()
+        anchor = self.attachment_button.mapToGlobal(QPoint(0, 0))
+        menu.exec(QPoint(anchor.x(), anchor.y() - menu.sizeHint().height()))
 
     def update_attachment_menu_state(self, image_count: int, total_count: int):
         """Updates the enabled state of attachment menu actions based on current counts."""
