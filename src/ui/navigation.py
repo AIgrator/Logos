@@ -482,7 +482,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
         self.section_label = QLabel("PROJECTS")
         self.section_label.setObjectName("SidebarSection")
-        self.section_label.setContentsMargins(6, 8, 6, 0)
+        self.section_label.setContentsMargins(13, 8, 6, 0)
         root.addWidget(self.section_label)
 
         self.project_list = QListWidget()
@@ -531,10 +531,14 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
     def _apply_style(self):
         colors = _theme_colors(self.theme_manager)
         # Collapsed mode has no labels: centre the icons in the narrow rail.
+        # The rail is 42 px wide (54 minus the 6 px root insets), so the 16 px
+        # button glyphs sit 19 px from the panel edge and the 24 px project
+        # tiles 12 px from it. Expanded mode repeats those exact offsets
+        # instead of pushing the icons to the edge, so nothing moves.
         button_align = "center" if self.collapsed else "left"
-        button_padding = "7px 0"
-        # Icon-only list rows need their own symmetric inset to stay centred.
-        item_padding = "7px 6px" if self.collapsed else "7px 0"
+        button_padding = "7px 0" if self.collapsed else "7px 13px"
+        # Project tiles keep their collapsed inset in both modes.
+        item_padding = "7px 6px"
         self.setStyleSheet(f"""
             QWidget#ProjectSidebar {{
                 background: {colors['panel']};
