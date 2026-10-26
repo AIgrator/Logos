@@ -189,8 +189,16 @@
     {
       "path": "C:\\Users\\vipTe\\Project\\python\\test",
       "name": "test",
-      "last_opened": "2026-10-25T09:25:33+00:00"
+      "last_opened": "2026-10-26T10:07:49+00:00"
     }
   ],
-  "mode_models": {}
+  "mode_models": {},
+  "window_geometry": {
+    "x": 100,
+    "y": 100,
+    "width": 668,
+    "height": 640,
+    "maximized": false
+  },
+  "sidebar_collapsed": true
 }
