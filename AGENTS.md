@@ -31,8 +31,10 @@ The app runs inside a selected project directory. Startup resolves the remembere
 `active_project` from `settings.json`; if it is missing or gone, the UI opens the
 full-screen `HomePage` (`src/ui/navigation.py`) instead of a modal picker. In the
 workspace, projects and sessions are reached through the collapsible left sidebar.
-Clicking a recent session opens its project and that exact session. Per-project data
-lives in `<project>/.logos/`:
+The full-mode window frame (`window_geometry`) and the sidebar's collapsed state
+(`sidebar_collapsed`) are saved to `settings.json` on close and restored on the
+next launch; layout margins are not persisted. Clicking a recent session opens
+its project and that exact session. Per-project data lives in `<project>/.logos/`:
 
 - `project.json` - id, name, timestamps. `name` may be a custom display name set
   from the project context menu; the folder itself is never renamed.

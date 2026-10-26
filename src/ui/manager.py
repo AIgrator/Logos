@@ -73,6 +73,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         logging.info("MainWindow closeEvent received. Emitting closing signal for graceful shutdown.")
+        try:
+            self.ui_manager.save_window_state()
+        except Exception as e:
+            logging.warning(f"Could not remember window state on close: {e}")
         self.closing.emit()
         event.ignore()  # Let the controller handle the actual exit.
 
@@ -311,6 +315,7 @@ class UIManager(QWidget):
         self.main_window.setWindowIcon(QIcon("assets/ico.ico"))
 
         self.full_mode_geometry = QRect(100, 100, 400, 640)
+        self._last_full_frame = None  # (QRect, maximized) captured when leaving full mode
         self._update_compact_mode_geometry()
 
         self.main_window.setGeometry(self.full_mode_geometry)
@@ -368,6 +373,7 @@ class UIManager(QWidget):
         self.sidebar.settings_requested.connect(self.settings_button_clicked.emit)
         self.sidebar.project_renamed.connect(self.project_renamed.emit)
         self.sidebar.project_removed.connect(self.project_removed.emit)
+        self._restore_sidebar_state()
 
         self.chat_widget = ChatWidget(self.controller.theme_manager)
         self.chat_widget.is_compact_fn = lambda: self.is_compact
@@ -1466,9 +1472,73 @@ class UIManager(QWidget):
     def show_main_window(self):
         import time
         t0 = time.perf_counter()
-        self.main_window.showMaximized()
+        saved = self.settings_manager.get("window_geometry", {}) or {}
+        restored = self._restore_window_geometry(saved)
+        if restored and saved.get("maximized"):
+            self.main_window.showMaximized()
+        elif restored:
+            self.main_window.show()
+        else:
+            self.main_window.showMaximized()
         QTimer.singleShot(0, self._remember_full_geometry)
         logging.info(f"show_main_window called, took {time.perf_counter() - t0:.3f}s to return")
+
+    def _restore_window_geometry(self, saved: dict) -> bool:
+        """Applies the remembered frame; False when there is nothing sane to restore."""
+        try:
+            width = int(saved.get("width") or 0)
+            height = int(saved.get("height") or 0)
+            x, y = int(saved.get("x") or 0), int(saved.get("y") or 0)
+        except (TypeError, ValueError):
+            return False
+        if width < 400 or height < 300:
+            return False
+        rect = QRect(x, y, width, height)
+        # A monitor may have been unplugged since the app was closed; dropping
+        # an off-screen frame avoids an invisible window at startup.
+        if not any(s.availableGeometry().intersects(rect) for s in QApplication.screens()):
+            return False
+        self.full_mode_geometry = rect
+        self.main_window.setGeometry(rect)
+        return True
+
+    def _capture_full_frame(self):
+        """Remembers the full-mode frame before the window turns compact."""
+        try:
+            win = self.main_window
+            maximized = win.isMaximized()
+            rect = win.normalGeometry() if maximized else win.geometry()
+            self._last_full_frame = (QRect(rect), maximized)
+        except Exception as e:
+            logging.warning(f"Could not capture full-mode frame: {e}")
+
+    def save_window_state(self):
+        """Persists the full-mode frame and sidebar state for the next launch."""
+        payload = {"sidebar_collapsed": bool(getattr(self.sidebar, "collapsed", False))}
+        try:
+            if self.is_compact:
+                rect, maximized = self._last_full_frame or (self.full_mode_geometry, False)
+            else:
+                win = self.main_window
+                maximized = win.isMaximized()
+                rect = win.normalGeometry() if maximized else win.geometry()
+            payload["window_geometry"] = {
+                "x": rect.x(),
+                "y": rect.y(),
+                "width": rect.width(),
+                "height": rect.height(),
+                "maximized": maximized,
+            }
+        except Exception as e:
+            logging.warning(f"Could not capture window geometry: {e}")
+        try:
+            self.settings_manager.set_many(payload, emit=False)
+        except Exception as e:
+            logging.warning(f"Could not save window state: {e}")
+
+    def _restore_sidebar_state(self):
+        if self.settings_manager.get("sidebar_collapsed", False):
+            self.sidebar.set_collapsed(True)
 
     def _remember_full_geometry(self):
         if not self.is_compact and self.main_window.isMaximized():
@@ -1492,6 +1562,7 @@ class UIManager(QWidget):
 
     def switchToCompactMode(self):
         logging.info("switchToCompactMode: enter")
+        self._capture_full_frame()
         self.is_compact = True
         self.compact_position = self.settings_manager.get("compact_mode", {}).get("position", "bottom_center")
         self.attachment_scroll_area.setVisible(False)

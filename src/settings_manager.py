@@ -135,6 +135,11 @@ class SettingsManager(QObject):
             "height": 120,
             "position": "bottom_center"
         },
+        # Last full-mode window frame, remembered on close so the app reopens
+        # where the user left it instead of always maximizing.
+        "window_geometry": {},
+        # Collapsed state of the workspace sidebar at the last close.
+        "sidebar_collapsed": False,
         "webp_quality": 80,
         "webp_lossless": True,
         "max_retries": 3,
