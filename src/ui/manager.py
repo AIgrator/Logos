@@ -438,14 +438,6 @@ class UIManager(QWidget):
         self._reflow_timer.setSingleShot(True)
         self._reflow_timer.timeout.connect(self._reflow_toolbar)
 
-        self.settings_button = QPushButton()
-        self.settings_button.setIconSize(QSize(20, 20))
-        self.settings_button.setFixedSize(QSize(36, 36))
-        self.tooltip_manager.install(self.settings_button, "Settings")
-        self.settings_button.installEventFilter(
-            IconHoverFilter(self.controller.theme_manager, 'fa5s.cog', parent=self.settings_button)
-        )
-
         self.toggle_button = QPushButton()
         self.toggle_button.setIconSize(QSize(20, 20))
         self.toggle_button.setFixedSize(QSize(36, 36))
@@ -526,7 +518,6 @@ class UIManager(QWidget):
 
 
 
-        self.bottom_toolbar_layout.addWidget(self.settings_button)
         self.bottom_toolbar_layout.addWidget(self.toggle_button)
         self.bottom_toolbar_layout.addWidget(self.attachment_button)
 
@@ -583,7 +574,6 @@ class UIManager(QWidget):
         self.user_input.tab_pressed.connect(self._on_tab_pressed)
         self.user_input.image_pasted.connect(self._handle_pasted_image)
         self.user_input.files_pasted.connect(self._handle_pasted_files)
-        self.settings_button.clicked.connect(self.settings_button_clicked.emit)
         self.toggle_button.clicked.connect(self.toggle_mode)
         self.add_file_action.triggered.connect(self.add_file_clicked.emit)
         self.add_folder_action.triggered.connect(self.add_folder_clicked.emit)
@@ -1077,7 +1067,7 @@ class UIManager(QWidget):
     def _preferred_single_row_width(self) -> int:
         """Width the toolbar needs to fit everything on one row (no clipping)."""
         widgets = [
-            self.settings_button, self.toggle_button, self.attachment_button,
+            self.toggle_button, self.attachment_button,
             self.mode_button, self.model_button, self.send_button,
         ]
         if not self.pause_task_button.isHidden():
