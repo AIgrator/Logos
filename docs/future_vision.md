@@ -30,9 +30,10 @@ What changed since the original plan:
   DOM snapshots with stable element refs, screenshots with ref badges, URL/private
   network policy and per-action approvals. This is the `dom` grounding path.
 - **Projects and persistent sessions exist.** Each project owns `.logos/` with
-  JSONL session journals, a rolling handoff summary, restored history and
-  attachments. Sessions are mode-locked. There are still no tabs and no screen
-  arbiter.
+  JSONL session journals, a rolling handoff summary and restored history.
+  Sessions are mode-locked: one session runs one mode. Attachments are still
+  transient (the journal stores text only), and tabs/parallel sessions are
+  deliberately out of scope.
 - **The base install is thin.** Removing the ML stack achieved the size/startup
   goal without optional model downloads. If a local grounding backend returns,
   it must stay an optional add-on rather than a base dependency.
@@ -111,34 +112,113 @@ without model loading. Consequences:
 - If `local` grounding returns, it must be downloaded on demand via the setup
   wizard and never become a required dependency.
 
-## Principle 4: long-lived sessions and tabs
+## Principle 4: long-lived sessions (one mode per session)
 
 One-off tasks ("empty the recycle bin") stay as they are. Alongside them, Logos
-grows **persistent sessions**: named tasks with a goal, a history of what was
-done, and attached artifacts (letters, requirements, screenshots), living for
-weeks and surviving restarts. Returning to a session restores full context;
-watch-type sessions (e.g. tracking a developer console) additionally diff
-incoming items since the last visit.
+grows **persistent sessions**: a named thread with a history of what was done, a
+rolling summary and the user's attachments, living for weeks and surviving
+restarts. A session is a conversation plus an action log, not a snapshot of the
+live machine.
 
-**Current state:** project-scoped sessions, JSONL journals, restore/replay,
-attachments and the rolling handoff summary are implemented. Sessions are
-mode-locked; switching mode in a non-empty session starts a new one. There is no
-tabbed UI and no screen arbiter yet.
+Chat and Terminal behave like mature CLI agents: the transcript and project
+files are the state. Browser and Vision are different — they drive an external
+live environment. Browser/CUA products persist auth profiles and task history,
+not a frozen page or desktop: ChatGPT agent keeps cookies across sessions like a
+regular browser; Claude Code with Chrome shares the user's browser login state;
+browser-use persists profiles (cookies, localStorage, login) but not open tabs;
+Anthropic's computer use leaves screenshots and actions in the application's
+environment, not on the provider. Cloud agents such as Devin and Manus can
+snapshot a VM/sandbox; Logos runs on the user's real desktop and cannot copy that
+approach.
 
-Sessions should be presented as **tabs** (one handler + chat log per tab, any
-mode). Tab switching serializes and pauses handler state; resuming restores it
-losslessly. Constraint: **one display — one active Vision task** (there is a
-single physical mouse). A screen arbiter grants the display to one Vision
-session; the rest wait paused with explicit indication. Terminal/Chat sessions
-may run in the background.
+**Scope decision (2026-10-26):** one session runs one mode. There are no tabs, no
+parallel sessions in one window, no screen arbiter and no virtual displays on the
+roadmap. Switching sessions is explicit: Logos restores completed history from
+the journal and stops in-flight work instead of pretending to suspend it.
 
-Escape hatch (future, proven in prototype): **virtual displays**. If the user
-installs virtual-display drivers, a session can be moved from the main screen to
-a virtual one — each display then runs its own Vision task in parallel (clicks on
-a secondary display were already demonstrated in the video-lecture project). Not
-on the near-term roadmap; recorded here so the arbiter is designed
-display-aware from the start (session → display binding, not a global singleton
-lock).
+**Current state:** project-scoped sessions, JSONL journals, autosave,
+restore/replay, rename/delete, mode locking and the rolling handoff summary are
+implemented. The summary is project-level; there is no per-session objective or
+session summary yet. Attachments are still transient: `.logos/attachments/` is
+created but never written, and the journal stores text only.
+
+### Session contents
+
+- **Title.** Derived from the first request and renameable. It is a short label,
+  not a mandatory goal form.
+- **Objective.** An auto-derived, editable one-line goal stored in the session
+  header. It starts as the first request. Browser and Vision need it because the
+  project summary may describe other sessions and the live page/desktop is gone.
+- **Journal.** Append-only typed events: messages, reasoning, tool calls and
+  results, job results, usage, errors. It is the source of truth for replay and
+  for rebuilding the model-facing agent history.
+- **Session summary.** A compact state block derived from this session's journal
+  (the same Objective/Done/Current/Next/Files/Blockers shape). It is what a
+  Browser or Vision resume uses when the live chain cannot be replayed.
+- **Project handoff summary.** The existing project-level `context/summary.md`
+  remains the cross-session/cross-mode handoff, not the session's own state.
+- **Attachments.** Handled by the policy below.
+
+### Attachments policy
+
+Do not copy the whole project into `.logos`. Use three tiers:
+
+1. **Project files referenced with `@` or a path are not copied.** The journal
+   records the name, project-relative path, size and content hash. On reopen a
+   changed file is marked "changed", a missing one "missing". The project folder
+   stays the source of truth.
+2. **Pasted images and explicit user attachments with no stable source path** are
+   copied to `.logos/attachments/<session-id>/` and deduplicated by SHA-256.
+   Without a copy these bytes are lost on restart; Claude Code solves the same
+   problem with a per-session `images/` folder.
+3. **Automatic Vision/CUA screenshots are not session artifacts.** They stay in
+   the debug screenshot folder with the existing retention window (7 days by
+   default). Only screenshots the user explicitly attaches or pins are copied
+   into the session.
+
+Attachments appear as cards (name, type, size, changed/missing badge), not as a
+re-sent image on every turn. Deleting a session removes its attachment folder
+after confirmation, and per-file/per-session caps prevent disk bloat.
+
+### What "resume" means
+
+On reopen Logos restores the transcript and tool cards, rebuilds the model-facing
+agent history and injects the session objective plus the relevant summary. What
+"the relevant summary" means depends on the mode:
+
+- **Chat / Terminal.** The transcript and rebuilt agent history are enough;
+  project files are read live, not snapshotted.
+- **Browser.** The journal supplies the action and URL history; the persistent
+  Playwright profile supplies cookies/logins. Open tabs, DOM and scroll position
+  are not restored; the agent can navigate to the last URL from history.
+- **Vision.** A fresh CUA chain observes the current screen. It gets the session
+  objective and summary, not the old screenshots or desktop state.
+
+In all modes, in-flight shell jobs and a running agent turn are stopped, not
+resumed. Switching sessions intentionally cancels the current run.
+
+This is the same boundary browser/CUA and CLI products draw: they persist
+app-owned history and auth profiles, not a frozen page or desktop. Claude Code
+persists the conversation, not the filesystem; Cline restores the conversation
+and checks file states against checkpoints; opencode compacts old history into a
+summary and keeps the recent tail.
+
+### Explicitly not planned
+
+- **Tabs / parallel sessions in one window.** Useful for IDE agents that
+  orchestrate several coding agents, but Logos deliberately runs one session at a
+  time. The sidebar session list is the navigation surface.
+- **Watch-type sessions with diffing.** No mature analogue; a monitored feed is a
+  scheduling/automation feature, not a session type.
+- **Screen arbiter, session → display binding, virtual displays.** Only needed
+  when several Vision tasks run in parallel. With one active session there is
+  nothing to arbitrate; revisit only if parallel Vision becomes a real goal.
+- **Per-tab pause/serialize.** Pause/resume belongs to the one active agent.
+  Session switching intentionally stops work; there is no suspended handler to
+  restore.
+- **Full browser/desktop snapshot.** Cloud agents such as Devin and Manus can
+  snapshot a VM/sandbox; Logos runs on the user's real machine and persists only
+  app-owned state.
 
 ## Guiding scenario: "tell the computer, get the result"
 
@@ -162,11 +242,11 @@ until the execution core is ready. Voice will dock onto the same
 | 1 | `GroundingBackend` interface + unified Vision+shell toolset | Native CUA shipped; interface not formalized; Vision manifest not wired into the CUA loop. **Next foundation.** |
 | 2 | Browser mode on Playwright | **Shipped** (DOM refs, policy, approvals, budgets). User-entered secrets still pending. |
 | 3 | Native execution for Google, then Anthropic/OpenAI | **Shipped** for all three. |
-| 4 | Sessions + tabs: SQLite or JSONL store, autosave, summarization, per-tab handlers, pause/resume, display-aware arbiter | Sessions/journal/handoff/autosave **shipped on JSONL**. Tabs, per-tab pause/resume and screen arbiter **pending**. |
+| 4 | Long-lived sessions: JSONL store, autosave, summarization, restore, durable attachments, per-session objective/state | Sessions/journal/handoff/autosave/restore **shipped on JSONL**. Durable attachments and a per-session objective/summary for Browser/Vision remain; resume semantics are documented above. Tabs, parallel sessions and the screen arbiter were **dropped** (one mode per session). |
 | 5 | Thin client | **Effective:** ML stack removed; optional backends are no longer needed. Installer/packaging cleanup remains. |
 | 6 | MCP client + Blender cross-mode pilot | **Pending.** |
 | 7 | Replace the local triple pipeline with a single grounding model (UI-TARS / OmniParser V2) | **Obsolete in current form** — the local pipeline was deleted. Revisit only if a `local` backend is reintroduced. |
-| 8 | Virtual displays for parallel Vision tasks | **Pending**; requires the arbiter from step 4 to be display-aware. |
+| 8 | Parallel Vision sessions / virtual displays | **Dropped.** Only meaningful with several simultaneous Vision sessions; out of scope while one session runs at a time. |
 
 ## Backlog: known execution gaps (low priority, tracked — do not lose)
 
