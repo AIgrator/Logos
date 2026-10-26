@@ -9,10 +9,10 @@ from datetime import date, datetime, timedelta
 import qtawesome as qta
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QInputDialog, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem,
-                               QMessageBox, QMenu, QPushButton, QVBoxLayout,
-                               QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout,
+                               QInputDialog, QLabel, QLineEdit, QListWidget,
+                               QListWidgetItem, QMessageBox, QMenu, QPushButton,
+                               QVBoxLayout, QWidget)
 
 
 AVATAR_COLORS = [
@@ -160,7 +160,6 @@ class HomePage(_ProjectMenuMixin, QWidget):
 
     project_selected = Signal(str)
     session_selected = Signal(str)
-    new_project_requested = Signal()
     open_project_requested = Signal()
     new_session_requested = Signal()
     settings_requested = Signal()
@@ -221,13 +220,15 @@ class HomePage(_ProjectMenuMixin, QWidget):
         projects_header.addStretch(1)
         self.project_menu_button = QPushButton()
         self.project_menu_button.setIcon(qta.icon("fa5s.plus", color=colors["text"]))
-        self.project_menu_button.setToolTip("New project")
+        self.project_menu_button.setToolTip("Add project folder")
         self.project_menu_button.setFixedSize(30, 30)
-        self.project_menu_button.clicked.connect(self._show_project_menu)
+        self.project_menu_button.clicked.connect(self.open_project_requested.emit)
         projects_header.addWidget(self.project_menu_button)
         left_layout.addLayout(projects_header)
         self.project_list = QListWidget()
         self.project_list.setIconSize(QSize(26, 26))
+        self.project_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.project_list.setTextElideMode(Qt.ElideRight)
         self.project_list.itemClicked.connect(self._on_project_clicked)
         self.project_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.project_list.customContextMenuRequested.connect(
@@ -251,6 +252,8 @@ class HomePage(_ProjectMenuMixin, QWidget):
         right_layout.addLayout(sessions_header)
         self.session_list = QListWidget()
         self.session_list.setIconSize(QSize(24, 24))
+        self.session_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.session_list.setTextElideMode(Qt.ElideRight)
         self.session_list.itemClicked.connect(self._on_session_clicked)
         self.session_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.session_list.customContextMenuRequested.connect(
@@ -281,6 +284,21 @@ class HomePage(_ProjectMenuMixin, QWidget):
             }}
             QListWidget::item:hover {{ background: {colors['hover']}; }}
             QListWidget::item:selected {{ background: {colors['selected']}; color: {colors['text']}; }}
+            QScrollBar:vertical {{
+                background: transparent; width: 6px; margin: 2px 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {colors['border']}; min-height: 24px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {colors['muted']}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0; background: none; border: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+            QScrollBar:horizontal {{ height: 0; }}
             QPushButton {{
                 background: transparent; color: {colors['text']};
                 border: none; border-radius: 7px; padding: 6px 8px;
@@ -291,15 +309,6 @@ class HomePage(_ProjectMenuMixin, QWidget):
         self.settings_button.setIcon(qta.icon("fa5s.cog", color=colors["text"]))
         self.project_menu_button.setIcon(qta.icon("fa5s.plus", color=colors["text"]))
         self.new_session_button.setIcon(qta.icon("fa5s.pen", color=colors["text"]))
-
-    def _show_project_menu(self):
-        menu = QMenu(self)
-        new_action = menu.addAction("New Project...")
-        new_action.triggered.connect(self.new_project_requested.emit)
-        open_action = menu.addAction("Open Folder...")
-        open_action.triggered.connect(self.open_project_requested.emit)
-        menu.exec(self.project_menu_button.mapToGlobal(
-            self.project_menu_button.rect().bottomLeft()))
 
     def refresh(self):
         if self.project_manager is None:
@@ -413,11 +422,10 @@ class HomePage(_ProjectMenuMixin, QWidget):
 
 
 class ProjectSidebar(_ProjectMenuMixin, QWidget):
-    """Collapsible workspace sidebar: Home, projects, new chat, settings."""
+    """Collapsible workspace sidebar: Home, projects, new session, settings."""
 
     home_requested = Signal()
     project_selected = Signal(str)
-    new_project_requested = Signal()
     open_project_requested = Signal()
     new_session_requested = Signal()
     context_requested = Signal()
@@ -462,6 +470,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
         self.home_button = QPushButton("Home")
         self.home_button.setIcon(qta.icon("fa5s.home", color=colors["text"]))
+        self.home_button.setToolTip("Home")
         self.home_button.clicked.connect(self.home_requested.emit)
         root.addWidget(self.home_button)
 
@@ -472,34 +481,43 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
         self.project_list = QListWidget()
         self.project_list.setIconSize(QSize(24, 24))
+        self.project_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.project_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.project_list.setTextElideMode(Qt.ElideRight)
+        self.project_list.setWordWrap(False)
         self.project_list.itemClicked.connect(self._on_project_clicked)
         self.project_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.project_list.customContextMenuRequested.connect(
             self._show_project_item_menu)
         root.addWidget(self.project_list, 1)
 
-        self.add_button = QPushButton("New project")
+        self.add_button = QPushButton("Add project")
         self.add_button.setIcon(qta.icon("fa5s.plus", color=colors["text"]))
-        self.add_button.clicked.connect(self._show_add_menu)
+        self.add_button.setToolTip("Add project folder")
+        self.add_button.clicked.connect(self.open_project_requested.emit)
         root.addWidget(self.add_button)
 
-        self.new_chat_button = QPushButton("New chat")
-        self.new_chat_button.setIcon(qta.icon("fa5s.pen", color=colors["text"]))
-        self.new_chat_button.clicked.connect(self.new_session_requested.emit)
-        root.addWidget(self.new_chat_button)
+        self.new_session_button = QPushButton("New session")
+        self.new_session_button.setIcon(qta.icon("fa5s.pen", color=colors["text"]))
+        self.new_session_button.setToolTip("New session in the current project")
+        self.new_session_button.clicked.connect(self.new_session_requested.emit)
+        root.addWidget(self.new_session_button)
 
         self.context_button = QPushButton("Context")
         self.context_button.setIcon(qta.icon("fa5s.file-alt", color=colors["text"]))
+        self.context_button.setToolTip("Show project context summary")
         self.context_button.clicked.connect(self.context_requested.emit)
         root.addWidget(self.context_button)
 
         self.journal_button = QPushButton("Journal")
         self.journal_button.setIcon(qta.icon("fa5s.list", color=colors["text"]))
+        self.journal_button.setToolTip("Show the current session journal")
         self.journal_button.clicked.connect(self.journal_requested.emit)
         root.addWidget(self.journal_button)
 
         self.settings_button = QPushButton("Settings")
         self.settings_button.setIcon(qta.icon("fa5s.cog", color=colors["text"]))
+        self.settings_button.setToolTip("Settings")
         self.settings_button.clicked.connect(self.settings_requested.emit)
         root.addWidget(self.settings_button)
         self._apply_style()
@@ -519,6 +537,21 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
             }}
             QListWidget::item:hover {{ background: {colors['hover']}; }}
             QListWidget::item:selected {{ background: {colors['selected']}; color: {colors['text']}; }}
+            QScrollBar:vertical {{
+                background: transparent; width: 6px; margin: 2px 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {colors['border']}; min-height: 24px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {colors['muted']}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0; background: none; border: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+            QScrollBar:horizontal {{ height: 0; }}
             QPushButton {{
                 background: transparent; color: {colors['text']};
                 border: none; border-radius: 7px; padding: 7px 8px;
@@ -529,19 +562,11 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.collapse_button.setIcon(qta.icon("fa5s.bars", color=colors["muted"]))
         self.home_button.setIcon(qta.icon("fa5s.home", color=colors["text"]))
         self.add_button.setIcon(qta.icon("fa5s.plus", color=colors["text"]))
-        self.new_chat_button.setIcon(qta.icon("fa5s.pen", color=colors["text"]))
+        self.new_session_button.setIcon(qta.icon("fa5s.pen", color=colors["text"]))
         self.context_button.setIcon(qta.icon("fa5s.file-alt", color=colors["text"]))
         self.journal_button.setIcon(qta.icon("fa5s.list", color=colors["text"]))
         self.settings_button.setIcon(qta.icon("fa5s.cog", color=colors["text"]))
         self._render_projects()
-
-    def _show_add_menu(self):
-        menu = QMenu(self)
-        new_action = menu.addAction("New Project...")
-        new_action.triggered.connect(self.new_project_requested.emit)
-        open_action = menu.addAction("Open Folder...")
-        open_action.triggered.connect(self.open_project_requested.emit)
-        menu.exec(self.add_button.mapToGlobal(self.add_button.rect().topLeft()))
 
     def toggle_collapsed(self):
         self.set_collapsed(not self.collapsed)
@@ -551,17 +576,11 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.setFixedWidth(self.COLLAPSED_WIDTH if self.collapsed else self.EXPANDED_WIDTH)
         self.collapse_button.setToolTip("Expand sidebar" if self.collapsed else "Collapse sidebar")
         self.home_button.setText("" if self.collapsed else "Home")
-        self.add_button.setText("" if self.collapsed else "New project")
-        self.new_chat_button.setText("" if self.collapsed else "New chat")
+        self.add_button.setText("" if self.collapsed else "Add project")
+        self.new_session_button.setText("" if self.collapsed else "New session")
         self.context_button.setText("" if self.collapsed else "Context")
         self.journal_button.setText("" if self.collapsed else "Journal")
         self.settings_button.setText("" if self.collapsed else "Settings")
-        self.home_button.setToolTip("Home")
-        self.add_button.setToolTip("New project")
-        self.new_chat_button.setToolTip("New chat")
-        self.context_button.setToolTip("Show project context summary")
-        self.journal_button.setToolTip("Show the current session journal")
-        self.settings_button.setToolTip("Settings")
         self.section_label.setVisible(not self.collapsed)
         self._render_projects()
 
@@ -582,6 +601,8 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
             self.project_list.addItem(item)
             if path == active:
                 self.project_list.setCurrentItem(item)
+                self.project_list.scrollToItem(
+                    item, QAbstractItemView.EnsureVisible)
         if not self._projects:
             empty = QListWidgetItem("" if self.collapsed else "No projects yet")
             empty.setFlags(Qt.NoItemFlags)
@@ -593,6 +614,8 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
             item = self.project_list.item(row)
             if item.data(Qt.UserRole) == path:
                 self.project_list.setCurrentItem(item)
+                self.project_list.scrollToItem(
+                    item, QAbstractItemView.EnsureVisible)
                 return
 
     def _on_project_clicked(self, item):

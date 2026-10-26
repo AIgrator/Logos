@@ -20,7 +20,7 @@ from context.secrets import redact_value
 
 PROJECT_DIRNAME = ".logos"
 PROJECT_META_FILE = "project.json"
-MAX_RECENT_PROJECTS = 12
+MAX_RECENT_PROJECTS = 50
 SESSION_SCHEMA_VERSION = 1
 SESSION_EXT = ".jsonl"
 LEGACY_SESSION_EXT = ".json"

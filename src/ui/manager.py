@@ -269,7 +269,6 @@ class UIManager(QWidget):
     # Project switching (emitted by the sidebar / title bar button)
     project_switch_requested = Signal(str)
     project_open_requested = Signal()
-    project_create_requested = Signal()
     project_renamed = Signal(str, str)
     project_removed = Signal(str, bool)
     session_open_requested = Signal(str)
@@ -353,7 +352,6 @@ class UIManager(QWidget):
 
         self.home_page.project_selected.connect(self.project_switch_requested.emit)
         self.home_page.session_selected.connect(self.session_open_requested.emit)
-        self.home_page.new_project_requested.connect(self.project_create_requested.emit)
         self.home_page.open_project_requested.connect(self.project_open_requested.emit)
         self.home_page.new_session_requested.connect(self.new_session_requested.emit)
         self.home_page.settings_requested.connect(self.settings_button_clicked.emit)
@@ -363,7 +361,6 @@ class UIManager(QWidget):
         self.home_page.session_deleted.connect(self.session_deleted.emit)
         self.sidebar.home_requested.connect(self.home_requested.emit)
         self.sidebar.project_selected.connect(self.project_switch_requested.emit)
-        self.sidebar.new_project_requested.connect(self.project_create_requested.emit)
         self.sidebar.open_project_requested.connect(self.project_open_requested.emit)
         self.sidebar.new_session_requested.connect(self.new_session_requested.emit)
         self.sidebar.context_requested.connect(self.context_requested.emit)
@@ -1282,10 +1279,8 @@ class UIManager(QWidget):
                     action.triggered.connect(
                         lambda _checked=False, p=path: self.project_switch_requested.emit(p))
                 menu.addSeparator()
-        open_action = menu.addAction("Open Folder...")
+        open_action = menu.addAction("Open Project Folder...")
         open_action.triggered.connect(self.project_open_requested.emit)
-        create_action = menu.addAction("New Project...")
-        create_action.triggered.connect(self.project_create_requested.emit)
         anchor = self.custom_title_bar.project_button
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 

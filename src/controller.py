@@ -232,7 +232,6 @@ class AppController(QObject):
         self.ui.path_selected_for_attachment.connect(self._handle_path_mention_for_attachment)
         self.ui.project_switch_requested.connect(self.switch_project)
         self.ui.project_open_requested.connect(self._handle_open_project)
-        self.ui.project_create_requested.connect(self._handle_create_project)
         self.ui.session_open_requested.connect(self.open_session)
         self.ui.new_session_requested.connect(self.new_session)
         self.ui.project_renamed.connect(self.rename_project)
@@ -1438,28 +1437,14 @@ class AppController(QObject):
         self.ui.add_message("<i>Started a new session.</i>", force_scroll=True)
 
     def _handle_open_project(self):
+        start = os.path.expanduser("~")
+        active = self.project_manager.get_active_root() if self.project_manager else ""
+        if active:
+            start = os.path.dirname(active)
         path = QFileDialog.getExistingDirectory(
-            self.ui.main_window, "Open Project Folder", os.path.expanduser("~"))
+            self.ui.main_window, "Open Project Folder", start)
         if path:
             self.switch_project(path)
-
-    def _handle_create_project(self):
-        parent = QFileDialog.getExistingDirectory(
-            self.ui.main_window, "Choose Where to Create the Project", os.path.expanduser("~"))
-        if not parent:
-            return
-        from PySide6.QtWidgets import QInputDialog
-        name, ok = QInputDialog.getText(self.ui.main_window, "New Project", "Project folder name:")
-        name = (name or "").strip()
-        if not ok or not name:
-            return
-        target = os.path.join(parent, name)
-        try:
-            os.makedirs(target, exist_ok=True)
-        except Exception as e:
-            self._report_project_error(f"Could not create project: {e}")
-            return
-        self.switch_project(target)
 
     def _start_vision_initialization(self):
         """Marks Vision ready immediately (agent-loop rebuild).
