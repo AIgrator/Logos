@@ -459,6 +459,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
         top = QHBoxLayout()
         top.setSpacing(2)
+        top.addStretch(0)
         self.collapse_button = QPushButton()
         self.collapse_button.setIcon(qta.icon("fa5s.bars", color=colors["muted"]))
         self.collapse_button.setToolTip("Collapse sidebar")
@@ -466,6 +467,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.collapse_button.clicked.connect(self.toggle_collapsed)
         top.addWidget(self.collapse_button)
         top.addStretch(1)
+        self._top_layout = top
         root.addLayout(top)
 
         self.home_button = QPushButton("Home")
@@ -524,6 +526,9 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
     def _apply_style(self):
         colors = _theme_colors(self.theme_manager)
+        # Collapsed mode has no labels: centre the icons in the narrow rail.
+        button_align = "center" if self.collapsed else "left"
+        button_padding = "7px 0" if self.collapsed else "7px 8px"
         self.setStyleSheet(f"""
             QWidget#ProjectSidebar {{
                 background: {colors['panel']};
@@ -554,8 +559,8 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
             QScrollBar:horizontal {{ height: 0; }}
             QPushButton {{
                 background: transparent; color: {colors['text']};
-                border: none; border-radius: 7px; padding: 7px 8px;
-                text-align: left;
+                border: none; border-radius: 7px; padding: {button_padding};
+                text-align: {button_align};
             }}
             QPushButton:hover {{ background: {colors['hover']}; }}
         """)
@@ -582,7 +587,8 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.journal_button.setText("" if self.collapsed else "Journal")
         self.settings_button.setText("" if self.collapsed else "Settings")
         self.section_label.setVisible(not self.collapsed)
-        self._render_projects()
+        self._top_layout.setStretch(0, 1 if self.collapsed else 0)
+        self._apply_style()
 
     def refresh(self):
         self._projects = self.project_manager.recent_projects() if self.project_manager else []
