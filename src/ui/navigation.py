@@ -509,7 +509,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
         self.context_button = QPushButton("Context")
         self.context_button.setIcon(qta.icon("fa5s.file-alt", color=colors["text"]))
-        self.context_button.setToolTip("Show project context summary")
+        self.context_button.setToolTip("Show session context summary")
         self.context_button.clicked.connect(self.context_requested.emit)
         root.addWidget(self.context_button)
 

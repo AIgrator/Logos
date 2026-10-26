@@ -24,6 +24,8 @@ MAX_RECENT_PROJECTS = 50
 SESSION_SCHEMA_VERSION = 1
 SESSION_EXT = ".jsonl"
 LEGACY_SESSION_EXT = ".json"
+SESSION_SUMMARY_EXT = ".summary.md"
+SESSION_META_EXT = ".summary.json"
 MAX_EVENT_CHARS = 1_000_000
 
 
@@ -89,6 +91,15 @@ def event_text(event: dict) -> str:
         return text
     message = event.get("message")
     return message if isinstance(message, str) else ""
+
+
+def _is_session_filename(name: str) -> bool:
+    """Journal file names only; summary sidecars must not appear as sessions."""
+    return (
+        name.startswith("session-")
+        and name.endswith((SESSION_EXT, LEGACY_SESSION_EXT))
+        and not name.endswith((SESSION_SUMMARY_EXT, SESSION_META_EXT))
+    )
 
 
 def _session_title(messages: list) -> str:
@@ -500,7 +511,7 @@ class ProjectManager:
         return ""
 
     def delete_session(self, path: str) -> bool:
-        """Deletes one session file and its copied attachments."""
+        """Deletes one session file, its copied attachments and summary sidecars."""
         if not path or not os.path.isfile(path):
             return False
         if not path.endswith((SESSION_EXT, LEGACY_SESSION_EXT)):
@@ -513,6 +524,14 @@ class ProjectManager:
             return False
         if attachment_dir and os.path.isdir(attachment_dir):
             shutil.rmtree(attachment_dir, ignore_errors=True)
+        base = os.path.splitext(path)[0]
+        for suffix in (SESSION_SUMMARY_EXT, SESSION_META_EXT):
+            try:
+                os.remove(base + suffix)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logging.warning(f"Could not delete session summary {base + suffix}: {exc}")
         logging.info(f"Deleted session: {path}")
         return True
 
@@ -522,8 +541,7 @@ class ProjectManager:
             files = [
                 os.path.join(sessions, name)
                 for name in os.listdir(sessions)
-                if name.startswith("session-")
-                and name.endswith((SESSION_EXT, LEGACY_SESSION_EXT))
+                if _is_session_filename(name)
             ]
         except OSError:
             return ""
@@ -543,8 +561,7 @@ class ProjectManager:
         except OSError:
             return []
         for name in names:
-            if (not name.startswith("session-")
-                    or not name.endswith((SESSION_EXT, LEGACY_SESSION_EXT))):
+            if not _is_session_filename(name):
                 continue
             path = os.path.join(sessions, name)
             try:

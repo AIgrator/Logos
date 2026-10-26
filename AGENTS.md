@@ -51,17 +51,30 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   are redacted before events are written. The newest is
   restored at startup: messages are replayed into the
   chat, and terminal/browser `command_history` plus tool cards are rebuilt from
-  the same events. Agent `finish` / `communicate_to_user` / `display_message`
+  the same events. After a manual compaction only events after the recorded
+  boundary are rebuilt; the summary block stands in for the compacted prefix. Agent `finish` / `communicate_to_user` / `display_message`
   text is persisted as an assistant `message`. `objective` is auto-derived from
   the first request; Browser/Vision resumes get a deterministic session summary
   derived from this journal.
-- `context/summary.md` - rolling project handoff summary with fixed sections
-  (`Objective`, `Done`, `Current`, `Next`, `Files`, `Blockers`),
-  `context/summary.json` - its source session/event count/model metadata.
-  The deterministic fallback is always available; the LLM refresh runs in the
-  worker thread and is injected as chat system context, the first
-  terminal/browser history entry, or the first task of a fresh Vision/CUA chain
-  when continuing in a different session/mode.
+- `sessions/<name>.summary.md` and `<name>.summary.json` - rolling summary of
+  one session with fixed sections (`Objective`, `Done`, `Decisions`,
+  `Constraints`, `Checks`, `Current`, `Next`, `Unfinished`, `Files`,
+  `Blockers`) and provenance (source session, event count, model,
+  optional `handoff_from` / `handoff_consumed` and the compaction boundary
+  `compacted_through` / `compacted_event_count` / `compacted_at`). Summaries
+  never cross session
+  boundaries: switching
+  mode copies the previous summary once into the new session. The deterministic
+  fallback is always available; the LLM refresh runs in the worker thread and
+  is injected as chat system context, terminal/browser history, or the first
+  task of a fresh Vision/CUA chain when continuing from another session/mode.
+  Deleting a session removes its summary sidecars. Sidecars are not listed as
+  sessions. The legacy project-level `.logos/context/summary.md` is no longer
+  read.
+- `<project>/AGENTS.md` - optional stable project instructions read from the
+  project root only. Capped at 32 KB, redacted and cached by mtime; injected as
+  a separate block in every mode before the session handoff. The application
+  never generates or rewrites it.
 - `attachments/<session-id>/` - copies of pasted images (and other bytes with no
   stable source path), deduplicated by SHA-256. Files with a real path are
   referenced in the journal instead of copied; replay marks referenced files

@@ -897,16 +897,16 @@ class SettingsWindow(QDialog):
 
         self.handoff_enabled_checkbox = QCheckBox()
         handoff_tooltip = (
-            "Keep a rolling project handoff summary in .logos/context/summary.md "
-            "so a new mode, model or application run can continue with compact "
-            "context instead of the full journal."
+            "Keep a rolling summary next to each session journal so a new mode, "
+            "model or application run can continue with compact context instead "
+            "of the full journal. Summaries never mix between sessions."
         )
         context_layout.addWidget(QLabel("Rolling handoff summary:"), 4, 0)
         context_layout.addWidget(self._create_help_label(handoff_tooltip), 4, 1, Qt.AlignLeft)
         context_layout.addWidget(self.handoff_enabled_checkbox, 4, 3)
 
         self.handoff_mode_switch_checkbox = QCheckBox()
-        mode_tooltip = "Refresh and inject the summary when switching chat/terminal/browser mode."
+        mode_tooltip = "Seed the new session's summary when switching chat/terminal/browser mode."
         context_layout.addWidget(QLabel("On mode switch:"), 5, 0)
         context_layout.addWidget(self._create_help_label(mode_tooltip), 5, 1, Qt.AlignLeft)
         context_layout.addWidget(self.handoff_mode_switch_checkbox, 5, 3)

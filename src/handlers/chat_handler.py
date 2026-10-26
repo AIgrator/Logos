@@ -36,12 +36,13 @@ class ChatHandler:
 
         self._chat_seq += 1
         self._check_context_usage()
-        handoff_prompt = self.controller.handoff_prompt()
+        context_prompt = self.controller.chat_context_prompt()
+        self.controller.consume_handoff_seed()
         self.controller._send_llm_request(
             user_text,
             attachments,
-            handoff_prompt or None,
-            self.conversation_history,
+            context_prompt or None,
+            self.controller.chat_model_history(),
             None,  # No schema for chat mode
             "chat",
             self._chat_seq
@@ -50,6 +51,25 @@ class ChatHandler:
     def handle_response_chunk(self, chunk: str):
         """Handles a chunk of a streaming response."""
         self.ui.append_to_stream(chunk)
+
+    def context_payload(self) -> dict:
+        """Text components of the next Chat request, for diagnostics."""
+        history = self.controller.chat_model_history()
+        history_text = "\n".join(
+            f"{message.get('role', 'user')}: {message.get('content', '')}"
+            for message in history if isinstance(message, dict))
+        try:
+            system_text = self.controller.chat_context_prompt()
+        except Exception:
+            system_text = ""
+        count_images = getattr(self.controller, "_get_image_attachment_count", None)
+        return {
+            "system_text": system_text or "",
+            "history_text": history_text,
+            "user_text": "",
+            "tool_schema_text": "",
+            "image_count": count_images() if callable(count_images) else 0,
+        }
 
     def _check_context_usage(self):
         """Logs how full the model's context window is.
@@ -64,7 +84,9 @@ class ChatHandler:
             model = (providers.get(pid) or {}).get("model") or ""
             if not pid or not model:
                 return
-            text = "\n".join(str(m.get("content", "")) for m in self.conversation_history)
+            text = "\n".join(
+                str(m.get("content", ""))
+                for m in self.controller.chat_model_history())
             usage = context_usage(pid, model, text)
             pct = usage["ratio"] * 100
             log = logging.warning if usage["ratio"] >= NEAR_LIMIT_RATIO else logging.info

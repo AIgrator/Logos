@@ -205,7 +205,7 @@ class SettingsManager(QObject):
             "history_max_result_chars": 0,
             "history_dedup_snapshots": False,
             "history_trim_tracebacks": False,
-            # Rolling project handoff summary (context/handoff.py).
+            # Rolling session handoff summary (context/handoff.py).
             "handoff_enabled": True,
             "handoff_on_model_switch": True,
             "handoff_on_mode_switch": True,

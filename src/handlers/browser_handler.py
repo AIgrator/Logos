@@ -388,13 +388,21 @@ class BrowserHandler(BaseAgentHandler):
         system_prompt, user_prompt = self.brain.get_browser_prompts(
             user_request=self.original_user_request,
             os_info=self.os_info,
-            history=self.command_history,
+            history=self.model_history(),
             current_url=self.current_url(),
         )
         return system_prompt, user_prompt
 
     def _request_attachments(self) -> list:
         return self._consume_pending_screenshot()
+
+    def _payload_image_count(self) -> int:
+        try:
+            mgr = getattr(self.computer, "browser_manager", None)
+            peek = getattr(mgr, "peek_screenshot_path", None)
+            return 1 if callable(peek) and peek() else 0
+        except Exception:
+            return 0
 
     def _consume_pending_screenshot(self) -> list:
         """Attaches the latest browser_screenshot to the request (persistent:

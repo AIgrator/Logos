@@ -11,6 +11,7 @@ prices inconsistently, so Logos never invents a cost.
 from __future__ import annotations
 
 from context import handoff
+from context.model_context import payload_token_estimate
 from context.tokens import ModelMetadata, estimate_tokens
 
 
@@ -48,6 +49,7 @@ def _aggregate_usage(events: list) -> dict:
     totals = {"input": 0, "output": 0, "reasoning": 0,
               "cache_read": 0, "cache_write": 0}
     latest_tokens = 0
+    latest_input_tokens = 0
     session_total = 0
     for event in events:
         tokens = {key: _to_int(event.get(key)) for key in totals}
@@ -58,8 +60,16 @@ def _aggregate_usage(events: list) -> dict:
         purpose = str(event.get("purpose") or "completion")
         if purpose == "completion" and event_total:
             latest_tokens = event_total
+            # Anthropic reports cache tokens outside input_tokens; for other
+            # providers the cached part is already inside the prompt count.
+            latest_input_tokens = _to_int(event.get("input"))
+            if "anthropic" in str(event.get("provider") or "").lower():
+                latest_input_tokens += (
+                    _to_int(event.get("cache_read"))
+                    + _to_int(event.get("cache_write")))
     totals["total"] = session_total
     totals["latest_tokens"] = latest_tokens
+    totals["latest_input_tokens"] = latest_input_tokens
     return totals
 
 
@@ -70,9 +80,18 @@ def build_session_stats(
     *,
     summary_text: str = "",
     threshold_ratio: float = handoff.DEFAULT_THRESHOLD_RATIO,
+    payload: dict | None = None,
 ) -> dict:
-    """Build an estimated context/session snapshot for display."""
+    """Build an estimated context/session snapshot for display.
+
+    ``payload`` describes what the next request actually carries (system,
+    history, user text, tool schema, images). When the provider reported no
+    usage, the payload estimate is a better fill figure than the journal text.
+    """
     events = events or []
+    payload = payload if isinstance(payload, dict) else {}
+    payload_components = payload_token_estimate(payload)
+    payload_tokens = sum(payload_components.values())
     counts = {
         "events": len(events),
         "usage_events": 0,
@@ -128,8 +147,18 @@ def build_session_stats(
     estimated_used = estimate_tokens("\n".join(lines))
     actual = _aggregate_usage(usage_events)
     latest_tokens = actual["latest_tokens"]
-    context_tokens = latest_tokens or estimated_used
-    context_source = "actual" if latest_tokens else "estimated"
+    if latest_tokens:
+        context_tokens = latest_tokens
+        context_source = "actual"
+        estimate_basis = "actual"
+    elif payload_tokens:
+        context_tokens = payload_tokens
+        context_source = "payload"
+        estimate_basis = "model_payload"
+    else:
+        context_tokens = estimated_used
+        context_source = "estimated"
+        estimate_basis = "journal"
     window = ModelMetadata.context_window(provider_id, model_id)
     ratio = (context_tokens / window) if window else 0.0
     threshold = float(threshold_ratio or handoff.DEFAULT_THRESHOLD_RATIO)
@@ -146,6 +175,7 @@ def build_session_stats(
         "context_tokens": context_tokens,
         "context_source": context_source,
         "latest_usage_tokens": latest_tokens,
+        "latest_input_tokens": actual["latest_input_tokens"],
         "actual_input": actual["input"],
         "actual_output": actual["output"],
         "actual_reasoning": actual["reasoning"],
@@ -160,6 +190,14 @@ def build_session_stats(
         "estimated_output": (groups["assistant"] + groups["reasoning"]
                              + groups["tool_call"]),
         "summary_tokens": estimate_tokens(summary_text),
+        "payload_tokens": payload_tokens,
+        "payload_components": payload_components,
+        "payload_delta": (actual["latest_input_tokens"] - payload_tokens
+                          if actual["latest_input_tokens"] and payload_tokens
+                          else None),
+        "payload_compact": (payload.get("compact")
+                            if isinstance(payload.get("compact"), dict) else {}),
+        "estimate_basis": estimate_basis,
         "ratio": ratio,
         "percent": ratio * 100.0,
         "threshold_ratio": threshold,

@@ -24,6 +24,7 @@ import os
 import re
 import uuid
 
+from context import model_context
 from project_manager import event_text
 from states import VisionState
 
@@ -571,6 +572,77 @@ class BaseAgentHandler:
     def _running_jobs_note(self) -> str:
         """History line about background jobs outliving their task. Default: none."""
         return ""
+
+    def _model_history_and_stats(self, history=None):
+        """Model-facing history plus compaction stats for diagnostics."""
+        source = list(self.command_history if history is None else history)
+        context_cfg = self.settings.get("context") if isinstance(
+            self.settings, dict) else {}
+        before, tail = model_context.split_compacted_history(source)
+        replacement = ""
+        if model_context.has_compaction_marker(source):
+            build_block = getattr(self.controller, "compaction_block", None)
+            if callable(build_block):
+                replacement = build_block(self.MODE_NAME) or ""
+            if replacement:
+                protected = [
+                    entry for entry in before
+                    if model_context.is_protected_entry(entry)
+                ]
+                entries = protected + [replacement] + tail
+            else:
+                # No summary to stand in for the old part: keep it, but never
+                # show the bare marker line to the model.
+                entries = before + tail
+        else:
+            entries = tail
+        compacted, stats = model_context.microcompact_agent_history(
+            entries, context_cfg, mode=self.MODE_NAME)
+        stats["compacted_entries"] = max(0, len(source) - len(entries))
+        stats["compaction_active"] = bool(replacement)
+        return compacted, stats
+
+    def model_history(self, history=None) -> list:
+        """History trimmed for the provider; ``command_history`` stays intact."""
+        compacted, stats = self._model_history_and_stats(history)
+        if stats.get("compacted_entries"):
+            logging.info(
+                "Model history for %s: summary replaced %d of %d entries "
+                "(%d -> %d chars).",
+                self.MODE_NAME, stats["compacted_entries"],
+                stats["compacted_entries"] + stats["entries"],
+                stats["chars_before"], stats["chars_after"])
+        elif stats.get("saved"):
+            logging.info(
+                "Model history for %s: %d -> %d chars (-%d; "
+                "%d old tool result(s) pruned).",
+                self.MODE_NAME, stats["chars_before"], stats["chars_after"],
+                stats["saved"], stats["pruned_results"])
+        return compacted
+
+    def _payload_image_count(self) -> int:
+        """Images attached to the next request. Default: none."""
+        return 0
+
+    def context_payload(self) -> dict:
+        """Text components of the next planning request, for diagnostics.
+
+        Terminal and Browser embed the history in the user prompt. Vision's
+        CUA request is assembled elsewhere, so it reports no payload.
+        """
+        if self.MODE_NAME not in ("terminal", "browser"):
+            return {}
+        system_prompt, user_prompt = self.build_prompts()
+        _, stats = self._model_history_and_stats()
+        return {
+            "system_text": system_prompt or "",
+            "history_text": "",
+            "user_text": user_prompt or "",
+            "tool_schema_text": model_context.tool_schema_text(
+                self.MODE_NAME, self.SCHEMA_NAME),
+            "image_count": self._payload_image_count(),
+            "compact": stats,
+        }
 
     def _model_prefix(self, suffix: str = ": ") -> str:
         model_name = html.escape(str(self.controller._get_current_model_name()))

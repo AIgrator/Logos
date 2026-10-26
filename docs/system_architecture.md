@@ -127,7 +127,7 @@ Every reasoning line, tool call and tool result is appended to the active sessio
 
 - Text-file attachments are inlined once into the current request (Chat has no filesystem tools); later turns see only the attachment reference lines.
 - Images are passed as provider image payloads; non-image bytes are never sent as "images".
-- The project handoff summary is injected as the system prompt when it comes from another session or mode.
+- Root `AGENTS.md` instructions and a one-time handoff seed from the previous session are injected as system context.
 - Messages typed while a reply streams are queued and answered in order; a new message during generation cancels the previous request first.
 - Chat uses provider-side web search where the provider supports it. The app does not run a client-side Chat tool loop: streamed tool-call deltas are parsed and logged, but nothing executes them. Local `ddgs`/`trafilatura` search belongs to Terminal mode (see [hybrid_web_search_guide.md](./hybrid_web_search_guide.md)).
 - The Context dialog shows token usage and the context-window fill.
@@ -260,24 +260,26 @@ A project is a folder on disk. All app-owned data lives in `<project>/.logos/`:
 
 - `project.json` — id, display name, timestamps. Renaming a project changes the display name only.
 - `sessions/` — one append-only JSONL per session. The first line is a `session` header (`schema_version`, `id`, `mode`, optional `title`, optional `objective`); later lines are events (`message`, `reasoning`, `tool_call`, `tool_result`, `job_result`, `usage`, `error`). User `message` events may carry attachment metadata. Credentials are redacted before writing; oversized events are capped.
-- `context/summary.md`, `summary.json` — rolling handoff summary and its provenance.
+- `sessions/<name>.summary.md`, `<name>.summary.json` — rolling summary of that session and its provenance. A mode switch copies the previous summary once into the new session (`source=handoff`, `handoff_from`, then `handoff_consumed` after the first request); summaries never mix between sessions.
 - `attachments/<session-id>/` — copies of pasted images and other bytes with no stable source path, deduplicated by SHA-256. Files that already exist on disk are referenced from the journal instead of copied.
+
+The optional `<project>/AGENTS.md` in the project root supplies stable project instructions. It is read by `src/context/project_rules.py`, capped at 32 KB, redacted, cached by mtime and injected as a separate block before the handoff. The legacy `.logos/context/summary.md` is no longer read.
 
 Sessions are mode-locked (`chat`, `terminal`, `browser`, `vision`). The header carries an optional `title` and an auto-derived `objective`. Legacy `session-*.json` files are migrated to JSONL on load and preserved as `.json.bak`.
 
-Replay restores messages, reasoning, tool cards, attachment cards (with `changed`/`missing` status) and model-facing agent history. It does not restore a live machine: open browser tabs, running shell jobs and automatic screenshots are not replayed; Browser keeps cookies/logins through the persistent Playwright profile, and a resumed Vision session starts a fresh CUA chain. Browser and Vision resumes also receive a deterministic summary derived from the current session's journal; Chat/Terminal use the replayed transcript instead.
+Replay restores messages, reasoning, tool cards, attachment cards (with `changed`/`missing` status) and model-facing agent history. If the session was compacted, only events after the persisted boundary are rebuilt and the summary block stands in for the compacted prefix. It does not restore a live machine: open browser tabs, running shell jobs and automatic screenshots are not replayed; Browser keeps cookies/logins through the persistent Playwright profile, and a resumed Vision session starts a fresh CUA chain. Browser and Vision resumes also receive a deterministic summary derived from the current session's journal; Chat/Terminal use the replayed transcript instead.
 
 The project root, not the install directory, is the working directory for Terminal/Browser and the root for `Indexer`. `.logos` is ignored by the indexer. Startup resolves the remembered project; the HomePage and sidebar are the navigation surfaces for projects and sessions.
 
 ### Rolling handoff summary
 
-`src/context/handoff.py` keeps a fixed-shape summary (`Objective`, `Done`, `Current`, `Next`, `Files`, `Blockers`) for the project. A deterministic extractive fallback is written immediately; when the context threshold is crossed (`context.summary_threshold_ratio`, default 0.6) an LLM refresh runs in the worker thread. Before summarizing, old tool outputs are pruned to head/tail excerpts while the recent tail stays verbatim. The summary is injected when continuing in a different session or mode, and on a fresh Vision chain. It is project-level, not session-level: a long-lived Browser/Vision session can therefore see context from other sessions in the same project. The session's own state is derived separately from its journal by `session_summary()` and injected first on Browser/Vision resume. Moving the summary to session scope is the main remaining item in [context_handoff_plan.md](./context_handoff_plan.md).
+`src/context/handoff.py` keeps one fixed-shape summary (`Objective`, `Done`, `Decisions`, `Constraints`, `Checks`, `Current`, `Next`, `Unfinished`, `Files`, `Blockers`) per session, next to its journal. A deterministic extractive fallback is written immediately; it carries decisions, constraints and unfinished work forward and recognizes verification commands (`pytest`, `ruff`, `compileall`, build/test commands) in the journal together with their status. When the context threshold is crossed (`context.summary_threshold_ratio`, default 0.6) an LLM refresh runs in the worker thread. Before summarizing, old tool outputs are pruned to head/tail excerpts while the recent tail stays verbatim. The summary is injected only when continuing from another session: on a mode switch the previous summary is copied once into the new session with `source=handoff` and `handoff_from`, marked `handoff_consumed` after the first request; an explicit "New session" starts empty. A resumed Browser/Vision session additionally gets `session_summary()` derived from its own journal. Project rules from root `AGENTS.md` are a separate stable block (see `src/context/project_rules.py`) injected before the handoff in Chat, Terminal, Browser and Vision.
 
 ### Context accounting
 
-`src/context/context_stats.py` and `src/context/tokens.py` combine provider-reported `usage` events (input/output/reasoning/cache/total) with a character-based estimate when usage is absent. The Context dialog shows actual or estimated fill, the model window, the threshold, session totals and the usage breakdown. No prices are stored or shown. At 80% fill a non-blocking warning is shown once per session. "Compact now" forces a summary refresh; failed LLM compactions back off (15–300 s) instead of looping.
+`src/context/context_stats.py` and `src/context/tokens.py` combine provider-reported `usage` events (input/output/reasoning/cache/total) with a character-based estimate when usage is absent. The Context dialog shows actual or estimated fill, the model window, the threshold, session totals and the usage breakdown. No prices are stored or shown. At 80% fill a non-blocking warning is shown once per session. "Compact now" refreshes the summary and advances the persisted compaction boundary, so later requests send the summary block plus the tail; it waits for an in-flight reply, tool call or background job to finish. Failed LLM compactions back off (15–300 s) instead of looping.
 
-See [context_window_plan.md](./context_window_plan.md) for the UI/statistics details and [context_handoff_plan.md](./context_handoff_plan.md) for the current context scheme and remaining work.
+See [context_management.md](./context_management.md) for the memory layers, usage statistics, compaction rules, handoff behavior and the remaining live-usage check.
 
 ---
 
@@ -373,6 +375,5 @@ def on_settings_changed(self, new_settings: dict):
 - [prompt_guidelines.md](./prompt_guidelines.md) — active prompt files, placeholders and rules.
 - [hybrid_web_search_guide.md](./hybrid_web_search_guide.md) — provider-native search and local fallback.
 - [file_search_guide.md](./file_search_guide.md) — `@` fuzzy search behavior and limits.
-- [context_window_plan.md](./context_window_plan.md) — usage statistics, thresholds, compaction UI.
-- [context_handoff_plan.md](./context_handoff_plan.md) — three memory layers, current handoff behavior, remaining work (session-scoped summary, AGENTS.md baseline).
+- [context_management.md](./context_management.md) — memory layers, session summaries, usage accounting, compaction and `AGENTS.md` baseline.
 - [future_vision.md](./future_vision.md) — planned evolution (grounding backends, long-lived sessions, MCP, thin client).

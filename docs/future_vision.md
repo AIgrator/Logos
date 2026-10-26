@@ -137,28 +137,33 @@ roadmap. Switching sessions is explicit: Logos restores completed history from
 the journal and stops in-flight work instead of pretending to suspend it.
 
 **Current state:** project-scoped sessions, JSONL journals, autosave,
-restore/replay, rename/delete, mode locking, the auto-derived session objective
-and the project-level rolling handoff summary are implemented. Browser/Vision
-resumes also get a deterministic summary derived from the current session's
-journal. Attachments follow the policy below: files are referenced by path,
-pasted images are copied into `.logos/attachments/<session-id>/` and deduplicated
-by SHA-256.
+restore/replay, rename/delete, mode locking, the auto-derived session objective,
+the session-scoped rolling summary and the `AGENTS.md` project baseline are
+implemented. Browser/Vision resumes also get a deterministic summary derived
+from the current session's journal. Attachments follow the policy below: files
+are referenced by path, pasted images are copied into
+`.logos/attachments/<session-id>/` and deduplicated by SHA-256.
 
 ### Session contents
 
 - **Title.** Derived from the first request and renameable. It is a short label,
   not a mandatory goal form.
 - **Objective.** An auto-derived one-line goal stored in the session header. It
-  starts as the first request. Browser and Vision need it because the project
-  summary may describe other sessions and the live page/desktop is gone.
+  starts as the first request. Browser and Vision need it because the live
+  page/desktop is gone.
 - **Journal.** Append-only typed events: messages, reasoning, tool calls and
   results, job results, usage, errors. It is the source of truth for replay and
   for rebuilding the model-facing agent history.
-- **Session summary.** A compact state block derived from this session's journal
-  (the same Objective/Done/Current/Next/Files/Blockers shape). It is what a
-  Browser or Vision resume uses when the live chain cannot be replayed.
-- **Project handoff summary.** The existing project-level `context/summary.md`
-  remains the cross-session/cross-mode handoff, not the session's own state.
+- **Session summary.** A rolling summary with fixed sections (Objective, Done,
+  Decisions, Constraints, Checks, Current, Next, Unfinished, Files, Blockers)
+  stored next to the journal. It is scoped to one session; a Browser or Vision
+  resume also gets a deterministic state block derived from that session's
+  journal.
+- **Mode-switch handoff.** Switching mode copies the previous session's summary
+  once into the new session (`source=handoff`, `handoff_from`). Explicit "New
+  session" starts empty. Nothing is shared through a project-wide summary file.
+- **Project baseline.** Root `AGENTS.md` is read as stable rules, never
+  generated, and injected separately in every mode.
 - **Attachments.** Handled by the policy below.
 
 ### Attachments policy

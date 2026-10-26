@@ -1,9 +1,10 @@
-"""Rolling handoff summary for one project.
+"""Rolling handoff summary for one session.
 
-The journal (``sessions/*.jsonl``) is the source of truth. This module keeps a
-small, fixed-shape Markdown summary next to it (``context/summary.md``) so a
-new mode, model or application run can be seeded with what happened without
-replaying every tool result into the prompt.
+The journal (``sessions/*.jsonl``) is the source of truth. Each session keeps a
+small, fixed-shape Markdown summary next to its journal
+(``sessions/<name>.summary.md``) so resuming or switching modes does not replay
+every tool result into the prompt. Summaries never cross session boundaries;
+a mode switch explicitly seeds the new session once from the previous one.
 
 The summary is intentionally lossy. It is regenerated from the journal whenever
 the context threshold is crossed; a deterministic fallback is written first so
@@ -19,13 +20,33 @@ from datetime import datetime
 
 from context.secrets import redact_text
 from context.tokens import context_usage
-from project_manager import event_text
+from project_manager import (
+    SESSION_META_EXT,
+    SESSION_SUMMARY_EXT,
+    event_text,
+)
 
 logger = logging.getLogger(__name__)
 
-SUMMARY_FILENAME = "summary.md"
-META_FILENAME = "summary.json"
-SUMMARY_SECTIONS = ("Objective", "Done", "Current", "Next", "Files", "Blockers")
+SUMMARY_SUFFIX = SESSION_SUMMARY_EXT
+META_SUFFIX = SESSION_META_EXT
+SUMMARY_SCHEMA_VERSION = 2
+SUMMARY_SECTIONS = (
+    "Objective",
+    "Done",
+    "Decisions",
+    "Constraints",
+    "Checks",
+    "Current",
+    "Next",
+    "Unfinished",
+    "Files",
+    "Blockers",
+)
+_LIST_SECTIONS = frozenset({
+    "Done", "Decisions", "Constraints", "Checks",
+    "Next", "Unfinished", "Files", "Blockers",
+})
 DEFAULT_MAX_TOKENS = 1200
 DEFAULT_THRESHOLD_RATIO = 0.6
 MIN_EVENTS_FOR_SUMMARY = 4
@@ -42,14 +63,34 @@ _PATH_RE = re.compile(
     r"(?<![\w.-])((?:[A-Za-z]:[\\/]|\.{1,2}[\\/]|[\w.-]+[\\/])?"
     r"[\w.-]+\.[A-Za-z0-9]{1,8})(?![\w.-])"
 )
+_SECTION_RE = re.compile(
+    r"^\s*##\s+(" + "|".join(SUMMARY_SECTIONS) + r")\s*$",
+    re.IGNORECASE,
+)
+_CHECK_COMMAND_RE = re.compile(
+    r"(?i)\b(?:"
+    r"pytest|ruff|flake8|pylint|mypy|compileall|"
+    r"npm\s+(?:run\s+)?(?:test|build|lint|typecheck)|"
+    r"yarn\s+(?:test|build|lint|typecheck)|"
+    r"pnpm\s+(?:test|build|lint|typecheck)|"
+    r"cargo\s+(?:test|build|check|clippy)|"
+    r"go\s+(?:test|build|vet)|"
+    r"mvn\s+(?:test|verify)|gradle(?:w)?\s+(?:test|check)|"
+    r"dotnet\s+(?:test|build)|make\s+(?:test|check)|tox|tsc"
+    r")\b"
+)
 
 
-def summary_path(context_dir: str) -> str:
-    return os.path.join(context_dir, SUMMARY_FILENAME)
+def _default_body(name: str) -> str:
+    return "- None." if name in _LIST_SECTIONS else "(not set)"
 
 
-def meta_path(context_dir: str) -> str:
-    return os.path.join(context_dir, META_FILENAME)
+def summary_path(session_file: str) -> str:
+    return os.path.splitext(session_file)[0] + SUMMARY_SUFFIX
+
+
+def meta_path(session_file: str) -> str:
+    return os.path.splitext(session_file)[0] + META_SUFFIX
 
 
 def _atomic_write(path: str, text: str) -> None:
@@ -65,21 +106,21 @@ def redact(text: str) -> str:
     return redact_text(text)
 
 
-def read_summary(context_dir: str) -> str:
-    if not context_dir:
+def read_summary(session_file: str) -> str:
+    if not session_file:
         return ""
     try:
-        with open(summary_path(context_dir), encoding="utf-8") as fh:
+        with open(summary_path(session_file), encoding="utf-8") as fh:
             return fh.read().strip()
     except (OSError, UnicodeError):
         return ""
 
 
-def read_meta(context_dir: str) -> dict:
-    if not context_dir:
+def read_meta(session_file: str) -> dict:
+    if not session_file:
         return {}
     try:
-        with open(meta_path(context_dir), encoding="utf-8") as fh:
+        with open(meta_path(session_file), encoding="utf-8") as fh:
             data = json.load(fh)
         return data if isinstance(data, dict) else {}
     except (OSError, ValueError, TypeError):
@@ -87,7 +128,7 @@ def read_meta(context_dir: str) -> dict:
 
 
 def write_summary(
-    context_dir: str,
+    session_file: str,
     text: str,
     *,
     source_session: str = "",
@@ -95,14 +136,27 @@ def write_summary(
     provider: str = "",
     model: str = "",
     source: str = "llm",
+    handoff_from: str = "",
+    compacted_through: str = "",
+    compacted_event_count: int = 0,
 ) -> str:
-    """Persist one normalized summary and its provenance metadata."""
+    """Persist one normalized summary and its provenance metadata.
+
+    Summary rewrites for the same session keep the existing compaction
+    boundary, and an explicit ``compacted_through`` may advance it. A handoff
+    seed (another source session) never inherits the target's boundary.
+    """
     text = normalize_summary(text)
-    if not text:
+    if not text or not session_file:
         return ""
-    _atomic_write(summary_path(context_dir), text + "\n")
+    existing = read_meta(session_file)
+    same_target = bool(
+        source_session and session_file
+        and os.path.normcase(os.path.abspath(source_session))
+        == os.path.normcase(os.path.abspath(session_file)))
+    _atomic_write(summary_path(session_file), text + "\n")
     meta = {
-        "schema_version": 1,
+        "schema_version": SUMMARY_SCHEMA_VERSION,
         "source_session": source_session,
         "event_count": int(event_count or 0),
         "provider": provider,
@@ -110,8 +164,80 @@ def write_summary(
         "source": source,
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
-    _atomic_write(meta_path(context_dir), json.dumps(meta, ensure_ascii=False, indent=2))
+    if handoff_from:
+        meta["handoff_from"] = handoff_from
+    # The handoff flags describe this session, not the summary's origin.
+    for key in ("handoff_from", "handoff_consumed"):
+        if key in existing and key not in meta:
+            meta[key] = existing[key]
+    if same_target:
+        for key in ("compacted_through", "compacted_event_count", "compacted_at"):
+            if key in existing:
+                meta.setdefault(key, existing[key])
+        if compacted_through and int(compacted_event_count or 0) >= int(
+                existing.get("compacted_event_count") or 0):
+            meta["compacted_through"] = str(compacted_through)
+            meta["compacted_event_count"] = int(compacted_event_count or 0)
+            meta["compacted_at"] = datetime.now().isoformat(timespec="seconds")
+    _atomic_write(meta_path(session_file), json.dumps(meta, ensure_ascii=False, indent=2))
     return text
+
+
+def summary_coverage(meta: dict, events: list) -> int:
+    """How many current events the rolling summary claims to cover."""
+    if not meta:
+        return 0
+    try:
+        count = int(meta.get("event_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return max(0, min(count, len(events or [])))
+
+
+def compacted_event_count(meta: dict, events: list) -> int:
+    """Events before the compaction boundary; 0 when nothing is compacted."""
+    events = events or []
+    if not meta or not events:
+        return 0
+    boundary = str(meta.get("compacted_through") or "")
+    if boundary:
+        for index, event in enumerate(events):
+            if str(event.get("id") or "") == boundary:
+                return index + 1
+    try:
+        count = int(meta.get("compacted_event_count") or 0)
+    except (TypeError, ValueError):
+        count = 0
+    return max(0, min(count, len(events)))
+
+
+def set_compaction_boundary(
+    session_file: str,
+    event_id: str,
+    event_count: int,
+) -> dict:
+    """Advance the persisted boundary without rewriting the summary text."""
+    if not session_file or not event_id:
+        return {}
+    meta = read_meta(session_file)
+    if not meta:
+        return {}
+    count = max(0, int(event_count or 0))
+    try:
+        previous = int(meta.get("compacted_event_count") or 0)
+    except (TypeError, ValueError):
+        previous = 0
+    if count < previous:
+        return meta
+    meta["compacted_through"] = str(event_id)
+    meta["compacted_event_count"] = count
+    meta["compacted_at"] = datetime.now().isoformat(timespec="seconds")
+    try:
+        _atomic_write(meta_path(session_file), json.dumps(meta, ensure_ascii=False, indent=2))
+    except OSError as exc:
+        logger.warning("Could not store compaction boundary: %s", exc)
+        return {}
+    return meta
 
 
 def _clip(text, limit: int = MAX_EVENT_CHARS) -> str:
@@ -161,8 +287,7 @@ def _split_sections(text: str) -> dict:
     current = None
     body = []
     for line in (text or "").splitlines():
-        match = re.match(r"^\s*##\s+(Objective|Done|Current|Next|Files|Blockers)\s*$",
-                         line, re.IGNORECASE)
+        match = _SECTION_RE.match(line)
         if match:
             if current:
                 sections[current] = "\n".join(body).strip()
@@ -204,6 +329,48 @@ def _fallback_files(events) -> list[str]:
     return _normalize_files(values)
 
 
+def _section_lines(previous_sections: dict, name: str) -> list[str]:
+    return [
+        line.strip() for line in previous_sections.get(name, "").splitlines()
+        if line.strip() and line.strip().lower() != "- none."
+    ]
+
+
+def _merge_lines(previous: list[str], new: list[str], limit: int) -> list[str]:
+    merged, seen = [], set()
+    for line in list(previous) + list(new):
+        key = line.strip().lower()
+        if not key or key == "- none." or key in seen:
+            continue
+        seen.add(key)
+        merged.append(line.strip())
+    return merged[-limit:]
+
+
+def _fallback_checks(events: list) -> list[str]:
+    """Verification commands actually executed, paired with their status."""
+    results = {
+        str(event.get("call_id") or ""): event
+        for event in events
+        if event.get("type") == "tool_result" and event.get("call_id")
+    }
+    checks = []
+    for event in events:
+        if event.get("type") != "tool_call":
+            continue
+        args = event.get("input")
+        if not isinstance(args, dict):
+            args = {}
+        command = str(args.get("command") or "").strip()
+        if not command or not _CHECK_COMMAND_RE.search(command):
+            continue
+        result = results.get(str(event.get("call_id") or ""))
+        status = str((result or {}).get("status") or "").strip()
+        outcome = status or ("result not recorded" if not result else "result")
+        checks.append(f"- `{_clip(command, 180)}` → {outcome}")
+    return checks
+
+
 def fallback_summary(events: list, previous: str = "") -> str:
     """Deterministic extractive summary used before/without an LLM pass."""
     events = [event for event in (events or []) if isinstance(event, dict)]
@@ -231,14 +398,20 @@ def fallback_summary(events: list, previous: str = "") -> str:
         elif event.get("type") == "job_result":
             status = event.get("status") or "finished"
             done.append(f"- Background job #{event.get('job_id', '?')}: {status}")
-    previous_done = [
-        line for line in previous_sections.get("Done", "").splitlines()
-        if line.strip()
-    ]
+    previous_done = _section_lines(previous_sections, "Done")
     done = previous_done + done
     if not done:
         done = ["- No completed steps recorded yet."]
     done = done[-12:]
+
+    decisions = _section_lines(previous_sections, "Decisions") or ["- None."]
+    constraints = _section_lines(previous_sections, "Constraints") or ["- None."]
+    checks = _merge_lines(
+        _section_lines(previous_sections, "Checks"),
+        _fallback_checks(events),
+        6,
+    ) or ["- None."]
+    unfinished = _section_lines(previous_sections, "Unfinished") or ["- None."]
 
     last_event = events[-1]
     current = _clip(event_text(last_event) or _event_line(last_event), 700) or "(not set)"
@@ -284,11 +457,23 @@ def fallback_summary(events: list, previous: str = "") -> str:
         "## Done",
         *done,
         "",
+        "## Decisions",
+        *decisions,
+        "",
+        "## Constraints",
+        *constraints,
+        "",
+        "## Checks",
+        *checks,
+        "",
         "## Current",
         current,
         "",
         "## Next",
         *next_steps,
+        "",
+        "## Unfinished",
+        *unfinished,
         "",
         "## Files",
         *([f"- `{path}`" for path in files] or ["- None recorded."]),
@@ -314,8 +499,7 @@ def normalize_summary(text: str, fallback: str = "") -> str:
         return ""
     for name in SUMMARY_SECTIONS:
         if not sections.get(name):
-            sections[name] = fallback_sections.get(name) or (
-                "- None." if name in ("Done", "Next", "Files", "Blockers") else "(not set)")
+            sections[name] = fallback_sections.get(name) or _default_body(name)
     parts = []
     for name in SUMMARY_SECTIONS:
         body = redact(sections[name]).strip()
@@ -336,8 +520,7 @@ def session_summary(events: list, objective: str = "") -> str:
     sections["Objective"] = objective
     parts = []
     for name in SUMMARY_SECTIONS:
-        body = sections.get(name) or (
-            "- None." if name in ("Done", "Next", "Files", "Blockers") else "(not set)")
+        body = sections.get(name) or _default_body(name)
         parts.append(f"## {name}\n{body}")
     return normalize_summary("\n\n".join(parts))
 
@@ -399,20 +582,30 @@ def build_summary_prompts(
     system_prompt = (
         "You maintain a compact handoff summary for a local desktop agent. "
         "The event journal is the source of truth. Update the previous summary "
-        "with the new events, preserving completed work, decisions and open "
-        "threads. Return ONLY Markdown with exactly these sections, in order:\n\n"
+        "with the new events, preserving completed work, decisions, constraints, "
+        "verified checks and open threads. Return ONLY Markdown with exactly "
+        "these sections, in order:\n\n"
         "## Objective\n"
         "## Done\n"
+        "## Decisions\n"
+        "## Constraints\n"
+        "## Checks\n"
         "## Current\n"
         "## Next\n"
+        "## Unfinished\n"
         "## Files\n"
         "## Blockers\n\n"
         "Rules:\n"
-        "- Be factual; do not invent actions that are not in the events.\n"
+        "- Be factual; do not invent actions, decisions or checks that are not in the events.\n"
         "- Keep the user's language (usually Russian).\n"
-        "- Use short bullet lists for Done, Next, Files and Blockers.\n"
+        "- Objective and Current are one or two sentences; the other sections use short bullet lists.\n"
+        "- Done: completed work and its observable outcome.\n"
+        "- Decisions: choices made and why; carry earlier decisions forward unless the new events reverse them.\n"
+        "- Constraints: rules and limits that must keep holding (user restrictions, project rules, invariants); carry earlier constraints forward.\n"
+        "- Checks: verification actually performed (tests, lint, build, manual checks) with its result; never claim a check that was not run.\n"
+        "- Next must state the concrete immediate next step, or say that the task appears complete.\n"
+        "- Unfinished: started but incomplete work and open questions; do not repeat Next.\n"
         "- Files must be paths that were actually read, written or mentioned.\n"
-        "- Next must state the concrete next step, or say that the task appears complete.\n"
         "- Do not mention this summarization process or the event journal.\n"
         f"- Stay under {int(max_tokens)} tokens.\n"
         "- Never include passwords, API keys or access tokens."
@@ -500,6 +693,8 @@ def should_inject(meta: dict, session_file: str) -> bool:
     """Inject only when the summary came from a different session/mode."""
     if not meta:
         return True
+    if meta.get("handoff_consumed"):
+        return False
     source = str(meta.get("source_session") or "")
     if not source or not session_file:
         return True
@@ -507,19 +702,65 @@ def should_inject(meta: dict, session_file: str) -> bool:
         os.path.abspath(session_file))
 
 
+def mark_handoff_consumed(session_file: str) -> dict:
+    """Record that a mode-switch seed has been sent to the model once."""
+    meta = read_meta(session_file)
+    if not meta or meta.get("source") != "handoff" or meta.get("handoff_consumed"):
+        return meta
+    meta["handoff_consumed"] = True
+    try:
+        _atomic_write(meta_path(session_file), json.dumps(meta, ensure_ascii=False, indent=2))
+    except OSError as exc:
+        logger.warning("Could not mark handoff seed as consumed: %s", exc)
+        return {}
+    return meta
+
+
+HANDOFF_LABEL = "Handoff context from earlier work"
+COMPACTION_LABEL = "Compacted session context"
+
+
+def compaction_block(
+    summary: str,
+    mode: str = "",
+    covered_events: int = 0,
+) -> str:
+    """Prompt block replacing the part of the active history that was compacted."""
+    summary = (summary or "").strip()
+    if not summary:
+        return ""
+    label = COMPACTION_LABEL
+    if mode:
+        label += f" ({mode} mode)"
+    if int(covered_events or 0) == 1:
+        scope = " 1 earlier event was replaced by this summary to save context."
+    elif covered_events:
+        scope = (f" {int(covered_events):,} earlier events were replaced by this "
+                 "summary to save context.")
+    else:
+        scope = " Earlier events were replaced by this summary to save context."
+    return (
+        f"**{label}:**\n\n"
+        f"{summary}\n\n"
+        f"{scope.strip()} Re-read files or re-run checks if the summary is "
+        "not enough; the full history remains in the session journal."
+    )
+
+
 def injection_block(summary: str, mode: str = "") -> str:
     """Prompt prefix carrying prior-session context into the current mode."""
     summary = (summary or "").strip()
     if not summary:
         return ""
-    label = "Handoff context from earlier work"
+    label = HANDOFF_LABEL
     if mode:
         label += f" (continuing in {mode} mode)"
     return (
         f"**{label}:**\n\n"
         f"{summary}\n\n"
         "Use this as background. The current user request is authoritative; "
-        "do not repeat completed steps unless verification is needed."
+        "respect the recorded decisions and constraints, and do not repeat "
+        "completed steps unless verification is needed."
     )
 
 
@@ -537,7 +778,8 @@ def session_injection_block(
     return (
         f"**{label}:**\n\n"
         f"{summary}\n\n"
-        "Resume from this state. The live browser tabs or desktop are not "
-        "replayed; observe the current screen/page and continue with the "
-        "user's latest request."
+        "Resume from this state. Respect the recorded decisions and "
+        "constraints. The live browser tabs or desktop are not replayed; "
+        "observe the current screen/page and continue with the user's latest "
+        "request."
     )

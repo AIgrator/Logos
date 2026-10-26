@@ -1266,9 +1266,18 @@ class VisionHandler(BaseAgent):
             return False
 
     def _task_with_handoff(self, task: str) -> str:
-        """Seed a fresh CUA chain with session state and the project handoff."""
+        """Seed a fresh CUA chain with project rules, session state and handoff."""
         task = task or ""
         blocks = []
+        baseline_prompt = getattr(self.controller, "project_baseline_prompt", None)
+        if callable(baseline_prompt):
+            try:
+                block = baseline_prompt()
+            except Exception as e:
+                logging.warning(f"Could not read Vision project rules: {e}")
+                block = ""
+            if block and "Project instructions (AGENTS.md)" not in task:
+                blocks.append(block)
         session_prompt = getattr(self.controller, "session_context_prompt", None)
         if callable(session_prompt):
             try:
@@ -1287,6 +1296,18 @@ class VisionHandler(BaseAgent):
                 block = ""
             if block and "Handoff context from earlier work" not in task:
                 blocks.append(block)
+        compact = getattr(self.controller, "compaction_block", None)
+        if callable(compact):
+            try:
+                block = compact("vision")
+            except Exception as e:
+                logging.warning(f"Could not read Vision compacted context: {e}")
+                block = ""
+            if block and "Compacted session context" not in task:
+                blocks.append(block)
+        consume = getattr(self.controller, "consume_handoff_seed", None)
+        if callable(consume):
+            consume()
         if not blocks:
             return task
         return "\n\n".join([task, *blocks]).strip()

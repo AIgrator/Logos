@@ -257,7 +257,7 @@ class TerminalHandler(BaseAgentHandler):
         # Live jobs are appended transiently (never stored): every planning
         # turn — including guidance-steered ones — sees what is already
         # running, so the model polls instead of relaunching it.
-        history = self.command_history
+        history = self.model_history()
         try:
             manager = getattr(self.computer, "shell_jobs", None)
             note = manager.describe_live() if manager is not None else ""
