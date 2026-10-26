@@ -435,7 +435,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
     project_removed = Signal(str, bool)  # project path, delete .logos data
 
     EXPANDED_WIDTH = 238
-    COLLAPSED_WIDTH = 58
+    COLLAPSED_WIDTH = 54
 
     def __init__(self, project_manager, theme_manager, parent=None):
         super().__init__(parent)
@@ -454,7 +454,11 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.setFixedWidth(self.EXPANDED_WIDTH)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(8, 8, 8, 8)
+        # Equal, deliberately small air on both sides in collapsed and
+        # expanded modes. The window itself is flush with the panel on the
+        # left (see UIManager.show_workspace), so this is the only inset the
+        # user sees around the rail.
+        root.setContentsMargins(6, 8, 6, 8)
         root.setSpacing(4)
 
         top = QHBoxLayout()
@@ -478,7 +482,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
         self.section_label = QLabel("PROJECTS")
         self.section_label.setObjectName("SidebarSection")
-        self.section_label.setContentsMargins(8, 8, 0, 0)
+        self.section_label.setContentsMargins(6, 8, 6, 0)
         root.addWidget(self.section_label)
 
         self.project_list = QListWidget()
@@ -528,7 +532,9 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         colors = _theme_colors(self.theme_manager)
         # Collapsed mode has no labels: centre the icons in the narrow rail.
         button_align = "center" if self.collapsed else "left"
-        button_padding = "7px 0" if self.collapsed else "7px 8px"
+        button_padding = "7px 0"
+        # Icon-only list rows need their own symmetric inset to stay centred.
+        item_padding = "7px 6px" if self.collapsed else "7px 0"
         self.setStyleSheet(f"""
             QWidget#ProjectSidebar {{
                 background: {colors['panel']};
@@ -538,7 +544,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
             QLabel#SidebarSection {{ font-size: 11px; font-weight: 600; }}
             QListWidget {{ background: transparent; border: none; outline: none; }}
             QListWidget::item {{
-                color: {colors['text']}; padding: 7px 6px; border-radius: 7px;
+                color: {colors['text']}; padding: {item_padding}; border-radius: 7px;
             }}
             QListWidget::item:hover {{ background: {colors['hover']}; }}
             QListWidget::item:selected {{ background: {colors['selected']}; color: {colors['text']}; }}

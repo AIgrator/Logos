@@ -1231,6 +1231,8 @@ class UIManager(QWidget):
         """Shows the start screen (project and session lists)."""
         if self.is_compact:
             self.switchToFullMode()
+        # No sidebar here: keep the usual symmetric window frame.
+        self.layout.setContentsMargins(11, 11, 11, 11)
         self.home_page.refresh()
         self.home_page.setVisible(True)
         self.workspace_container.setVisible(False)
@@ -1243,6 +1245,10 @@ class UIManager(QWidget):
         self.workspace_container.setVisible(True)
         self.sidebar.setVisible(not self.is_compact)
         self.custom_title_bar.setVisible(self.is_compact)
+        if not self.is_compact:
+            # The sidebar rail is flush with the window's left edge; its own
+            # equal left/right inset provides the visual padding.
+            self.layout.setContentsMargins(0, 11, 11, 11)
 
     def refresh_project_views(self):
         """Reloads project/session lists in the sidebar and home screen."""
@@ -1627,7 +1633,8 @@ class UIManager(QWidget):
         self.main_window.size_grip.setVisible(False)
         if self.attachment_thumbnails:
             self.attachment_scroll_area.setVisible(True)
-        self.layout.setContentsMargins(11, 11, 11, 11)
+        left_margin = 0 if self.workspace_container.isVisible() else 11
+        self.layout.setContentsMargins(left_margin, 11, 11, 11)
         self.input_container.setVisible(True)
         self.bottom_toolbar_container.setVisible(True)
         self._toolbar_single_row = None  # force single/two-row re-evaluation
