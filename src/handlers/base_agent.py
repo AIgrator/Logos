@@ -255,6 +255,11 @@ class BaseAgentHandler:
                     updater()
             except Exception:
                 pass
+            # Agent work reaching rest may unblock a theme-driven transcript
+            # re-render that was deferred while this task was running.
+            settle = getattr(self.controller, "_consume_theme_replay", None)
+            if callable(settle):
+                settle()
 
     def _start_thinking_timer(self, message: str):
         self.ui.show_thinking_ui(True, message=message)

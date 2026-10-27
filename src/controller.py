@@ -99,6 +99,10 @@ class AppController(QObject):
         self._summary_timer = QTimer(self)
         self._summary_timer.setSingleShot(True)
         self._summary_timer.timeout.connect(self._maybe_refresh_summary)
+        # A live theme switch re-renders the transcript, but only once the
+        # active mode is at rest: replaying mid-stream would orphan the live
+        # message the widget is still appending chunks to.
+        self._theme_replay_pending = False
         # Auto-compaction is checked only when work has settled; the debounce
         # keeps it from firing in the middle of a burst of journal events.
         self._auto_compact_timer = QTimer(self)
@@ -474,6 +478,10 @@ class AppController(QObject):
         if self.indexer is not None:
             self.indexer.start()
         self._check_initial_configuration()
+        # Transcript HTML carries theme colors baked at render time, so a live
+        # theme switch must rebuild it. Connected after the startup replay so
+        # a restored session is not rendered twice.
+        self.theme_manager.theme_changed.connect(self._on_theme_changed)
 
     def _check_initial_configuration(self):
         """Checks if the active provider has a configured API key (from keyring) and shows a message if not."""
@@ -1663,6 +1671,9 @@ class AppController(QObject):
 
     def _replay_session(self):
         """Render the loaded session transcript and tool cards into the UI."""
+        # A full replay always renders with the live theme, so it also
+        # satisfies any deferred theme re-render.
+        self._theme_replay_pending = False
         events = list(self.session_events or [])
         if not events or getattr(self, "ui", None) is None:
             return
@@ -1714,6 +1725,34 @@ class AppController(QObject):
         except Exception:
             pass
         logging.info(f"Replayed {len(events)} session events into the UI.")
+
+    def _on_theme_changed(self):
+        """Rebuilds the transcript so its baked HTML colors match the new theme."""
+        self._theme_replay_pending = True
+        self._consume_theme_replay()
+
+    def _theme_replay_safe(self) -> bool:
+        """Whether rebuilding the transcript cannot clobber live UI state."""
+        if self.session_mode == "chat":
+            # A reply streams into a tracked live message; replay would orphan it.
+            return not self.thinking_timer.isActive() and not self.chat_queue
+        handler = self._handler_for_mode(self.session_mode)
+        if handler is None:
+            return False
+        return str(getattr(handler.state, "name", "")) == "IDLE"
+
+    def _consume_theme_replay(self):
+        """Queues a transcript re-render once the active mode is at rest."""
+        if not self._theme_replay_pending or not self._theme_replay_safe():
+            return
+        QTimer.singleShot(0, self._apply_theme_replay)
+
+    def _apply_theme_replay(self):
+        # Re-check: the just-finished turn may have queued a new one, or the
+        # user switched modes while this callback was waiting.
+        if not self._theme_replay_pending or not self._theme_replay_safe():
+            return
+        self._replay_session()
 
     def _set_project_context(self, root: str):
         """Re-roots the indexer and the terminal/browser working directories."""
@@ -2018,6 +2057,7 @@ class AppController(QObject):
         if new_state in (ControllerState.IDLE, ControllerState.TERMINAL,
                          ControllerState.BROWSER):
             self._schedule_auto_compact_check()
+        self._consume_theme_replay()
 
     def handle_user_input(self, user_text):
         if not self.llm_worker.provider:
