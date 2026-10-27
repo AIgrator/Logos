@@ -2856,7 +2856,43 @@ class AppController(QObject):
         self.ui.set_active_mode('browser')
         self.ui.add_message("<i>Browser mode enabled. Describe the web task you want me to perform.</i>", force_scroll=True)
 
+    def _vision_availability_error(self) -> str | None:
+        """Returns why Vision cannot start, or None when a CUA model is usable.
+
+        The current model is enough on its own; otherwise the dedicated Vision
+        model from settings must exist, be configured and support computer use.
+        """
+        all_settings = self.settings_manager.all()
+        user_providers = all_settings.get("llm_providers", {}) or {}
+        cur_pid = all_settings.get("active_provider")
+        cur_model = (user_providers.get(cur_pid) or {}).get("model")
+        modes = SUBSECTIONS.get("vision", ())
+        if cur_pid and cur_model and all(
+                ModeCapabilities.supports(cur_pid, cur_model, m) for m in modes):
+            return None
+        entry = (all_settings.get("mode_models", {}) or {}).get("vision") or {}
+        pid = entry.get("provider")
+        mid = entry.get("model")
+        if pid and mid:
+            if not provider_is_configured(all_settings, pid):
+                return (
+                    f"The Vision model ({pid}) is not configured. Re-select it "
+                    "in Settings → General → Vision (Computer Use)."
+                )
+            if all(ModeCapabilities.supports(pid, mid, m) for m in modes):
+                return None
+        return (
+            "Vision mode needs a model with Computer Use support. Choose one "
+            "in Settings → General → Vision (Computer Use) — OpenAI, Anthropic "
+            "or Google — or switch to such a model from the model button."
+        )
+
     def _activate_vision_mode(self):
+        error = self._vision_availability_error()
+        if error:
+            self.ui.set_active_mode(self._current_mode())
+            self.ui.add_message(f"<i>{error}</i>", force_scroll=True)
+            return
         self._cleanup_and_switch_handler(self.vision_handler, ControllerState.VISION)
         self.ui.set_active_mode('vision')
         self.ui.add_message("<i>Vision mode enabled. Describe the task you want me to perform.</i>", force_scroll=True)
