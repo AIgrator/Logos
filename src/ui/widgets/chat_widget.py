@@ -556,13 +556,18 @@ class ChatWidget(QAbstractScrollArea):
         self.viewport().update()
 
     def add_message(self, data, force_scroll=False, keep_stream=False, role=None):
+        was_at_bottom = self._is_at_bottom()
         streaming_msg = self._streaming_msg
         if not keep_stream:
-            if self.is_streaming:
+            if streaming_msg is not None and streaming_msg.get('is_status'):
+                # A placeholder "Thinking…" line must not linger as a stale
+                # line once real content arrives; drop it instead of leaving
+                # an orphaned document in the transcript.
+                self.remove_message(streaming_msg)
+            elif self.is_streaming:
                 self.is_streaming = False
             self._streaming_msg = None
 
-        was_at_bottom = self._is_at_bottom()
         doc = self._new_document()
 
         if isinstance(data, dict) and data.get('type') == 'collapsible':
@@ -628,6 +633,19 @@ class ChatWidget(QAbstractScrollArea):
             self._follow_if_at_bottom(was_at_bottom)
 
         self.viewport().update()
+        return msg
+
+    def update_message(self, msg, html_content: str) -> bool:
+        """Replaces the rendered content of an existing simple message."""
+        if not isinstance(msg, dict) or not any(m is msg for m in self.messages):
+            return False
+        was_at_bottom = self._is_at_bottom()
+        msg['raw_content'] = html_content
+        msg['doc'].setHtml(html_content)
+        self._update_scroll_bar()
+        self.viewport().update()
+        self._follow_if_at_bottom(was_at_bottom)
+        return True
 
     def add_queued_message(self, raw_html: str, display_html: str):
         """Appends a user message shown as "queued" (dimmed).
@@ -758,7 +776,8 @@ class ChatWidget(QAbstractScrollArea):
     def _status_html(self, status_text: str, seconds: int = 0) -> str:
         """Muted one-line status. The model is never named here."""
         color = self.theme_manager.get_style("COLLAPSIBLE_META")
-        label = html.escape((status_text or "Thinking").strip().rstrip("."))
+        label = (status_text or "Thinking").strip().rstrip(".…").strip()
+        label = html.escape(label or "Thinking")
         return f'<p style="margin: 0; color: {color};"><i>{label}… {seconds}s</i></p>'
 
     def show_thinking_ui(self, show: bool, status_text: str = "Thinking"):

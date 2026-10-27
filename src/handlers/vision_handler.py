@@ -15,6 +15,7 @@ Per-turn flow (each turn runs in a worker thread, never on the GUI thread):
 See legacy/vision_2026-10-15/ for the pre-rebuild implementation.
 """
 import base64
+import html
 import io
 import logging
 import threading
@@ -1000,6 +1001,8 @@ class VisionHandler(BaseAgent):
         self._cua_response_id = None
         self._cua_outbox = []  # outputs answered into the next turn
         self._cua_turns = 0
+        self._steps_msg = None
+        self._steps_shown = 0
         self._cua_generation = 0
         self._cua_identity = None
         self._cua_seed_note = None
@@ -1194,6 +1197,8 @@ class VisionHandler(BaseAgent):
         self._cua_response_id = None
         self._cua_outbox = []
         self._cua_turns = 0
+        self._steps_msg = None
+        self._steps_shown = 0
         self._cua_tag = time.strftime("%H%M%S")
         self._last_shot_file = None
         self._cua_generation += 1
@@ -1494,14 +1499,41 @@ class VisionHandler(BaseAgent):
         worker.ask_needed.connect(
             lambda asks, w=worker: self._on_ask_needed(asks, w))
         worker.ensure_visible.connect(self._on_ensure_visible)
-        worker.progress.connect(
-            lambda msg: self.ui.add_message(f"<i>{msg}</i>"))
+        worker.progress.connect(self._on_cua_progress)
         worker.usage_ready.connect(self._on_cua_usage)
         worker.start()
 
     def _on_cua_usage(self, usage: dict):
         if isinstance(usage, dict) and usage:
             self.controller.record_provider_usage(usage)
+
+    def _on_cua_progress(self, msg: str):
+        """Worker progress: live status goes to the status line, not the log."""
+        text = (msg or "").strip()
+        if not text:
+            return
+        if text.startswith("Paused"):
+            # The paused banner already explains the state; keep the worker's
+            # wait-site note as a normal transcript line.
+            self.ui.add_message(f"<i>{html.escape(text)}</i>")
+            return
+        self.ui.show_thinking_ui(
+            True, text.rstrip(".…").strip() or "Thinking")
+
+    def _update_steps_card(self, parts: list):
+        """Keeps one live "Computer use · N steps" line instead of a line per turn."""
+        self._steps_shown += 1
+        detail = ", ".join(parts) if parts else "screenshot"
+        label = "step" if self._steps_shown == 1 else "steps"
+        color = self.controller.theme_manager.get_style("COLLAPSIBLE_META")
+        content = (
+            f'<p style="margin: 0; color: {color};"><i>'
+            f'👁 Computer use · {self._steps_shown} {label} · '
+            f'{html.escape(detail)}</i></p>')
+        if self._steps_msg is not None and self.ui.update_message(
+                self._steps_msg, content):
+            return
+        self._steps_msg = self.ui.add_message(content, keep_stream=True)
 
     # -- turn outcome (GUI thread) --------------------------------------
 
@@ -1616,7 +1648,7 @@ class VisionHandler(BaseAgent):
                   for a in asked]
         line = f"turn {self._cua_turns}: " + (
             ", ".join(parts) if parts else "screenshot")
-        self.ui.add_message(f"<i>👁 {line}</i>")
+        self._update_steps_card(parts)
         self._continue_loop(line)
 
     def _current_worker(self, worker):
@@ -1650,8 +1682,7 @@ class VisionHandler(BaseAgent):
         try:
             for item in asks or []:
                 question = item.get("question", "")
-                self.ui.add_text(
-                    question, prefix_html="<b>Vision asks:</b> ")
+                self.ui.add_formatted_message(question)
                 answer = self.controller.ask_user_text(
                     question, sensitive=is_sensitive_text(question))
                 if answer is None:

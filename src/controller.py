@@ -2440,7 +2440,7 @@ class AppController(QObject):
                 width = 700
             width = max(480, min(width, 900))
             dlg = QDialog(self.ui)
-            dlg.setWindowTitle("Vision asks")
+            dlg.setWindowTitle("Logos")
             try:
                 dlg.setWindowIcon(QIcon("assets/ico.ico"))
             except Exception:

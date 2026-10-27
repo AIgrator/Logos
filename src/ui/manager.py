@@ -1499,7 +1499,11 @@ class UIManager(QWidget):
     def add_message(self, html_content, force_scroll=False, keep_stream=False, role=None):
         if self.is_compact:
             force_scroll = True
-        self.chat_widget.add_message(html_content, force_scroll=force_scroll, keep_stream=keep_stream, role=role)
+        return self.chat_widget.add_message(html_content, force_scroll=force_scroll, keep_stream=keep_stream, role=role)
+
+    def update_message(self, msg, html_content) -> bool:
+        """Replaces an existing message's content in place (returns success)."""
+        return self.chat_widget.update_message(msg, html_content)
 
     def update_job_block(self, job_id: int, data: dict) -> bool:
         return self.chat_widget.update_job_block(job_id, data)
