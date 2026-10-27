@@ -10,6 +10,7 @@ from PySide6.QtGui import (
     QColor,
     QDesktopServices,
     QFont,
+    QFontMetrics,
     QKeySequence,
     QPainter,
     QTextCharFormat,
@@ -97,6 +98,13 @@ class ChatWidget(QAbstractScrollArea):
         self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
         self.setContentsMargins(10, 10, 10, 10)
         self.verticalScrollBar().valueChanged.connect(self.viewport().update)
+
+        # Wheel speed: one notch scrolls the system-configured number of text
+        # lines. The default QAbstractScrollArea path moves the bar by
+        # singleStep(1) × wheelScrollLines(3) = 3 px per notch, which feels
+        # frozen in a pixel-range transcript.
+        self._wheel_px_per_line = max(1, QFontMetrics(self.chat_font).lineSpacing())
+        self._wheel_remainder = 0.0
 
         # Floating "jump to the latest message" button, shown only when the
         # user has scrolled away from the bottom of the conversation.
@@ -459,6 +467,42 @@ class ChatWidget(QAbstractScrollArea):
             if self.autoscroll_timer.isActive():
                 self.autoscroll_timer.stop()
         super().mouseReleaseEvent(event)
+
+    def wheelEvent(self, event):
+        """Scrolls the transcript in pixels at native application speed.
+
+        ``_update_scroll_bar`` keeps the range in pixels, so the base class's
+        item-based stepping (3 px per notch via the system setting) crawls.
+        High-resolution devices deliver ``pixelDelta``; classic wheels deliver
+        ``angleDelta`` in 120ths of a notch, converted to text lines here.
+        """
+        bar = self.verticalScrollBar()
+        pixel_delta = event.pixelDelta().y()
+        if pixel_delta:
+            bar.setValue(bar.value() - pixel_delta)
+            event.accept()
+            return
+
+        angle_delta = event.angleDelta().y()
+        if not angle_delta:
+            super().wheelEvent(event)
+            return
+
+        lines = QApplication.wheelScrollLines()
+        if lines == 0:
+            event.accept()
+            return
+        if lines < 0:  # system configured "one page per notch"
+            step_px = float(bar.pageStep())
+        else:
+            step_px = float(lines * self._wheel_px_per_line)
+
+        self._wheel_remainder += angle_delta * step_px / 120.0
+        step = int(self._wheel_remainder)
+        if step:
+            self._wheel_remainder -= step
+            bar.setValue(bar.value() - step)
+        event.accept()
 
     def _perform_autoscroll(self):
         if self.autoscroll_direction == 0:
