@@ -5,12 +5,13 @@ of importing every vendor SDK. The provider layer therefore separates
 **discovery** (cheap, source-only) from **import** (on demand, one provider at a
 time).
 
-The current implementation is "lazy discovery + active-provider import". Earlier
-design notes described a mandatory second phase that eagerly imported all
-providers; that phase (`import_real_provider_classes()` in
-[`src/llm/__init__.py`](../src/llm/__init__.py)) still exists in the module but
-is **never called**. `LLMWorker.prepare_provider()` imports only the selected
-provider.
+The current implementation is "lazy discovery + active-provider import", plus a
+background warm-up. The second phase (`import_real_provider_classes()` in
+[`src/llm/__init__.py`](../src/llm/__init__.py)) is started on a daemon thread
+by `start_provider_warmup()` ~1.5 s after the main window is shown; it imports
+every provider module once, off the GUI thread. `LLMWorker.prepare_provider()`
+still imports the selected provider on demand if the warm-up has not reached it
+yet.
 
 ---
 
@@ -26,11 +27,14 @@ main.py
   │    └─ merge cached models.json into the provider config
   ├─ settings_manager = SettingsManager()
   │    └─ ensure defaults for the active provider (imports that one module)
-  └─ AppController()
-       ├─ LLMWorker(...)
-       ├─ worker.moveToThread(thread)
-       └─ thread.started ──► LLMWorker.prepare_provider()
-            └─ get_provider_class(active) ──► import active provider only
+  ├─ AppController()
+  │    ├─ LLMWorker(...)
+  │    ├─ worker.moveToThread(thread)
+  │    └─ thread.started ──► LLMWorker.prepare_provider()
+  │         └─ get_provider_class(active) ──► import active provider only
+  └─ QTimer.singleShot(1500, start_provider_warmup)
+       └─ daemon thread ──► import_real_provider_classes()
+            └─ replaces every proxy with the real class
 ```
 
 ---
@@ -154,20 +158,32 @@ def prepare_provider(self):
 Switching to another provider calls the same factory for the new id, importing
 only that module. The previous provider instance is discarded.
 
-Opening Settings is the other lazy-import trigger: `LLMProviderWidget` iterates
-all `PROVIDERS` and calls `get_provider_config()`, `get_ui_schema()`, and
-`get_default_settings()` to build every provider page. That imports all
-provider modules, but only after the user explicitly opens the settings window.
+Opening Settings used to be the other lazy-import trigger: `LLMProviderWidget`
+iterates all `PROVIDERS` and calls `get_provider_config()`, `get_ui_schema()`,
+and `get_default_settings()` to build every provider page, which imported all
+provider modules on the GUI thread (several seconds). Now Settings never pays
+that cost on open: the window is created immediately, and if the warm-up has
+not finished yet, the General page shows a centered `BusySpinner` (a rotating
+theme-accent arc, ~15% of the window height) with a "Loading provider
+settings…" caption below it, and the Vision model selector is hidden because it
+has no configured providers to list. A 150 ms timer waits for
+`providers_ready()` and then builds `LLMProviderWidget` on the GUI thread
+(imports are already done, so this takes well under a second) and reveals the
+Vision selector. Saving while the spinner is still shown keeps the stored
+`active_provider` and `llm_providers` values instead of overwriting them.
 
 ---
 
 ## Why not import everything up front?
 
 The vendor SDKs (OpenAI, Anthropic, Google GenAI, xAI, Hugging Face, plus
-`requests`/`httpx`) are heavy and can perform slow top-level initialization.
-Importing all of them in the worker delayed the first request by seconds for
-providers the user may never select. Source-only discovery keeps startup and
-model switching fast while preserving the "drop in one file" extension model.
+`requests`/`httpx`) are heavy and can perform slow top-level initialization
+(measured cold: anthropic ~9 s, openai ~2 s, google ~1 s). Importing all of
+them in the worker delayed the first request by seconds for providers the user
+may never select. Source-only discovery keeps startup and model switching fast;
+the eager import now runs on a background thread after the window is up instead
+of blocking any user action. If Settings is opened before that background pass
+finishes, only then does the General page wait — behind a busy indicator.
 
 The trade-off: any code that needs static provider configuration must trigger a
 single-module import through the proxy. That is why `SettingsManager` stores

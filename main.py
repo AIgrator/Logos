@@ -330,6 +330,16 @@ def main():
             pass
     _close_splashes()
 
+    # Warm provider SDK imports off the GUI thread once the main window is up.
+    # Without this, the first Settings open imports every provider SDK on the
+    # main thread (seconds of freeze); the window itself no longer waits for it.
+    try:
+        from PySide6.QtCore import QTimer
+        from llm import start_provider_warmup
+        QTimer.singleShot(1500, start_provider_warmup)
+    except Exception:
+        logging.debug("Provider warm-up scheduling failed", exc_info=True)
+
     sys.exit(app.exec())
 
 if __name__ == "__main__":

@@ -18,6 +18,7 @@ import importlib
 import inspect
 import logging
 import os
+import threading
 import time
 import pkgutil
 from dataclasses import dataclass
@@ -135,6 +136,33 @@ def _discover_provider_modules_lazily():
 
 # --- Phase 2: Eager Import (called explicitly) ---
 _are_real_providers_imported = False
+_import_lock = threading.Lock()
+_warmup_thread = None
+_warmup_lock = threading.Lock()
+
+
+def providers_ready() -> bool:
+    """Whether every provider module has been imported for this process."""
+    return _are_real_providers_imported
+
+
+def start_provider_warmup() -> None:
+    """Imports all provider modules once on a daemon thread.
+
+    Provider SDKs cost seconds to import (anthropic ~9 s cold, openai ~2 s,
+    google ~1 s), so they must never be loaded just to open a settings window.
+    """
+    global _warmup_thread
+    with _warmup_lock:
+        if _are_real_providers_imported:
+            return
+        if _warmup_thread is not None and _warmup_thread.is_alive():
+            return
+        _warmup_thread = threading.Thread(
+            target=import_real_provider_classes,
+            name="provider-warmup", daemon=True)
+        _warmup_thread.start()
+
 
 def import_real_provider_classes():
     """
@@ -143,34 +171,35 @@ def import_real_provider_classes():
     This is intended to be called after app startup to avoid circular dependencies.
     """
     global _are_real_providers_imported
-    if _are_real_providers_imported:
-        return
+    with _import_lock:
+        if _are_real_providers_imported:
+            return
 
-    discover_start = time.perf_counter()
-    logger.debug("Starting real provider class import")
+        discover_start = time.perf_counter()
+        logger.debug("Starting real provider class import")
 
-    prefix = f"{__name__}.providers."
-    providers_dir = os.path.join(os.path.dirname(__file__), 'providers')
+        prefix = f"{__name__}.providers."
+        providers_dir = os.path.join(os.path.dirname(__file__), 'providers')
 
-    for _, module_name, _ in pkgutil.iter_modules([providers_dir], prefix=prefix):
-        if not module_name.endswith('_provider'):
-            continue
-        try:
-            module = importlib.import_module(module_name)
-            for name, obj in inspect.getmembers(module, inspect.isclass):
-                if issubclass(obj, BaseLLMProvider) and obj is not BaseLLMProvider and not inspect.isabstract(obj):
-                    provider_id = obj.get_provider_id()
-                    if provider_id:
-                        PROVIDERS[provider_id] = obj # Replace proxy with real class
-                        logger.info(f"Registered real provider class for: {provider_id}")
-                    else:
-                        logger.warning(f"Provider class {name} in {module_name} is missing a provider_id.")
-        except Exception as e:
-            logger.error(f"Failed to import or inspect provider module {module_name}: {e}", exc_info=True)
+        for _, module_name, _ in pkgutil.iter_modules([providers_dir], prefix=prefix):
+            if not module_name.endswith('_provider'):
+                continue
+            try:
+                module = importlib.import_module(module_name)
+                for name, obj in inspect.getmembers(module, inspect.isclass):
+                    if issubclass(obj, BaseLLMProvider) and obj is not BaseLLMProvider and not inspect.isabstract(obj):
+                        provider_id = obj.get_provider_id()
+                        if provider_id:
+                            PROVIDERS[provider_id] = obj # Replace proxy with real class
+                            logger.info(f"Registered real provider class for: {provider_id}")
+                        else:
+                            logger.warning(f"Provider class {name} in {module_name} is missing a provider_id.")
+            except Exception as e:
+                logger.error(f"Failed to import or inspect provider module {module_name}: {e}", exc_info=True)
 
-    _are_real_providers_imported = True
-    duration = time.perf_counter() - discover_start
-    logger.info(f"Real provider class import completed in {duration:.4f}s")
+        _are_real_providers_imported = True
+        duration = time.perf_counter() - discover_start
+        logger.info(f"Real provider class import completed in {duration:.4f}s")
 
 
 # --- Utility Functions ---

@@ -135,24 +135,47 @@ class FontComboBox(QComboBox):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setItemDelegate(FontItemDelegate(self))
+        # Registering every installed font with Qt costs up to a second, so the
+        # scan is deferred until populate_fonts()/the first popup; windows that
+        # embed this combo must open instantly.
+        self._fonts_loaded = False
+        self._pending_font_path = None
+        self.addItem("Default (built-in)", DEFAULT_FONT_SENTINEL)
+
+    def showPopup(self):
         self.populate_fonts()
+        super().showPopup()
 
     def populate_fonts(self):
         """
         Populates the combo box with system fonts.
         """
-        self.clear()
-        # Add the default option first
-        self.addItem("Default (built-in)", DEFAULT_FONT_SENTINEL)
+        if self._fonts_loaded:
+            return
+        self._fonts_loaded = True
 
-        fonts = get_system_fonts()
-        for name, path in fonts.items():
-            self.addItem(name, path)
+        self.blockSignals(True)
+        try:
+            self.clear()
+            # Add the default option first
+            self.addItem("Default (built-in)", DEFAULT_FONT_SENTINEL)
+
+            fonts = get_system_fonts()
+            for name, path in fonts.items():
+                self.addItem(name, path)
+        finally:
+            self.blockSignals(False)
+
+        if self._pending_font_path is not None:
+            pending, self._pending_font_path = self._pending_font_path, None
+            self.set_selected_font(pending)
 
     def get_selected_font_path(self):
         """
         Returns the file path of the currently selected font.
         """
+        if not self._fonts_loaded and self._pending_font_path is not None:
+            return self._pending_font_path
         return self.currentData()
 
     def set_selected_font(self, font_path_to_select):
@@ -161,6 +184,10 @@ class FontComboBox(QComboBox):
         """
         if font_path_to_select in _LEGACY_SENTINELS:
             self.setCurrentIndex(0)
+            return
+        if not self._fonts_loaded:
+            # Applied by populate_fonts() once the item list exists.
+            self._pending_font_path = font_path_to_select
             return
 
         index = self.findData(font_path_to_select)

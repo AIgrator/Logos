@@ -30,6 +30,7 @@ from PySide6.QtGui import QIcon
 from src.ui.theme_manager import LIGHT_THEME, DARK_THEME
 
 from settings_manager import SettingsManager
+from llm import providers_ready, start_provider_warmup
 from src.ui.widgets.font_manager.font_combobox import FontComboBox
 from src.ui.widgets.hotkey.hotkey_edit import HotkeyEdit
 from src.apps.installed_apps import AppScanner
@@ -37,6 +38,8 @@ from src.ui.widgets.llm_provider_widget import LLMProviderWidget
 from src.ui.widgets.mode_model_widget import ModeModelWidget
 from src.ui.utils import CustomToolTipManager, NavButtonHoverFilter
 import logging
+
+from src.ui.widgets.busy_spinner import BusySpinner
 
 
 class SettingsWindow(QDialog):
@@ -218,6 +221,11 @@ class SettingsWindow(QDialog):
         first_button = self.nav_button_group.buttons()[0]
         first_button.setChecked(True)
         self._on_nav_button_clicked(first_button)
+        if not getattr(self, "_fonts_scheduled", False):
+            # Registering every OS font with Qt takes ~0.8 s; do it after the
+            # window is painted so opening Settings never waits for it.
+            self._fonts_scheduled = True
+            QTimer.singleShot(100, self.font_combo.populate_fonts)
         super().showEvent(event)
 
     def closeEvent(self, event):
@@ -228,7 +236,8 @@ class SettingsWindow(QDialog):
         # General
         active_provider = self.settings_manager.get("active_provider", "google_gemini")
         providers = self.settings_manager.get("llm_providers", {})
-        self.llm_provider_widget.load_settings(active_provider, providers)
+        if self.llm_provider_widget is not None:
+            self.llm_provider_widget.load_settings(active_provider, providers)
         self.mode_model_widget.load_settings(self.settings_manager.get("mode_models", {}) or {})
 
         # Common
@@ -312,7 +321,16 @@ class SettingsWindow(QDialog):
 
     def _collect_settings_from_ui(self):
         """Gathers all settings from the UI into a single dictionary."""
-        active_provider_to_save, providers_to_save = self.llm_provider_widget.get_all_settings()
+        if self.llm_provider_widget is not None:
+            active_provider_to_save, providers_to_save = (
+                self.llm_provider_widget.get_all_settings())
+        else:
+            # Provider UI is still loading: keep stored values instead of
+            # wiping them with defaults from the placeholder.
+            active_provider_to_save = self.settings_manager.get(
+                "active_provider", "google_gemini")
+            providers_to_save = dict(
+                self.settings_manager.get("llm_providers", {}) or {})
 
         omniparser_settings = self.settings_manager.get("omniparser", {}).copy()
 
@@ -443,16 +461,86 @@ class SettingsWindow(QDialog):
         self.hide()
 
     def _create_general_section(self):
-        """Creates the General settings section."""
+        """Creates the General settings section.
+
+        Building the provider UI needs every provider SDK imported (seconds of
+        work), so unless the background warm-up already finished, the page
+        shows a busy placeholder and the widget is inserted once imports end.
+        """
         group = QGroupBox("General")
         layout = QVBoxLayout(group)
-        self.llm_provider_widget = LLMProviderWidget(self.settings_manager)
-        layout.addWidget(self.llm_provider_widget)
+        self.general_provider_layout = layout
+        self.llm_provider_widget = None
+        self.provider_placeholder = None
+        self.provider_spinner = None
+
+        if providers_ready():
+            self.llm_provider_widget = LLMProviderWidget(self.settings_manager)
+            layout.addWidget(self.llm_provider_widget)
+        else:
+            self.provider_placeholder = QWidget()
+            placeholder_layout = QVBoxLayout(self.provider_placeholder)
+            placeholder_layout.setContentsMargins(0, 0, 0, 0)
+            placeholder_layout.addStretch(1)
+            self.provider_spinner = BusySpinner()
+            self.provider_spinner.start()
+            placeholder_layout.addWidget(
+                self.provider_spinner, 0, Qt.AlignHCenter)
+            label = QLabel("Loading provider settings…")
+            label.setAlignment(Qt.AlignCenter)
+            label.setStyleSheet(
+                "color: #9E9E9E; font-style: italic; padding-top: 10px;")
+            placeholder_layout.addWidget(label)
+            placeholder_layout.addStretch(1)
+            layout.addWidget(self.provider_placeholder)
+
+            start_provider_warmup()
+            self._provider_poll_timer = QTimer(self)
+            self._provider_poll_timer.setInterval(150)
+            self._provider_poll_timer.timeout.connect(
+                self._try_build_provider_widget)
+            self._provider_poll_timer.start()
 
         self.mode_model_widget = ModeModelWidget(self.settings_manager)
         layout.addWidget(self.mode_model_widget)
+        if self.llm_provider_widget is None:
+            # The Vision model selector lists models of configured providers,
+            # so it has nothing to show until the provider UI exists.
+            self.mode_model_widget.setVisible(False)
 
         return group
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._update_busy_layout()
+
+    def _update_busy_layout(self):
+        """Sizes the loading state relative to the window (spinner ≈ 15% h)."""
+        spinner = getattr(self, "provider_spinner", None)
+        if spinner is None:
+            return
+        side = max(32, int(self.height() * 0.15))
+        spinner.setFixedSize(side, side)
+        placeholder = getattr(self, "provider_placeholder", None)
+        if placeholder is not None:
+            placeholder.setMinimumHeight(max(160, int(self.height() * 0.6)))
+
+    def _try_build_provider_widget(self):
+        """Swaps the busy placeholder for the real provider widget once ready."""
+        if self.llm_provider_widget is not None or not providers_ready():
+            return
+        self._provider_poll_timer.stop()
+        widget = LLMProviderWidget(self.settings_manager)
+        layout = self.general_provider_layout
+        index = layout.indexOf(self.provider_placeholder)
+        layout.insertWidget(index, widget)
+        layout.removeWidget(self.provider_placeholder)
+        self.provider_spinner.stop()
+        self.provider_spinner = None
+        self.provider_placeholder.deleteLater()
+        self.provider_placeholder = None
+        self.llm_provider_widget = widget
+        self.mode_model_widget.setVisible(True)
 
     def _create_hotkeys_section(self):
         """Creates the Hotkeys settings section."""
