@@ -25,7 +25,8 @@ def _redact_secrets(value):
     """Recursively masks secret fields so they never end up in logs."""
     if isinstance(value, dict):
         return {
-            k: ("********" if any(s in k.lower() for s in _SENSITIVE_KEYS)
+            k: ("********" if (any(s in k.lower() for s in _SENSITIVE_KEYS)
+                               or k.lower() in ("headers", "custom_headers"))
                 else _redact_secrets(v))
             for k, v in value.items()
         }
@@ -118,6 +119,9 @@ class SettingsManager(QObject):
         "recent_projects": [],
         "active_provider": "google_gemini", # A sensible default
         "llm_providers": _llm_providers_defaults,
+        # User-defined OpenAI-compatible endpoints (see llm/custom_providers.py).
+        # Shape: [{id, name, base_url, models: [{id, name}], headers: {name: value}}]
+        "custom_providers": [],
         # Dedicated Vision (computer-use) model. Applied session-only when
         # switching to Vision mode IF the active model cannot do computer use.
         # Shape: {"vision": {"provider": ..., "model": ...}} — empty means
@@ -223,12 +227,92 @@ class SettingsManager(QObject):
         self.SETTINGS_FILE = settings_file
         self._settings = self._load_settings()
         self._initialize_app_paths()
+        # Register user-defined providers before anything asks for defaults,
+        # display names or model lists.
+        try:
+            self.sync_custom_providers(save=False)
+        except Exception:
+            logger.exception("Failed to register custom providers at startup.")
         # Ensure the active provider has its defaults loaded lazily
         active = self._settings.get('active_provider', self.DEFAULTS.get('active_provider'))
         try:
             self._ensure_provider_defaults(active)
         except Exception:
             logger.debug(f"Failed to load provider defaults for '{active}' at startup; will load on demand.")
+
+    def sync_custom_providers(self, save: bool = False, delete_keys: bool = True):
+        """Registers user-defined providers and keeps their settings in sync.
+
+        Called at startup and by the settings UI after add/edit/delete. The
+        definitions themselves are the source of truth for display name, base
+        URL, models and headers; ``llm_providers`` keeps the per-provider
+        runtime settings (selected model, API key, max tokens).
+
+        ``delete_keys=False`` keeps keyring entries for removed providers, so
+        the Settings window can stage a deletion and still restore it when the
+        user cancels instead of pressing OK.
+        """
+        from llm.custom_providers import (
+            provider_is_configured,
+            register_custom_providers,
+        )
+
+        definitions = self._settings.get("custom_providers")
+        if not isinstance(definitions, list):
+            definitions = []
+        normalized, classes, removed = register_custom_providers(definitions)
+        self._settings["custom_providers"] = normalized
+
+        providers = self._settings.setdefault("llm_providers", {})
+        for provider_id in removed:
+            providers.pop(provider_id, None)
+            self.PROVIDER_CONFIG.pop(provider_id, None)
+            self._llm_providers_defaults.pop(provider_id, None)
+            if delete_keys:
+                self.delete_provider_key(provider_id)
+            if self._settings.get("active_provider") == provider_id:
+                self._settings["active_provider"] = next(
+                    (pid for pid in providers
+                     if provider_is_configured(self._settings, pid)), "")
+
+        for provider_id, provider_class in classes.items():
+            config = provider_class.get_provider_config() or {}
+            self.PROVIDER_CONFIG[provider_id] = {
+                "display_name": provider_class.get_display_name(),
+                "models": list(config.get("models") or []),
+                "model_labels": dict(config.get("model_labels") or {}),
+            }
+            defaults = provider_class.get_default_settings() or {}
+            self._llm_providers_defaults[provider_id] = defaults
+            entry = providers.get(provider_id)
+            if not isinstance(entry, dict):
+                entry = {}
+                providers[provider_id] = entry
+            for key, value in defaults.items():
+                entry.setdefault(key, value)
+            models = config.get("models") or []
+            if entry.get("model") not in models:
+                entry["model"] = models[0] if models else ""
+
+        self._reload_model_config()
+        if save:
+            self.save()
+
+    def delete_provider_key(self, provider_id: str):
+        """Removes a provider's API key from the OS keyring (best effort)."""
+        try:
+            keyring.delete_password(KEYRING_SERVICE_NAME, provider_id)
+        except Exception:
+            pass
+
+    def _reload_model_config(self):
+        """Rebuilds the merged provider/model config with the new registry."""
+        try:
+            from llm.model_config_manager import ModelConfigManager
+            if ModelConfigManager.PROVIDER_CONFIG is not None:
+                ModelConfigManager._load_and_merge_configs()
+        except Exception as e:
+            logger.warning(f"Could not refresh model configuration: {e}")
 
     def _initialize_app_paths(self):
         """

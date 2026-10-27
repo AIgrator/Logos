@@ -15,6 +15,7 @@ from PIL import Image
 
 from brain import Brain
 from build_info import get_build_id
+from llm.custom_providers import provider_is_configured
 from llm.error_formatter import CONTINUE_LINK
 from llm.llm_worker import LLMWorker
 from llm.mode_capabilities import ModeCapabilities, SUBSECTIONS
@@ -487,10 +488,8 @@ class AppController(QObject):
         """Checks if the active provider has a configured API key (from keyring) and shows a message if not."""
         try:
             active_provider_name = self.settings.get("active_provider")
-            providers = self.settings.get("llm_providers", {})
-            provider_config = providers.get(active_provider_name, {})
 
-            if not provider_config.get("api_key"):
+            if not provider_is_configured(self.settings, active_provider_name):
                 self.ui.add_message(
                     "<i>Welcome to Logos AI Assistant! To get started, please go to <b>Settings</b>, select an AI provider, and enter your API key.</i>",
                     force_scroll=True
@@ -2062,9 +2061,8 @@ class AppController(QObject):
     def handle_user_input(self, user_text):
         if not self.llm_worker.provider:
             active = (self.settings.get("active_provider") or "")
-            providers = self.settings.get("llm_providers", {}) or {}
-            has_key = bool((providers.get(active) or {}).get("api_key"))
-            if active and has_key:
+            configured = provider_is_configured(self.settings, active)
+            if active and configured:
                 # Configured, but the background thread has not finished yet.
                 self.ui.add_message(
                     "<i>The AI provider is still initializing, please wait a few seconds and send again.</i>",
@@ -2696,9 +2694,9 @@ class AppController(QObject):
         all_settings = self.settings_manager.all()
         user_providers = all_settings.get("llm_providers", {})
         target = user_providers.get(provider_id) or {}
-        if not target.get("api_key"):
+        if not provider_is_configured(all_settings, provider_id):
             self.ui.add_message(
-                f"<i>Cannot switch to {provider_id}: no API key configured.</i>",
+                f"<i>Cannot switch to {provider_id}: provider is not configured.</i>",
                 force_scroll=True,
             )
             return
@@ -2778,10 +2776,9 @@ class AppController(QObject):
                         force_scroll=True,
                     )
                 return
-            target = user_providers.get(pid) or {}
-            if not target.get("api_key"):
+            if not provider_is_configured(all_settings, pid):
                 self.ui.add_message(
-                    f"<i>The Vision model ({pid}) has no API key configured.</i>",
+                    f"<i>The Vision model ({pid}) is not configured.</i>",
                     force_scroll=True,
                 )
                 return

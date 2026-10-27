@@ -121,6 +121,12 @@ class ModeCapabilities:
                 return model_key(provider_id, model_id) in cls._explicit[VISION]
             return cls._fallback_vision(provider_id, model_id)
         # general (chat/terminal/browser)
+        # User-defined providers are not in models.json, so the explicit
+        # capability list can never contain them; they are OpenAI-compatible
+        # chat models and belong to the general group by construction.
+        from llm.custom_providers import is_custom_provider
+        if is_custom_provider(provider_id):
+            return True
         if cls._explicit is not None and GENERAL in cls._explicit:
             return model_key(provider_id, model_id) in cls._explicit[GENERAL]
         return True

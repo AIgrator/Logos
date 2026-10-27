@@ -209,6 +209,41 @@ class LLMProviderWidget(QWidget):
         self.update_models_button.setEnabled(True)
         self.update_models_button.setText("Update Models")
 
+    def rebuild_provider_pages(self):
+        """Recreates pages after the provider registry changed.
+
+        Unsaved edits from the current pages are kept and laid over the stored
+        settings, so adding or deleting a custom provider never wipes values
+        the user already typed but has not saved yet.
+        """
+        unsaved = self.get_all_settings()[1] if self.widgets else {}
+        current_id = self.provider_combo.currentData()
+        stored = self.settings_manager.get("llm_providers", {}) or {}
+
+        self.provider_combo.blockSignals(True)
+        try:
+            self.provider_combo.clear()
+            while self.provider_stack.count():
+                page = self.provider_stack.widget(0)
+                self.provider_stack.removeWidget(page)
+                page.deleteLater()
+            self.widgets.clear()
+            self.provider_schemas.clear()
+            self._create_provider_ui_pages()
+
+            for provider_id in self.widgets:
+                values = dict(stored.get(provider_id) or {})
+                values.update(unsaved.get(provider_id) or {})
+                self.load_settings(provider_id, values)
+
+            index = self.provider_combo.findData(current_id)
+            self.provider_combo.setCurrentIndex(index if index != -1 else 0)
+        finally:
+            self.provider_combo.blockSignals(False)
+
+        self.current_provider_id = None
+        self._on_provider_changed(self.provider_combo.currentIndex())
+
     def repopulate_all_dropdowns(self):
         """Repopulates all model dropdowns with fresh data."""
         for provider_id, widgets in self.widgets.items():

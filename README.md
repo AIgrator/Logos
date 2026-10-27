@@ -103,6 +103,10 @@ Logos supports a wide range of models from leading AI providers. You can easily 
 *   **OpenAI**
 *   **xAI (Grok)**
 *   **Hugging Face** (via [Inference Providers](https://huggingface.co/docs/inference-providers) router)
+*   **Custom OpenAI-compatible endpoints** (local servers or self-hosted gateways)
+
+> [!NOTE]
+> **Custom providers.** Settings → **Custom Providers** lets you add any server that speaks the OpenAI Chat Completions API — LM Studio, Ollama, llama.cpp, vLLM, or a gateway. Enter a provider ID, display name, base URL (for example `http://127.0.0.1:1234/v1`) and the model IDs to expose; the API key and extra headers are optional. Custom providers work in Chat, Terminal and Browser modes. They are not offered in Vision mode, which requires a model with native Computer Use support (OpenAI, Anthropic or Google).
 
 > [!NOTE]
 > **Hugging Face billing.** The HF provider routes requests through `router.huggingface.co` to third-party inference partners. Model names use the format `Org/Model` (auto-routing) or `Org/Model:provider` (e.g. `Qwen/Qwen3.8-27B:novita`, `mistralai/Mistral-7B-Instruct-v0.2:featherless-ai`). Routed requests are billed to your Hugging Face account: free accounts receive no monthly credits, so a paid credit balance or PRO subscription is required — otherwise the router answers `402 Payment Required`. The provider is fully wired into the app (streaming, retries, error cards), but free server-side chat is not available.

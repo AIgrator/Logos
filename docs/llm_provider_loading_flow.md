@@ -26,6 +26,7 @@ main.py
   ├─ ModelConfigManager.initialize()
   │    └─ merge cached models.json into the provider config
   ├─ settings_manager = SettingsManager()
+  │    ├─ sync custom providers from settings.json (register, re-merge models)
   │    └─ ensure defaults for the active provider (imports that one module)
   ├─ AppController()
   │    ├─ LLMWorker(...)
@@ -130,6 +131,48 @@ modules are not involved.
 
 ---
 
+## Custom OpenAI-compatible providers
+
+Besides the built-in modules, users can define providers at runtime from
+Settings → **Custom Providers**. Definitions are stored in
+`settings.json["custom_providers"]` (id, display name, base URL, model list,
+optional headers); per-provider runtime settings (`model`, `api_key`,
+`max_tokens`, `require_json_output`) live in `llm_providers[id]` like any other
+provider.
+
+`SettingsManager.sync_custom_providers()` runs during `SettingsManager.__init__`
+(before `_ensure_provider_defaults`) and after every Settings apply:
+
+1. Normalizes definitions with `src/llm/custom_providers.py`
+   (`normalize_definition`); invalid entries are dropped, and ids must match
+   `[a-z0-9_-]{1,32}` and not collide with a built-in provider.
+2. Calls `register_custom_providers()`, which builds a
+   `CustomOpenAIProvider` subclass per definition and registers it in
+   `PROVIDERS` / `SettingsManager.PROVIDER_CONFIG`. Stale custom ids are
+   removed from both registries.
+3. Re-runs `ModelConfigManager._load_and_merge_configs()` so the custom
+   provider's display name, models and label map appear in the Settings page
+   and the model-switch popup without a restart.
+
+`CustomOpenAIProvider` speaks the OpenAI **Chat Completions** protocol through
+`requests`: Bearer auth only when a key is set, user headers applied last,
+images sent as `image_url` data URLs, forced function tools from
+`response_formats.json` in structured modes, and SSE streaming for Chat. Custom
+ids never pass through the lazy discovery and are not touched by the background
+warm-up, which only imports built-in modules.
+
+Custom providers are general-purpose only. `ModeCapabilities` rejects them for
+Vision (no native Computer Use), even though they bypass the explicit `general`
+model list that `models.json` publishes for built-ins.
+
+Readiness uses `provider_is_configured()` instead of a raw API-key check:
+built-in providers still require a key, while a registered custom provider is
+usable without one, which is what local servers expect. The worker, controller
+startup checks, model-switch popup and Vision model selector all go through
+this helper.
+
+---
+
 ## Phase 2 — active provider import
 
 Entry point: `LLMWorker.prepare_provider()`, connected to
@@ -146,7 +189,9 @@ def prepare_provider(self):
 `_create_llm_provider()`:
 
 1. Reads `active_provider` and that provider's saved settings.
-2. Refuses to instantiate if no API key is present.
+2. Refuses to instantiate unless `provider_is_configured()` accepts the
+   provider: built-in providers need an API key, while registered custom
+   providers may be keyless (local servers).
 3. Calls `get_provider_class(active_provider)`. For a proxy this imports the
    module on first use, finds the concrete `BaseLLMProvider` subclass, and
    replaces the proxy's cached class; `PROVIDERS` itself still holds the proxy.
@@ -171,6 +216,12 @@ has no configured providers to list. A 150 ms timer waits for
 (imports are already done, so this takes well under a second) and reveals the
 Vision selector. Saving while the spinner is still shown keeps the stored
 `active_provider` and `llm_providers` values instead of overwriting them.
+
+The Custom Providers page applies additions, edits and deletions in memory
+immediately (registration, provider pages, model lists), while keeping a
+snapshot of the affected settings. Cancel and window close restore that
+snapshot; Save persists `custom_providers` and only then removes keyring keys
+belonging to deleted providers.
 
 ---
 

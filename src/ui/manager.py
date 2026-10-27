@@ -16,6 +16,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QListWidget, QListWidg
                                QMessageBox, QMenu, QPushButton, QSizeGrip,
                                QTextEdit, QVBoxLayout, QWidget)
 
+from llm.custom_providers import provider_is_configured
 from llm.model_config_manager import ModelConfigManager
 from llm.mode_capabilities import ModeCapabilities
 from states import ControllerState
@@ -1046,10 +1047,10 @@ class UIManager(QWidget):
         current_pid = self.settings_manager.get("active_provider")
         current_model = (user_providers.get(current_pid) or {}).get("model")
         for pid, info in static_config.items():
-            user_cfg = user_providers.get(pid) or {}
-            if not user_cfg.get("api_key"):
+            if not provider_is_configured(self.settings_manager.all(), pid):
                 continue
             display = info.get("display_name") or pid.replace("_", " ").replace("-", " ").title()
+            model_labels = info.get("model_labels") or {}
             if pid == "openrouter":
                 groups = info.get("models_by_provider") or {}
                 group_entries = []
@@ -1088,7 +1089,7 @@ class UIManager(QWidget):
                     continue
                 sections.append({"kind": "header", "label": display})
                 for model_name in models:
-                    sections.append({"kind": "model", "label": model_name,
+                    sections.append({"kind": "model", "label": model_labels.get(model_name, model_name),
                                       "provider_id": pid, "model_id": model_name,
                                       "provider_display": display,
                                       "is_current": (pid == current_pid and model_name == current_model)})

@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QGroupBox,
 )
 
+from llm.custom_providers import provider_is_configured
 from llm.model_config_manager import ModelConfigManager
 from llm.mode_capabilities import ModeCapabilities, SUBSECTIONS, SUBSECTION_LABELS
 
@@ -49,8 +50,7 @@ class ModeModelWidget(QGroupBox):
     # --- data helpers -----------------------------------------------------
 
     def _provider_has_key(self, provider_id: str) -> bool:
-        providers = self.settings_manager.get("llm_providers", {}) or {}
-        return bool((providers.get(provider_id) or {}).get("api_key"))
+        return provider_is_configured(self.settings_manager.all(), provider_id)
 
     def _models_for_subsection(self, subsection: str) -> list:
         """Returns [(provider_id, stored_model_id, label), ...] for a subsection."""

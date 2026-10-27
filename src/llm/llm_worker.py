@@ -65,9 +65,11 @@ class LLMWorker(QObject):
             logging.error(f"Configuration for active provider '{active_provider_name}' not found.")
             return None
 
-        # Graceful check for API key before proceeding
-        if not user_provider_config.get("api_key"):
-            logging.warning(f"API key for active provider '{active_provider_name}' is missing. Cannot create provider.")
+        # Built-in providers need an API key; custom providers may be
+        # keyless local servers, so let the definition decide.
+        from llm.custom_providers import provider_is_configured
+        if not provider_is_configured(settings, active_provider_name):
+            logging.warning(f"Provider '{active_provider_name}' is not configured. Cannot create provider.")
             return None
 
         from llm import get_provider_class
