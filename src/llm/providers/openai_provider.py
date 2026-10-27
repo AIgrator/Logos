@@ -432,6 +432,22 @@ class OpenAIProvider(BaseLLMProvider):
 
         return {"input": input_items, "instructions": instructions, "tools": [{"type": "web_search_preview"}]}
 
+    def _supports_reasoning_summary(self) -> bool:
+        model = (self.model or "").lower()
+        return model.startswith(("gpt-5", "gpt-6", "o1", "o3", "o4", "codex"))
+
+    @staticmethod
+    def _extract_reasoning_summary(response) -> str:
+        parts = []
+        for item in getattr(response, "output", None) or []:
+            if getattr(item, "type", None) != "reasoning":
+                continue
+            for summary in getattr(item, "summary", None) or []:
+                text = getattr(summary, "text", None)
+                if text:
+                    parts.append(text.strip())
+        return "\n\n".join(part for part in parts if part)
+
     def _execute_get_response(self, prompt: str, attachments: list = None, system_prompt: str = None, history: list = None, schema_name: str | None = None):
         # Prepare Respones API input items and instructions
         input_items, instructions = self._prepare_messages(prompt, attachments, system_prompt, history)
@@ -441,6 +457,9 @@ class OpenAIProvider(BaseLLMProvider):
             "input": input_items,
             "instructions": instructions or "",
         }
+
+        if self._supports_reasoning_summary():
+            request_body["reasoning"] = {"summary": "auto"}
 
         use_forced_tool = schema_name and self.require_json_output
 
@@ -476,6 +495,7 @@ class OpenAIProvider(BaseLLMProvider):
             response = self.client.responses.create(**request_body)
             self._record_usage(getattr(response, "usage", None))
             final_text = getattr(response, "output_text", "") or ""
+            reasoning_summary = self._extract_reasoning_summary(response)
 
             # Parse possible function/tool calls in the output
             tool_call_result = None
@@ -522,9 +542,9 @@ class OpenAIProvider(BaseLLMProvider):
                             logger.exception(f"Failed to parse tool_call arguments for '{tool_name}': {args_field}")
 
             if tool_call_result:
-                return {"text": final_text, "tool_calls": tool_call_result}
+                return {"text": final_text, "tool_calls": tool_call_result, "reasoning": reasoning_summary}
             else:
-                return {"text": final_text, "tool_calls": []}
+                return {"text": final_text, "tool_calls": [], "reasoning": reasoning_summary}
 
         except AuthenticationError as e:
             raise FatalError(f"OpenAI authentication error: {e}") from e

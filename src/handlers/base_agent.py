@@ -750,13 +750,27 @@ class BaseAgentHandler:
         if callable(schedule):
             schedule()
 
-    def _add_replay_result(self, text, title, status: str = ""):
-        """Render a persisted tool/job result as a collapsed code block."""
+    _RESULT_PREFIXES = (
+        "**Tool Result:** Error: ",
+        "**Tool Result:**\n",
+        "**Tool Result:** ",
+        "**Error:** ",
+        "**Error:**\n",
+    )
+
+    def _add_result_card(self, text, title, status: str = ""):
+        """Render a tool result as the shared collapsible card.
+
+        Live results and replayed journal events use the same grammar so a
+        failure never degrades to raw italic markdown in one mode.
+        """
         text = str(text or "(no output)")
-        if text.startswith("**Tool Result:**\n"):
-            text = text[len("**Tool Result:**\n"):].strip()
-            if text.startswith("```") and text.endswith("```"):
-                text = text[3:-3].strip("\n")
+        for prefix in self._RESULT_PREFIXES:
+            if text.startswith(prefix):
+                text = text[len(prefix):].strip()
+                break
+        if text.startswith("```") and text.endswith("```"):
+            text = text[3:-3].strip("\n")
         shown = text
         if len(shown) > 30000:
             shown = shown[:30000] + (
@@ -766,8 +780,8 @@ class BaseAgentHandler:
             "title": title,
             "content": shown,
             "plain_content": text,
-            "copy_payloads": {"output": text},
-            "state": "collapsed",
+            # Failures open by default so the error is not hidden behind a click.
+            "state": "expanded" if status == "error" else "collapsed",
         }
         if status == "error":
             theme = getattr(self.controller, "theme_manager", None)
@@ -795,7 +809,7 @@ class BaseAgentHandler:
                          f"{status or 'result'}")
             else:
                 title = f"{event.get('name') or 'Tool'} · {status or 'result'}"
-            self._add_replay_result(event_text(event), title, status)
+            self._add_result_card(event_text(event), title, status)
             return True
         return False
 
@@ -853,6 +867,9 @@ class BaseAgentHandler:
             result_text = f"**Tool Result:** Error: {e}"
         if result_text is None:
             return  # async heir continues the loop itself on completion
+        if result_text.startswith("**Tool Result:** Error:"):
+            self._add_result_card(
+                result_text, f"{action_name} · error", "error")
         self.record_tool_result(result_text)
         self._continue_loop(result_text)
 

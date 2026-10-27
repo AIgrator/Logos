@@ -117,8 +117,18 @@ structured object (terminal/browser tool envelopes, vision plans on legacy
 paths). Return:
 
 ```python
-{"text": "...", "tool_calls": {"type": "<schema_name>", "payload": {...}}}
+{"text": "...", "tool_calls": {"type": "<schema_name>", "payload": {...}},
+ "reasoning": "provider-produced thought summary"}
 ```
+
+`reasoning` is optional. When a provider exposes thought summaries for
+non-streaming calls (OpenAI reasoning summaries, Gemini thought parts, xAI
+`reasoning_content`, OpenRouter `reasoning`/`reasoning_details`, HuggingFace
+`reasoning_content`), put that text here: the worker passes it to the agent,
+which renders it as the collapsed `Reasoning` block and journals a `reasoning`
+event. Leave it empty (or omit the key) when the API exposes no summary.
+Anthropic forced tool calls do not return thinking blocks, so that path has no
+summary to offer.
 
 Return `{"text": "...", "tool_calls": {}}` when the model produced no call.
 With `require_json_output=True`, `BaseLLMProvider.get_response()` replaces an

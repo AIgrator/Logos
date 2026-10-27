@@ -27,7 +27,7 @@ def _with_dialog_note(mgr, text: str) -> str:
         "description": "Navigates the controlled browser to the given URL and waits for the page to load.",
         "arguments": {
             "description": {"type": "STRING", "description": "What this navigation is for.", "required": True},
-            "url": {"type": "STRING", "description": "Full URL including https://.", "required": True},
+            "url": {"type": "STRING", "description": "Full URL including https://. A file:// URL works only for a file inside the project directory.", "required": True},
         },
     },
     flags={"platform": "any", "mode": "browser"},

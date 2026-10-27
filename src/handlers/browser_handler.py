@@ -317,6 +317,7 @@ class BrowserHandler(BaseAgentHandler):
             allowed_domains=browser_settings.get("allowed_domains") or [],
             block_private_networks=_setting_bool(
                 browser_settings, "block_private_networks", True),
+            local_file_root=getattr(self.computer, "working_directory", None),
         )
         self.computer.browser_manager = mgr
         # The browser_* tools also look for a factory on the Computer.
@@ -501,16 +502,13 @@ class BrowserHandler(BaseAgentHandler):
         logging.info(f"BrowserHandler: ticket {ticket} ({action_name}) result received, continuing loop.")
         if not ok:
             error_msg = f"**Tool Result:** Error: {text}"
-            self.ui.add_message(f"<i>{error_msg}</i>")
+            self._add_result_card(
+                error_msg, f"{action_name} · error", "error")
             self.record_tool_result(error_msg, status="error", name=action_name)
             self._continue_loop(error_msg)
             return
         output = text or "(ok, no output)"
-        self.ui.add_message({
-            'type': 'collapsible',
-            'title': f"Browser Result: {action_name}",
-            'content': output[-4000:],
-        })
+        self._add_result_card(output, f"{action_name} · ok")
         if action_name in _UNTRUSTED_RESULT_TOOLS:
             result_text = (
                 "**Tool Result:**\n<untrusted_page_content>\n"
@@ -530,7 +528,8 @@ class BrowserHandler(BaseAgentHandler):
         self._tool_in_flight = False
         logging.info(f"BrowserHandler: ticket {ticket} ({self._pending_action_name}) error received, continuing loop.")
         error_msg = f"**Tool Result:** Error: {error_message}"
-        self.ui.add_message(f"<i>{error_msg}</i>")
+        self._add_result_card(
+            error_msg, f"{self._pending_action_name} · error", "error")
         self.record_tool_result(
             error_msg, status="error", name=self._pending_action_name)
         self._continue_loop(error_msg)

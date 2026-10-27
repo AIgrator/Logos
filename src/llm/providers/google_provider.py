@@ -625,6 +625,25 @@ class GoogleProvider(BaseLLMProvider):
                 return info["strict_schema"]
         return None
 
+    def _supports_thinking_summary(self) -> bool:
+        model = (self.model or "").lower()
+        if model.startswith("models/"):
+            model = model[len("models/"):]
+        return model.startswith(("gemini-2.5", "gemini-3", "gemini-4"))
+
+    @staticmethod
+    def _split_thought_parts(response) -> tuple[str, str]:
+        answer_parts = []
+        thought_parts = []
+        for part in getattr(response, "parts", None) or []:
+            if not part.text:
+                continue
+            if getattr(part, "thought", False):
+                thought_parts.append(part.text.strip())
+            else:
+                answer_parts.append(part.text)
+        return "".join(answer_parts), "\n\n".join(part for part in thought_parts if part)
+
     def _execute_get_response(self, prompt: str, attachments: list = None, system_prompt: str = None, history: list = None, schema_name: str = None):
         """
         Sends a non-streaming request to the Gemini API.
@@ -633,9 +652,10 @@ class GoogleProvider(BaseLLMProvider):
         2. False: Uses the legacy method of parsing JSON from a text response.
         """
         use_tool_calling = self.require_json_output and schema_name is not None
+        thinking_summary = self._supports_thinking_summary()
 
         generation_config_kwargs = {
-            'max_output_tokens': 8192,
+            'max_output_tokens': 16384 if thinking_summary else 8192,
             'safety_settings': [
                 {"category": genai.types.HarmCategory.HARM_CATEGORY_HARASSMENT, "threshold": genai.types.HarmBlockThreshold.BLOCK_NONE},
                 {"category": genai.types.HarmCategory.HARM_CATEGORY_HATE_SPEECH, "threshold": genai.types.HarmBlockThreshold.BLOCK_NONE},
@@ -646,6 +666,10 @@ class GoogleProvider(BaseLLMProvider):
 
         if system_prompt:
             generation_config_kwargs['system_instruction'] = system_prompt
+
+        if thinking_summary:
+            generation_config_kwargs['thinking_config'] = genai.types.ThinkingConfig(
+                include_thoughts=True)
 
         if use_tool_calling:
             logging.info("Gemini Provider: Using modern structured output with response_mime_type.")
@@ -682,9 +706,8 @@ class GoogleProvider(BaseLLMProvider):
                 reason = response.prompt_feedback.block_reason.name
                 raise FatalError(f"Response was blocked by safety filters: {reason}")
 
-            full_text = "".join(part.text for part in response.parts if part.text)
+            full_text, reasoning_summary = self._split_thought_parts(response)
 
-            # --- Response Handling ---
             if use_tool_calling:
                 if full_text:
                     try:
@@ -695,18 +718,18 @@ class GoogleProvider(BaseLLMProvider):
                         parsed_object = repair_json_string(full_text)
                         if not parsed_object:
                             raise FatalError(f"Failed to parse and repair JSON from Gemini. Original error: {e}") from e
-                    return {"text": full_text, "tool_calls": parsed_object}
+                    return {"text": full_text, "tool_calls": parsed_object, "reasoning": reasoning_summary}
                 else:
                     logging.warning("Structured output was requested, but LLM returned an empty text response.")
-                    return {"text": "", "tool_calls": []}
+                    return {"text": "", "tool_calls": [], "reasoning": reasoning_summary}
             else:
                 # Legacy path response handling
                 if full_text:
                     repaired_object = repair_json_string(full_text)
-                    return {"text": full_text, "tool_calls": repaired_object or []}
+                    return {"text": full_text, "tool_calls": repaired_object or [], "reasoning": reasoning_summary}
                 else:
                     logging.warning("Gemini legacy response was empty.")
-                    return {"text": "", "tool_calls": []}
+                    return {"text": "", "tool_calls": [], "reasoning": reasoning_summary}
 
         except google_exceptions.InvalidArgument as e:
             raise FatalError(f"Google API Invalid Argument: {e}") from e

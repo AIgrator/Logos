@@ -215,6 +215,16 @@ class OpenRouterProvider(BaseLLMProvider):
 
         return messages
 
+    @staticmethod
+    def _reasoning_text(message: dict) -> str:
+        summary = message.get("reasoning") or ""
+        if summary:
+            return summary
+        details = message.get("reasoning_details") or []
+        return "\n\n".join(
+            detail.get("text") for detail in details
+            if isinstance(detail, dict) and detail.get("text"))
+
     def _execute_get_response(self, prompt: str, attachments: list = None, system_prompt: str = None, history: list = None, schema_name: str | None = None):
         from ..llm_parsing import repair_json_string
         headers = {
@@ -222,7 +232,8 @@ class OpenRouterProvider(BaseLLMProvider):
             "HTTP-Referer": "https://github.com/AIgrator/Logos", "X-Title": "Logos"
         }
         messages = self._prepare_messages(prompt, attachments, system_prompt, history)
-        request_body = {"model": self.model, "messages": messages}
+        request_body = {"model": self.model, "messages": messages,
+                        "reasoning": {"enabled": True}}
 
         use_forced_tool = schema_name and self.require_json_output
 
@@ -288,6 +299,7 @@ class OpenRouterProvider(BaseLLMProvider):
             self._record_usage(response_data.get("usage"))
             message = response_data.get("choices", [{}])[0].get("message", {})
             text_content = message.get("content") or ""
+            reasoning_summary = self._reasoning_text(message)
             raw_tool_calls = message.get("tool_calls")
 
             if raw_tool_calls:
@@ -301,7 +313,7 @@ class OpenRouterProvider(BaseLLMProvider):
                         args = json.loads(args_str)
                         if 'payload' in args:
                             reconstructed_object = {"type": name, "payload": args['payload']}
-                            return {"text": text_content, "tool_calls": reconstructed_object}
+                            return {"text": text_content, "tool_calls": reconstructed_object, "reasoning": reasoning_summary}
                         else:
                             logging.warning(f"Tool call '{name}' received without a 'payload'. Arguments: {args_str}")
 
@@ -312,17 +324,17 @@ class OpenRouterProvider(BaseLLMProvider):
                         if repaired_args and 'payload' in repaired_args:
                             logging.info(f"Successfully repaired arguments for tool call '{name}'.")
                             reconstructed_object = {"type": name, "payload": repaired_args['payload']}
-                            return {"text": text_content, "tool_calls": reconstructed_object}
+                            return {"text": text_content, "tool_calls": reconstructed_object, "reasoning": reasoning_summary}
                         else:
                             logging.error(f"Could not repair arguments for tool call '{name}'. Skipping.")
                             continue # Move to the next tool call
 
-                return {"text": text_content, "tool_calls": []}
+                return {"text": text_content, "tool_calls": [], "reasoning": reasoning_summary}
             elif text_content:
                 repaired = repair_json_string(text_content)
-                return {"text": text_content, "tool_calls": repaired or []}
+                return {"text": text_content, "tool_calls": repaired or [], "reasoning": reasoning_summary}
             else:
-                return {"text": "", "tool_calls": []}
+                return {"text": "", "tool_calls": [], "reasoning": reasoning_summary}
 
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code

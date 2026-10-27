@@ -223,6 +223,13 @@ class XAIProvider(BaseLLMProvider):
         messages.append({"role": "user", "content": user_content_parts})
         return messages
 
+    @staticmethod
+    def _reasoning_text(message) -> str:
+        reasoning = getattr(message, "reasoning_content", None) or ""
+        if reasoning:
+            return reasoning
+        return (getattr(message, "model_extra", None) or {}).get("reasoning_content") or ""
+
     def _execute_get_response(self, prompt: str, attachments: list = None, system_prompt: str = None, history: list = None, schema_name: str | None = None):
         messages = self._prepare_messages(prompt, attachments, system_prompt, history)
 
@@ -250,6 +257,7 @@ class XAIProvider(BaseLLMProvider):
             self._record_usage(getattr(response, "usage", None))
             message = response.choices[0].message
             text_content = message.content or ""
+            reasoning_summary = self._reasoning_text(message)
             raw_tool_calls = message.tool_calls
 
             if raw_tool_calls:
@@ -262,15 +270,15 @@ class XAIProvider(BaseLLMProvider):
                         args = json.loads(args_str)
                         if 'payload' in args:
                             reconstructed_object = {"type": name, "payload": args['payload']}
-                            return {"text": text_content, "tool_calls": reconstructed_object}
+                            return {"text": text_content, "tool_calls": reconstructed_object, "reasoning": reasoning_summary}
                         else:
                             logger.warning(f"Tool call '{name}' received without a 'payload'. Arguments: {args_str}")
                     except json.JSONDecodeError:
                         logger.error(f"Failed to decode tool call arguments for '{name}': {args_str}")
-                return {"text": text_content, "tool_calls": []}
+                return {"text": text_content, "tool_calls": [], "reasoning": reasoning_summary}
             else:
                 # Fallback for non-tool responses
-                return {"text": text_content, "tool_calls": []}
+                return {"text": text_content, "tool_calls": [], "reasoning": reasoning_summary}
 
         except AuthenticationError as e:
             raise FatalError(f"XAI authentication error: {e}") from e

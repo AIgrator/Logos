@@ -489,6 +489,7 @@ class LLMWorker(QObject):
 
                     validated_payload, validation_error = validate_object(object_to_validate, schema_name)
                     final_schema_name = schema_name
+                    reasoning_text = response_dict.get("reasoning") or ""
 
                     # --- SAFE PRE-CORRECTION REPAIR (any schema) ---
                     # validate_object already tried the response as-is; here we
@@ -564,6 +565,7 @@ class LLMWorker(QObject):
                             return
 
                         logging.info("Self-correction successful! Proceeding with the corrected object.")
+                        reasoning_text = correction_response_dict.get("reasoning") or reasoning_text
 
                     log_payload = {
                         "timestamp": datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
@@ -577,7 +579,9 @@ class LLMWorker(QObject):
 
                     payload = validated_payload.get('payload', {}) if final_schema_name in ('terminal_tool_code', 'browser_tool_code') else validated_payload
 
-                    self.structured_response_received.emit("", payload, final_schema_name)
+                    self.structured_response_received.emit(
+                        reasoning_text,
+                        payload, final_schema_name)
                     return
 
                 # --- Streaming for Chat ---

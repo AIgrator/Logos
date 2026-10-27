@@ -449,8 +449,9 @@ model-facing представление, не меняя журнал, UI и и�
 ## 8. Вне scope
 
 - стоимость токенов;
-- захват нативного reasoning провайдеров (Anthropic thinking, Google thought,
-  OpenAI reasoning) — сейчас журналируется только структурированное поле;
+- live-стриминг thought summaries в Chat (агентские шаги получают summary
+  вместе с полным ответом); у Anthropic принудительный tool_choice не
+  возвращает thinking-блок, поэтому для его structured-вызовов summary нет;
 - глобальная память между проектами;
 - кэш индекса и `artifacts/`.
 

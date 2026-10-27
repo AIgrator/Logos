@@ -42,7 +42,9 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `session` header (`schema_version`, `id`, `mode`, optional `title`, optional
   `objective`) and later
   lines are typed events (`message`, `reasoning`, `tool_call`, `tool_result`,
-  `job_result`, `usage`, `error`). `message` events may carry an `attachments`
+  `job_result`, `usage`, `error`). `reasoning` events carry the model's stated
+  rationale and, for agent steps, the provider's thought summary when the API
+  exposes one. `message` events may carry an `attachments`
   list (name, kind, path, size, SHA-256, stored flag/status). `usage` events
   carry normalized provider token
   counts

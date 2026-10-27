@@ -10,9 +10,12 @@ targets and masks secrets in logs/prompts. User-facing approvals for risky
 actions live in ``browser_handler`` / ``src/handlers/tool_exec_worker.py``.
 """
 import ipaddress
+import os
 import socket
 import threading
+from pathlib import Path
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.request import url2pathname
 
 _ALLOWED_SCHEMES = {"http", "https"}
 _BLOCKED_HOSTNAMES = {
@@ -92,14 +95,53 @@ def _host_allowed(host: str, allowed_domains) -> bool:
     return False
 
 
+def _is_within(path: Path, root: Path) -> bool:
+    """Path containment that follows case-insensitive Windows semantics."""
+    norm = os.path.normcase
+    child, parent = norm(str(path)), norm(str(root))
+    return child == parent or child.startswith(parent + os.sep)
+
+
+def _validate_local_file(text: str, parts, local_file_root) -> str:
+    """Allows file:// URLs only for files inside the active project root."""
+    if not local_file_root:
+        raise UrlBlockedError(
+            f"Refusing to open '{text[:200]}': local files are not available "
+            f"in this context; only http:// and https:// URLs are allowed."
+        )
+    if (parts.netloc or "").lower() not in ("", "localhost"):
+        raise UrlBlockedError(
+            f"Refusing to open '{text[:200]}': local files must use the form "
+            f"file:///<path> without a host."
+        )
+    try:
+        target = Path(url2pathname(parts.path)).resolve()
+        root = Path(local_file_root).resolve()
+    except (OSError, ValueError) as e:
+        raise UrlBlockedError(
+            f"Refusing to open '{text[:200]}': {e}") from e
+    if not _is_within(target, root):
+        raise UrlBlockedError(
+            f"Refusing to open '{text[:200]}': local files are limited to the "
+            f"active project directory ({root})."
+        )
+    if not target.is_file():
+        raise UrlBlockedError(
+            f"Refusing to open '{text[:200]}': the file does not exist."
+        )
+    return text
+
+
 def validate_url(url: str, allowed_domains=None,
-                 block_private_networks: bool = True) -> str:
+                 block_private_networks: bool = True,
+                 local_file_root=None) -> str:
     """Validates a URL for browser navigation/requests.
 
     Returns the normalized URL. Raises UrlBlockedError with a model-readable
     message otherwise. Private/loopback targets are always blocked when
     ``block_private_networks`` is true; the allowlist can only narrow access,
-    it never re-enables a blocked network target.
+    it never re-enables a blocked network target. ``file://`` is accepted only
+    when ``local_file_root`` is set and the resolved file stays inside it.
     """
     text = (url or "").strip()
     if not text:
@@ -109,6 +151,8 @@ def validate_url(url: str, allowed_domains=None,
     except ValueError as e:
         raise UrlBlockedError(f"Refusing to open invalid URL '{text[:200]}': {e}") from e
     scheme = (parts.scheme or "").lower()
+    if scheme == "file":
+        return _validate_local_file(text, parts, local_file_root)
     if scheme not in _ALLOWED_SCHEMES:
         raise UrlBlockedError(
             f"Refusing to open '{text[:200]}': only http:// and https:// URLs are allowed."

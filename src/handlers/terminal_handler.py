@@ -539,7 +539,8 @@ class TerminalHandler(BaseAgentHandler):
         self._tool_in_flight = False
         self._stop_thinking_timer()
         error_msg_for_llm = f"**Error:** Local fallback for {action_name} also failed: {error_message}"
-        self.ui.add_message(f"<i>{error_msg_for_llm}</i>")
+        self._add_result_card(
+            error_msg_for_llm, f"{action_name} · error", "error")
         self.record_tool_result(error_msg_for_llm, status="error", name=action_name)
         self._continue_loop(error_msg_for_llm)
         self.web_thread = None
@@ -1167,7 +1168,8 @@ class TerminalHandler(BaseAgentHandler):
             pass
         logging.info(f"TerminalHandler: ticket {ticket} ({self._pending_action_name}) error received, continuing loop.")
         error_msg = f"**Error:** {error_message}"
-        self.ui.add_message(f"<i>{error_msg}</i>")
+        self._add_result_card(
+            error_msg, f"{self._pending_action_name} · error", "error")
         self.record_tool_result(
             error_msg, status="error", name=self._pending_action_name)
         self._continue_loop(error_msg)

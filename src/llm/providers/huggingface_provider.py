@@ -180,6 +180,10 @@ class HuggingFaceProvider(BaseLLMProvider):
 
         return messages
 
+    @staticmethod
+    def _reasoning_text(message: dict) -> str:
+        return message.get("reasoning_content") or message.get("reasoning") or ""
+
     def _execute_get_response(
         self,
         prompt: str,
@@ -231,10 +235,12 @@ class HuggingFaceProvider(BaseLLMProvider):
             self._record_usage(data.get("usage"))
 
             text_content = ""
+            reasoning_summary = ""
             choices = data.get("choices", [])
             if choices:
                 message = choices[0].get("message", {})
                 text_content = message.get("content") or ""
+                reasoning_summary = self._reasoning_text(message)
 
                 tool_calls = message.get("tool_calls", [])
                 if tool_calls and use_forced_tool:
@@ -278,9 +284,9 @@ class HuggingFaceProvider(BaseLLMProvider):
                         "type": fn_name,
                         "payload": final_payload
                     }
-                    return {"text": text_content, "tool_calls": reconstructed_object}
+                    return {"text": text_content, "tool_calls": reconstructed_object, "reasoning": reasoning_summary}
 
-            return {"text": text_content, "tool_calls": []}
+            return {"text": text_content, "tool_calls": [], "reasoning": reasoning_summary}
 
         except requests.exceptions.HTTPError as e:
             status_code = e.response.status_code
