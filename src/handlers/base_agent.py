@@ -257,7 +257,7 @@ class BaseAgentHandler:
                 pass
 
     def _start_thinking_timer(self, message: str):
-        self.ui.show_thinking_ui(True, message=message, actor=self.controller._get_current_model_name())
+        self.ui.show_thinking_ui(True, message=message)
         self.controller.thinking_time = 0
         self.controller.thinking_timer.start(1000)
 
@@ -537,7 +537,7 @@ class BaseAgentHandler:
                     )
                     logging.info(f"{type(self).__name__} escalating to user after "
                                  f"consecutive failures.")
-                self.ui.add_text(text, prefix_html=self._model_prefix())
+                self.ui.add_text(text)
                 self._set_state(VisionState.PAUSED_ON_ERROR)
                 self._stop_thinking_timer()
                 return
@@ -644,12 +644,6 @@ class BaseAgentHandler:
             "compact": stats,
         }
 
-    def _model_prefix(self, suffix: str = ": ") -> str:
-        model_name = html.escape(str(self.controller._get_current_model_name()))
-        model_color = self.controller.theme_manager.get_style("MODEL_NAME_COLOR")
-        return (f'<span style="color: {model_color}; font-weight: 600;">'
-                f'{model_name}</span>{suffix}')
-
     def handle_llm_response(self, reasoning: str, payload: any, schema_name: str):
         """Handles the response from the LLM, which should be a tool call."""
         if self.state == VisionState.PAUSED:
@@ -660,7 +654,7 @@ class BaseAgentHandler:
         self._stop_thinking_timer()
 
         if reasoning:
-            self.ui.add_formatted_message(reasoning, prefix_html=self._model_prefix())
+            self.ui.add_reasoning(reasoning)
             # Her own thoughts persist: without this the next turn sees what
             # was DONE but never what was MEANT — stage tracking evaporates.
             self.command_history.append(f"**Model reasoning:** {reasoning}")
@@ -684,17 +678,17 @@ class BaseAgentHandler:
         if action.get('name') == 'finish':
             message = (action.get('arguments') or {}).get('message', 'Task completed successfully.')
             self._record_assistant_message(message)
+            self.ui.add_formatted_message(message)
             success = self.controller.theme_manager.get_style("SUCCESS_COLOR")
-            prefix = (f'<span style="color: {success}; font-weight: 600;">'
-                      'Task Finished</span>: ')
-            self.ui.add_formatted_message(message, prefix_html=prefix)
+            self.ui.add_message(
+                f'<p style="margin: 2px 0; color: {success};"><i>✓ Done</i></p>')
             self.stop()
             return
 
         if action.get('name') == 'communicate_to_user':
             message = (action.get('arguments') or {}).get('message', 'The assistant needs your input.')
             self._record_assistant_message(message)
-            self.ui.add_formatted_message(message, prefix_html=self._model_prefix())
+            self.ui.add_formatted_message(message)
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()
             return
@@ -702,7 +696,7 @@ class BaseAgentHandler:
         if action.get('name') == 'display_message':
             message = (action.get('arguments') or {}).get('message', '...')
             self._record_assistant_message(message)
-            self.ui.add_formatted_message(message, prefix_html=self._model_prefix())
+            self.ui.add_formatted_message(message)
             self._continue_loop(f"**Tool Result:** Message displayed to user: {message}")
             return
 

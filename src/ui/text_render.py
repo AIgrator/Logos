@@ -100,40 +100,48 @@ def render_attachment_chips(attachments, background: str, border: str,
             f'<span style="color: {text_color};">({meta})</span>{badge}</span>')
     if not chips:
         return ""
-    return ('<div style="margin-top: 6px;">'
+    return ('<div align="left" style="margin-top: 6px;">'
             + "".join(chips)
             + "</div>")
 
 
-def render_user_message(content: str, background: str, border: str, text_color: str,
-                        label_color: str, label: str = "You", queued: bool = False,
-                        queued_color: str = "#8b949e", attachments=None,
-                        attachment_bg: str = "", attachment_border: str = "",
-                        attachment_text: str = "", warning_color: str = "#9a6700",
+def render_user_message(content: str, background: str, text_color: str,
+                        meta_color: str = "#8b949e", queued: bool = False,
+                        attachments=None, attachment_bg: str = "",
+                        attachment_border: str = "", attachment_text: str = "",
+                        warning_color: str = "#9a6700",
                         error_color: str = "#cf222e") -> str:
-    """Render a user prompt as a safe, line-preserving card."""
+    """Render a user prompt as a right-aligned bubble.
+
+    The bubble hugs its content: an empty left spacer column caps it at 75%
+    of the text column and keeps short messages narrow instead of stretching
+    them across the chat. Qt rich text ignores border-radius, so the corners
+    stay square.
+    """
     import html
 
     content = content if isinstance(content, str) else str(content)
     escaped = html.escape(content)
     queued_html = ""
     if queued:
-        queued_html = f' <span style="color: {queued_color};">(queued)</span>'
+        queued_html = (f'<p align="left" style="margin: 4px 0 0 0; '
+                       f'color: {meta_color};"><i>queued</i></p>')
     chips = render_attachment_chips(
         attachments,
         attachment_bg or background,
-        attachment_border or border,
+        attachment_border or meta_color,
         attachment_text or text_color,
         warning_color,
         error_color,
     )
     return (
-        f'<div style="background-color: {background}; border-left: 4px solid {border}; '
-        'padding: 10px 12px; margin: 6px 0;">'
-        f'<div style="color: {label_color}; font-weight: 600; margin-bottom: 4px;">'
-        f'{html.escape(label)}{queued_html}</div>'
-        f'<div style="color: {text_color}; white-space: pre-wrap; line-height: 1.35;">'
-        f'{escaped}{chips}</div></div>'
+        '<table align="right" cellspacing="0" cellpadding="8"><tr>'
+        '<td width="25%"></td>'
+        f'<td bgcolor="{background}">'
+        f'<p align="left" style="margin: 0; color: {text_color}; '
+        f'white-space: pre-wrap; line-height: 1.35;">{escaped}</p>'
+        f'{chips}{queued_html}</td>'
+        '</tr></table>'
     )
 
 
@@ -161,3 +169,8 @@ def render_text(content: str, prefix_html: str = "", markdown_ok: bool = True) -
     if prefix_html:
         return f'<p style="white-space: pre-wrap;">{prefix_html}{processed}</p>'
     return f'<p style="white-space: pre-wrap;">{processed}</p>'
+
+
+def render_reasoning(content: str, color: str) -> str:
+    """Model reasoning: normal Markdown, muted so it never reads as an answer."""
+    return f'<div style="color: {color};">{render_text(content, markdown_ok=True)}</div>'

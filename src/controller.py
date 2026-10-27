@@ -24,7 +24,7 @@ from context import context_stats, handoff, model_context, project_rules
 from context.tokens import ModelMetadata
 from settings_manager import SettingsManager
 from ui.manager import UIManager
-from ui.text_render import render_text
+from ui.text_render import render_reasoning, render_text
 from ui.theme_manager import ThemeManager
 from ui.settings_window import SettingsWindow
 from handlers.chat_handler import ChatHandler
@@ -1671,8 +1671,7 @@ class AppController(QObject):
         except Exception:
             pass
         handler = self._handler_for_mode(self.session_mode)
-        model_name = self._get_current_model_name()
-        prefix = f"<b>{html.escape(str(model_name))}:</b> "
+        reasoning_color = self.theme_manager.get_style("COLLAPSIBLE_META")
         for event in events:
             event_type = event.get("type")
             if event_type == "message":
@@ -1688,15 +1687,15 @@ class AppController(QObject):
                     continue
                 elif role == "assistant":
                     self.ui.add_message(
-                        render_text(text, prefix_html=prefix, markdown_ok=True))
+                        render_text(text, markdown_ok=True))
                 else:
                     self.ui.add_message(
-                        f"<p><i>System:</i> {html.escape(text)}</p>")
+                        f"<p><i>{html.escape(text)}</i></p>")
             elif event_type == "reasoning":
                 text = event_text(event)
                 if text:
                     self.ui.add_message(
-                        render_text(text, prefix_html=prefix, markdown_ok=True))
+                        render_reasoning(text, reasoning_color))
             elif event_type in ("tool_call", "tool_result", "job_result"):
                 replayed = False
                 replay = getattr(handler, "replay_event", None)
@@ -2361,11 +2360,9 @@ class AppController(QObject):
             self._reenter_agent_mode(self.terminal_handler if schema_name == "terminal_tool_code"
                                      else self.browser_handler)
         elif schema_name is None:
-            # Chat: route the response back to the chat handler and label the
-            # stream with the model doing the work now.
+            # Chat: route the response back to the chat handler.
             self._set_state(ControllerState.CHATTING)
             self.current_handler = self.chat_handler
-            self.chat_handler._active_actor = self._get_current_model_name()
         self.ui.show_thinking_ui(True, message=thinking_msg)
         self.thinking_time = 0
         self.thinking_timer.start(1000)

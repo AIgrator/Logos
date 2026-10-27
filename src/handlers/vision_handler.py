@@ -1399,7 +1399,6 @@ class VisionHandler(BaseAgent):
                 f"I'm stuck — the last computer-use steps keep failing "
                 f"(latest: {summary}). Tried most recently: {tried}. "
                 f"Tell me how to proceed and I'll continue when you reply.",
-                prefix_html="<b>Vision:</b> ",
             )
             self._exit_compact()
             self._set_state(VisionState.PAUSED_ON_ERROR)
@@ -1450,7 +1449,7 @@ class VisionHandler(BaseAgent):
                     "**Vision refused to start:** the CUA safety prompt is "
                     "missing or empty (prompts/vision/cua_system.txt). Restore "
                     "it and retry; running without it would fail open.")
-                self.ui.add_text(message, prefix_html="<b>Vision:</b> ")
+                self.ui.add_text(message)
                 logging.error("CUA system prompt missing/empty; refusing to run.")
                 self._exit_compact()
                 self._set_state(VisionState.PAUSED_ON_ERROR)
@@ -1473,8 +1472,7 @@ class VisionHandler(BaseAgent):
                     "restarted the chain.")
                 return
             self.ui.add_text(
-                "**Error:** nothing to send (no task, no outputs).",
-                prefix_html="<b>Vision:</b> ")
+                "**Error:** nothing to send (no task, no outputs).")
             self._exit_compact()
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()
@@ -1521,8 +1519,7 @@ class VisionHandler(BaseAgent):
             return
         if outcome.get("policy_blocked"):
             self._stop_thinking_timer()
-            self.ui.add_text(outcome["policy_blocked"],
-                             prefix_html="<b>Vision:</b> ")
+            self.ui.add_text(outcome["policy_blocked"])
             self._cua_restart_chain(
                 f"Previous attempt was blocked by the safety gate: "
                 f"{outcome['policy_blocked']}")
@@ -1531,8 +1528,7 @@ class VisionHandler(BaseAgent):
             return
         if outcome.get("budget_exceeded"):
             self._stop_thinking_timer()
-            self.ui.add_text(outcome["budget_exceeded"],
-                             prefix_html="<b>Vision:</b> ")
+            self.ui.add_text(outcome["budget_exceeded"])
             self._cua_restart_chain(
                 f"Previous attempt stopped by a budget: "
                 f"{outcome['budget_exceeded']}")
@@ -1545,7 +1541,6 @@ class VisionHandler(BaseAgent):
             self.ui.add_text(
                 f"Paused: a safety check ({codes}) needs your call and was "
                 f"not approved. Tell me how to proceed.",
-                prefix_html="<b>Vision:</b> ",
             )
             self._cua_restart_chain(
                 f"The user declined a safety check ({codes}); the action was "
@@ -1578,7 +1573,7 @@ class VisionHandler(BaseAgent):
             # go through the ask_user tool (explicit call) or safety flags
             # (native channel) — never through text matching.
             self.command_history.append(f"Computer-use finished: {text[:300]}")
-            self.ui.add_text(text, prefix_html="<b>Vision:</b> ")
+            self.ui.add_text(text)
             self._consecutive_errors = 0
             self._assessment_sent = False
             logging.info("task-done: restoring full mode")
@@ -1590,8 +1585,7 @@ class VisionHandler(BaseAgent):
             # Hard OS block (Windows UIPI / macOS TCC): not fixable mid-task.
             # Stop now, name the culprit and the fix; no further model turns.
             self._stop_thinking_timer()
-            self.ui.add_text(outcome["input_blocked"],
-                             prefix_html="<b>Vision:</b> ")
+            self.ui.add_text(outcome["input_blocked"])
             self._cua_restart_chain(
                 "Previous attempt was stopped by an OS input block.")
             self._exit_compact()
@@ -2100,8 +2094,7 @@ class VisionHandler(BaseAgent):
                 f"input injection partially blocked [{block.platform}]: "
                 f"{block.detail or block.reason}")
             try:
-                self.ui.add_text(block.chat_message(),
-                                 prefix_html="<b>Vision:</b> ")
+                self.ui.add_text(block.chat_message())
             except Exception as e:
                 logging.warning(f"could not surface input block: {e}")
         return block.chat_message()
@@ -2127,8 +2120,7 @@ class VisionHandler(BaseAgent):
                 f"screen capture blocked [{block.platform}]: "
                 f"{block.detail or block.reason}")
             try:
-                self.ui.add_text(block.chat_message(),
-                                 prefix_html="<b>Vision:</b> ")
+                self.ui.add_text(block.chat_message())
             except Exception as e:
                 logging.warning(f"could not surface capture block: {e}")
         return not block.hard

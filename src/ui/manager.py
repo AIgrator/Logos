@@ -23,7 +23,7 @@ from states import ControllerState
 from . import styles
 from .utils import CustomToolTipManager, IconHoverFilter
 from .widgets.attachment_chip import AttachmentChip
-from .text_render import render_text, render_user_message
+from .text_render import render_reasoning, render_text, render_user_message
 from .widgets.chat_widget import ChatWidget
 from .widgets.model_switch_popup import ModelSwitchPopup
 from .widgets.custom_title_bar import CustomTitleBar
@@ -1448,17 +1448,14 @@ class UIManager(QWidget):
 
     def build_user_message_html(self, content: str, queued: bool = False,
                                 attachments=None) -> str:
-        """Build a safe, line-preserving user prompt card."""
+        """Build a safe, right-aligned user prompt bubble."""
         theme = self.controller.theme_manager
         return render_user_message(
             content,
             background=theme.get_style("USER_MESSAGE_BG"),
-            border=theme.get_style("USER_MESSAGE_BORDER"),
             text_color=theme.get_style("USER_MESSAGE_TEXT"),
-            label_color=(theme.get_style("COLLAPSIBLE_META") if queued
-                         else theme.get_style("USER_LABEL_COLOR")),
+            meta_color=theme.get_style("COLLAPSIBLE_META"),
             queued=queued,
-            queued_color=theme.get_style("COLLAPSIBLE_META"),
             attachments=attachments,
             attachment_bg=theme.get_style("COLLAPSIBLE_BG"),
             attachment_border=theme.get_style("COLLAPSIBLE_BORDER"),
@@ -1492,6 +1489,12 @@ class UIManager(QWidget):
         """Adds machine-generated text (errors, statuses, reports) via the
         unified pipeline with markdown detection OFF (deterministic escape)."""
         self.add_message(render_text(content, prefix_html, markdown_ok=False))
+
+    def add_reasoning(self, content: str, force_scroll: bool = True):
+        """Adds model reasoning as muted text, distinct from a final answer."""
+        color = self.controller.theme_manager.get_style("COLLAPSIBLE_META")
+        self.add_message(render_reasoning(content, color),
+                         force_scroll=force_scroll)
 
     def add_message(self, html_content, force_scroll=False, keep_stream=False, role=None):
         if self.is_compact:
@@ -1545,10 +1548,10 @@ class UIManager(QWidget):
         """
         return getattr(self.controller, "state", None) == ControllerState.VISION
 
-    def show_thinking_ui(self, show: bool, message: str = "Thinking...", actor: str = None):
+    def show_thinking_ui(self, show: bool, message: str = "Thinking"):
         self.user_input.setDisabled(show and self._input_locked_during_thinking())
         self._thinking_active = show
-        self.chat_widget.show_thinking_ui(show, message, actor=actor)
+        self.chat_widget.show_thinking_ui(show, message)
         self._update_send_button_state()
 
     def update_timer(self, seconds: int):

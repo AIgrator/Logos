@@ -1,4 +1,5 @@
 # ui/chat_widget.py
+import html
 import logging
 import sys
 import uuid
@@ -668,6 +669,10 @@ class ChatWidget(QAbstractScrollArea):
         for i, m in enumerate(self.messages):
             if m is msg:
                 self.messages.pop(i)
+                if self._retry_countdown_msg_idx > i:
+                    self._retry_countdown_msg_idx -= 1
+                elif self._retry_countdown_msg_idx == i:
+                    self._retry_countdown_msg_idx = -1
                 if self._streaming_msg is msg:
                     self._streaming_msg = None
                     self.is_streaming = False
@@ -750,40 +755,55 @@ class ChatWidget(QAbstractScrollArea):
 
         QTimer.singleShot(0, lambda: self.verticalScrollBar().setValue(scroll_position))
 
-    def show_thinking_ui(self, show: bool, status_text: str = "Thinking", actor: str = None):
+    def _status_html(self, status_text: str, seconds: int = 0) -> str:
+        """Muted one-line status. The model is never named here."""
+        color = self.theme_manager.get_style("COLLAPSIBLE_META")
+        label = html.escape((status_text or "Thinking").strip().rstrip("."))
+        return f'<p style="margin: 0; color: {color};"><i>{label}… {seconds}s</i></p>'
+
+    def show_thinking_ui(self, show: bool, status_text: str = "Thinking"):
+        """Shows or removes the live status line.
+
+        The line is transient: hiding it removes it from the transcript, so
+        agent steps no longer leave a trail of stale "Thinking… Ns" lines.
+        Chat reuses the same message for the streamed answer (is_status flips
+        on the first chunk).
         """
-        Displays or hides the 'thinking' UI.
-        Uses the provided actor name or the pre-set assistant name and displays the current status.
-        """
-        actor_name = actor if actor is not None else self.current_assistant_name
         was_at_bottom = self._is_at_bottom()
         if show:
             last_message = self._streaming_msg
             if (self.is_streaming and last_message is not None
-                    and "..." in last_message.get('raw_content', '')):
-                new_content = f"<b>{actor_name}:</b> {status_text}... 0s"
-                last_message['raw_content'] = new_content
-                last_message['doc'].setHtml(new_content)
-                last_message['is_status'] = True
-                last_message['actor'] = actor_name
-                last_message['plain'] = ''
+                    and last_message.get('is_status')):
+                last_message['status_text'] = status_text
+                last_message['raw_content'] = self._status_html(status_text)
+                last_message['doc'].setHtml(last_message['raw_content'])
             else:
                 if self.is_streaming:
                     self.is_streaming = False
                 doc = self._new_document()
-                initial_content = f"<b>{actor_name}:</b> {status_text}... 0s"
+                initial_content = self._status_html(status_text)
                 doc.setHtml(initial_content)
                 msg = {'type': 'simple', 'doc': doc,
                        'raw_content': initial_content,
-                       'is_status': True, 'plain': '', 'actor': actor_name}
+                       'is_status': True, 'status_text': status_text,
+                       'plain': '', 'actor': self.current_assistant_name}
                 self.messages.append(msg)
                 self._streaming_msg = msg
                 self.is_streaming = True
             self._update_scroll_bar()
             self._follow_if_at_bottom(was_at_bottom)
         else:
+            status_msg = self._streaming_msg
             self.is_streaming = False
             self._streaming_msg = None
+            if status_msg is not None and status_msg.get('is_status'):
+                self.remove_message(status_msg)
+                self._follow_if_at_bottom(was_at_bottom)
+
+    def _notice_html(self, text: str) -> str:
+        """Muted single-line system voice."""
+        color = self.theme_manager.get_style("COLLAPSIBLE_META")
+        return f'<p style="margin: 0; color: {color};"><i>{html.escape(text)}</i></p>'
 
     def show_retry_countdown(self, attempt_num: int, max_attempts: int, wait_seconds: float):
         """Shows a visible countdown to the next automatic retry in the chat."""
@@ -792,8 +812,9 @@ class ChatWidget(QAbstractScrollArea):
         self._retry_countdown_attempt = attempt_num
         self._retry_countdown_max = max_attempts
         initial = max(1, int(wait_seconds))
-        content = (f"<i>Provider busy — automatic retry in {initial}s "
-                   f"(attempt {attempt_num}/{max_attempts})...</i>")
+        content = self._notice_html(
+            f"Provider busy — automatic retry in {initial}s "
+            f"(attempt {attempt_num}/{max_attempts})…")
         doc = self._new_document()
         doc.setHtml(content)
         self.messages.append({'type': 'simple', 'doc': doc, 'raw_content': content})
@@ -819,12 +840,13 @@ class ChatWidget(QAbstractScrollArea):
             import re
             new_content = re.sub(r"in \d+s", f"in {seconds_left}s", content)
             if new_content == content:
-                new_content = (f"<i>Provider busy — automatic retry in {seconds_left}s "
-                               f"(attempt {self._retry_countdown_attempt}/{self._retry_countdown_max})...</i>")
+                new_content = self._notice_html(
+                    f"Provider busy — automatic retry in {seconds_left}s "
+                    f"(attempt {self._retry_countdown_attempt}/{self._retry_countdown_max})…")
             msg['raw_content'] = new_content
             msg['doc'].setHtml(new_content)
         else:
-            msg['raw_content'] = "<i>Retrying now...</i>"
+            msg['raw_content'] = self._notice_html("Retrying now…")
             msg['doc'].setHtml(msg['raw_content'])
         self._update_scroll_bar()
         self.viewport().update()
@@ -873,17 +895,9 @@ class ChatWidget(QAbstractScrollArea):
         was_at_bottom = self._is_at_bottom()
         last_message = self._streaming_msg
         if (self.is_streaming and last_message is not None
-                and "..." in last_message.get('raw_content', '')):
-            content_html = last_message['raw_content']
-            try:
-                parts = content_html.split("</b>")
-                actor_html = parts[0] + "</b>"
-                status_text = parts[1].split("...")[0].strip() + "..."
-            except IndexError:
-                actor_html = f"<b>{self.current_assistant_name}:</b>"
-                status_text = "Thinking..."
-
-            new_content = f"{actor_html} {status_text} {seconds}s"
+                and last_message.get('is_status')):
+            new_content = self._status_html(
+                last_message.get('status_text', 'Thinking'), seconds)
             last_message['raw_content'] = new_content
             last_message['doc'].setHtml(new_content)
             self._update_scroll_bar()
@@ -895,19 +909,18 @@ class ChatWidget(QAbstractScrollArea):
             actor_name = self._streaming_msg.get('actor') or self.current_assistant_name
         else:
             actor_name = self.current_assistant_name
-        prefix = f"<b>{actor_name}:</b> "
         if not self.is_streaming or self._streaming_msg is None:
             doc = self._new_document()
-            doc.setHtml(prefix)
-            msg = {'type': 'simple', 'doc': doc,
-                   'raw_content': prefix, 'plain': '', 'actor': actor_name}
+            doc.setHtml("")
+            msg = {'type': 'simple', 'doc': doc, 'raw_content': '',
+                   'plain': '', 'actor': actor_name}
             self.messages.append(msg)
             self._streaming_msg = msg
             self.is_streaming = True
 
         last_message = self._streaming_msg
 
-        # Replace the "Thinking... Ns" placeholder with the real response.
+        # Replace the "Thinking… Ns" placeholder with the real response.
         if last_message.get('is_status'):
             last_message['is_status'] = False
             last_message['plain'] = ''
@@ -922,7 +935,7 @@ class ChatWidget(QAbstractScrollArea):
         last_message['plain'] = plain
         # Render Markdown live so headings/lists/bold show while streaming
         # instead of raw ### / ** syntax.
-        rendered = render_text(plain, prefix_html=prefix, markdown_ok=True)
+        rendered = render_text(plain, markdown_ok=True)
         last_message['raw_content'] = rendered
         last_message['doc'].setHtml(rendered)
 
