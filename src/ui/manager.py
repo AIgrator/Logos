@@ -453,7 +453,7 @@ class UIManager(QWidget):
         self.attachment_button.setFixedSize(QSize(36, 36))
         self.tooltip_manager.install(self.attachment_button, "Add attachment")
         self.attachment_button.installEventFilter(
-            IconHoverFilter(self.controller.theme_manager, 'fa5s.plus', parent=self.attachment_button)
+            IconHoverFilter(self.controller.theme_manager, 'fa5s.paperclip', parent=self.attachment_button)
         )
         self.attachment_button.clicked.connect(self._show_attachment_menu)
 
@@ -466,6 +466,7 @@ class UIManager(QWidget):
 
         self.mode_button = QPushButton("Chat")
         self.mode_button.setFixedSize(120, 36)
+        self.tooltip_manager.install(self.mode_button, "Switch mode")
         self.spinner_animation = qta.Spin(self.mode_button)
         self.mode_menu = QMenu(self.mode_button)
         self.vision_mode_spinner = qta.Spin(self.mode_menu)
