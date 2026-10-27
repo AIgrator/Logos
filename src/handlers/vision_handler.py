@@ -1003,6 +1003,7 @@ class VisionHandler(BaseAgent):
         self._cua_turns = 0
         self._steps_msg = None
         self._steps_shown = 0
+        self._steps_log = []
         self._cua_generation = 0
         self._cua_identity = None
         self._cua_seed_note = None
@@ -1199,6 +1200,7 @@ class VisionHandler(BaseAgent):
         self._cua_turns = 0
         self._steps_msg = None
         self._steps_shown = 0
+        self._steps_log = []
         self._cua_tag = time.strftime("%H%M%S")
         self._last_shot_file = None
         self._cua_generation += 1
@@ -1521,19 +1523,30 @@ class VisionHandler(BaseAgent):
             True, text.rstrip(".…").strip() or "Thinking")
 
     def _update_steps_card(self, parts: list):
-        """Keeps one live "Computer use · N steps" line instead of a line per turn."""
+        """One expandable card: the title shows the latest turn, the body every
+        action the model took. Expanding survives later updates."""
         self._steps_shown += 1
         detail = ", ".join(parts) if parts else "screenshot"
+        self._steps_log.append(detail)
         label = "step" if self._steps_shown == 1 else "steps"
+        summary = detail if len(detail) <= 90 else detail[:90].rstrip() + "…"
+        title = f"👁 Computer use · {self._steps_shown} {label} · {summary}"
         color = self.controller.theme_manager.get_style("COLLAPSIBLE_META")
-        content = (
-            f'<p style="margin: 0; color: {color};"><i>'
-            f'👁 Computer use · {self._steps_shown} {label} · '
-            f'{html.escape(detail)}</i></p>')
-        if self._steps_msg is not None and self.ui.update_message(
-                self._steps_msg, content):
+        rows = "".join(
+            f'<p style="margin: 0 0 2px 0; color: {color};">'
+            f'{index}. {html.escape(text)}</p>'
+            for index, text in enumerate(self._steps_log, 1))
+        if self._steps_msg is not None and self.ui.update_collapsible(
+                self._steps_msg, title, rows):
             return
-        self._steps_msg = self.ui.add_message(content, keep_stream=True)
+        self._steps_msg = self.ui.add_message({
+            'type': 'collapsible',
+            'title': title,
+            'content': rows,
+            'content_is_html': True,
+            'state': 'collapsed',
+            'title_color': color,
+        }, keep_stream=True)
 
     # -- turn outcome (GUI thread) --------------------------------------
 

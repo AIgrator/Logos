@@ -636,13 +636,19 @@ class ChatWidget(QAbstractScrollArea):
         self.viewport().update()
         return msg
 
-    def update_message(self, msg, html_content: str) -> bool:
-        """Replaces the rendered content of an existing simple message."""
-        if not isinstance(msg, dict) or not any(m is msg for m in self.messages):
+    def update_collapsible(self, msg, title: str, content_html: str) -> bool:
+        """Updates a collapsible block in place, keeping its open/closed state."""
+        if not isinstance(msg, dict) or msg.get('type') != 'collapsible':
+            return False
+        if not any(m is msg for m in self.messages):
             return False
         was_at_bottom = self._is_at_bottom()
-        msg['raw_content'] = html_content
-        msg['doc'].setHtml(html_content)
+        msg['title'] = title
+        msg['full_content'] = content_html
+        msg['full_content_html'] = content_html
+        new_doc = self._new_document()
+        new_doc.setHtml(self._format_collapsible_message(msg))
+        msg['doc'] = new_doc
         self._update_scroll_bar()
         self.viewport().update()
         self._follow_if_at_bottom(was_at_bottom)

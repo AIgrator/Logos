@@ -1507,9 +1507,9 @@ class UIManager(QWidget):
             force_scroll = True
         return self.chat_widget.add_message(html_content, force_scroll=force_scroll, keep_stream=keep_stream, role=role)
 
-    def update_message(self, msg, html_content) -> bool:
-        """Replaces an existing message's content in place (returns success)."""
-        return self.chat_widget.update_message(msg, html_content)
+    def update_collapsible(self, msg, title: str, content_html: str) -> bool:
+        """Updates an existing collapsible block, preserving its state."""
+        return self.chat_widget.update_collapsible(msg, title, content_html)
 
     def update_job_block(self, job_id: int, data: dict) -> bool:
         return self.chat_widget.update_job_block(job_id, data)
