@@ -114,6 +114,10 @@ Logos supports a wide range of models from leading AI providers. You can easily 
 
 In all modes, you can add file content to the context by simply typing `@` and starting to type the file name. The assistant suggests matching files with a fuzzy, case-sensitive search over the active project; wildcards and glob patterns are not supported. See the [**file search guide**](./docs/file_search_guide.md) for details.
 
+### Context and Memory Settings
+
+As a session grows, Logos keeps the full history on disk and sends the model a trimmed view plus a rolling summary. See the [**Context settings guide**](./docs/context_settings.md) for what each option in Settings → Context does, its default, and when to change it.
+
 ## Features (Tools)
 
 The assistant comes with a set of built-in tools, grouped by their mode of operation:

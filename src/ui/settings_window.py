@@ -26,8 +26,13 @@ from PySide6.QtWidgets import (
     QRadioButton
 )
 from PySide6.QtCore import Qt, QSize, QTimer
-from PySide6.QtGui import QIcon
-from src.ui.theme_manager import LIGHT_THEME, DARK_THEME
+from PySide6.QtGui import QIcon, QPalette
+from src.ui.theme_manager import (
+    LIGHT_THEME,
+    DARK_THEME,
+    create_dark_palette,
+    create_light_palette,
+)
 
 from settings_manager import SettingsManager
 from llm import providers_ready, start_provider_warmup
@@ -40,6 +45,9 @@ from src.ui.utils import CustomToolTipManager, NavButtonHoverFilter
 import logging
 
 from src.ui.widgets.busy_spinner import BusySpinner
+
+CONTEXT_SETTINGS_DOC_URL = (
+    "https://github.com/AIgrator/Logos/blob/main/docs/context_settings.md")
 
 
 class SettingsWindow(QDialog):
@@ -54,6 +62,7 @@ class SettingsWindow(QDialog):
         self.setModal(True)
 
         self.tooltip_manager = CustomToolTipManager(self)
+        self._context_doc_links = []
 
         # Main layout
         self.layout = QVBoxLayout(self)
@@ -93,6 +102,7 @@ class SettingsWindow(QDialog):
         self.load_settings()
 
         self.controller.theme_manager.theme_changed.connect(self._update_icon_colors)
+        self.controller.theme_manager.theme_changed.connect(self._refresh_context_doc_links)
         self._update_icon_colors()
 
     def _update_icon_colors(self):
@@ -704,6 +714,28 @@ class SettingsWindow(QDialog):
         help_label.setStyleSheet("font-weight: bold; color: #9E9E9E; padding: 2px;")
         return help_label
 
+    def _create_context_setting_label(self, text, anchor):
+        """Context setting name that opens its section in the online guide."""
+        label = QLabel()
+        label.setTextFormat(Qt.RichText)
+        label.setOpenExternalLinks(True)
+        label.setToolTip("Open this setting's description in the online guide")
+        self._context_doc_links.append((label, text, anchor))
+        self._render_context_doc_link(label, text, anchor)
+        return label
+
+    def _render_context_doc_link(self, label, text, anchor):
+        theme = self.controller.theme_manager.current_theme
+        palette = create_light_palette() if theme == LIGHT_THEME else create_dark_palette()
+        color = palette.color(QPalette.ColorRole.Link).name()
+        label.setText(
+            f'<a href="{CONTEXT_SETTINGS_DOC_URL}#{anchor}" '
+            f'style="color: {color}; text-decoration: underline;">{text}</a>')
+
+    def _refresh_context_doc_links(self):
+        for label, text, anchor in self._context_doc_links:
+            self._render_context_doc_link(label, text, anchor)
+
     def _create_common_section(self):
         """Creates the Common settings section."""
         group = QGroupBox("Common")
@@ -951,7 +983,8 @@ class SettingsWindow(QDialog):
             "are condensed to one line each (command + outcome). 0 = send the "
             "entire history (default, most expensive)."
         )
-        context_layout.addWidget(QLabel("Keep last N steps full:"), 0, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "Keep last N steps full:", "1-keep-last-n-steps-full"), 0, 0)
         context_layout.addWidget(self._create_help_label(keep_last_tooltip), 0, 1, Qt.AlignLeft)
         context_layout.addWidget(self.history_keep_last_spinbox, 0, 3)
 
@@ -963,7 +996,8 @@ class SettingsWindow(QDialog):
             "Max characters per single history entry (longer entries are cut "
             "head+tail with a marker). 0 = unlimited (default)."
         )
-        context_layout.addWidget(QLabel("Max chars per entry:"), 1, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "Max chars per entry:", "2-max-chars-per-entry"), 1, 0)
         context_layout.addWidget(self._create_help_label(max_chars_tooltip), 1, 1, Qt.AlignLeft)
         context_layout.addWidget(self.history_max_chars_spinbox, 1, 3)
 
@@ -972,7 +1006,8 @@ class SettingsWindow(QDialog):
             "Drop consecutive identical page snapshots, keeping one copy with "
             "an '(unchanged)' note. Snapshots repeat a lot and cost tokens."
         )
-        context_layout.addWidget(QLabel("Dedup repeated snapshots:"), 2, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "Dedup repeated snapshots:", "3-dedup-repeated-snapshots"), 2, 0)
         context_layout.addWidget(self._create_help_label(dedup_tooltip), 2, 1, Qt.AlignLeft)
         context_layout.addWidget(self.history_dedup_checkbox, 2, 3)
 
@@ -981,7 +1016,8 @@ class SettingsWindow(QDialog):
             "Cut long Python tracebacks in tool errors to head+tail lines. "
             "The error type and location (what teaches the model) are kept."
         )
-        context_layout.addWidget(QLabel("Trim long tracebacks:"), 3, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "Trim long tracebacks:", "4-trim-long-tracebacks"), 3, 0)
         context_layout.addWidget(self._create_help_label(trim_tooltip), 3, 1, Qt.AlignLeft)
         context_layout.addWidget(self.history_trim_tracebacks_checkbox, 3, 3)
 
@@ -991,19 +1027,22 @@ class SettingsWindow(QDialog):
             "model or application run can continue with compact context instead "
             "of the full journal. Summaries never mix between sessions."
         )
-        context_layout.addWidget(QLabel("Rolling handoff summary:"), 4, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "Rolling handoff summary:", "5-rolling-handoff-summary"), 4, 0)
         context_layout.addWidget(self._create_help_label(handoff_tooltip), 4, 1, Qt.AlignLeft)
         context_layout.addWidget(self.handoff_enabled_checkbox, 4, 3)
 
         self.handoff_mode_switch_checkbox = QCheckBox()
         mode_tooltip = "Seed the new session's summary when switching chat/terminal/browser mode."
-        context_layout.addWidget(QLabel("On mode switch:"), 5, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "On mode switch:", "6-on-mode-switch"), 5, 0)
         context_layout.addWidget(self._create_help_label(mode_tooltip), 5, 1, Qt.AlignLeft)
         context_layout.addWidget(self.handoff_mode_switch_checkbox, 5, 3)
 
         self.handoff_model_switch_checkbox = QCheckBox()
         model_tooltip = "Refresh and inject the summary when switching the active model."
-        context_layout.addWidget(QLabel("On model switch:"), 6, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "On model switch:", "7-on-model-switch"), 6, 0)
         context_layout.addWidget(self._create_help_label(model_tooltip), 6, 1, Qt.AlignLeft)
         context_layout.addWidget(self.handoff_model_switch_checkbox, 6, 3)
 
@@ -1012,7 +1051,8 @@ class SettingsWindow(QDialog):
         self.summary_max_tokens_spinbox.setSingleStep(100)
         self.summary_max_tokens_spinbox.setFixedWidth(80)
         max_tokens_tooltip = "Token budget requested from the summarizer model."
-        context_layout.addWidget(QLabel("Summary max tokens:"), 7, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "Summary max tokens:", "8-summary-max-tokens"), 7, 0)
         context_layout.addWidget(self._create_help_label(max_tokens_tooltip), 7, 1, Qt.AlignLeft)
         context_layout.addWidget(self.summary_max_tokens_spinbox, 7, 3)
 
@@ -1025,7 +1065,8 @@ class SettingsWindow(QDialog):
             "Refresh the summary when estimated context usage reaches this "
             "fraction of the model window."
         )
-        context_layout.addWidget(QLabel("Refresh threshold:"), 8, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "Refresh threshold:", "9-refresh-threshold"), 8, 0)
         context_layout.addWidget(self._create_help_label(threshold_tooltip), 8, 1, Qt.AlignLeft)
         context_layout.addWidget(self.summary_threshold_spinbox, 8, 3)
 
@@ -1037,7 +1078,8 @@ class SettingsWindow(QDialog):
             "'provider:model' (for example 'openai:gpt-5-mini'), or a bare "
             "model id to keep the active provider. Empty uses the session model."
         )
-        context_layout.addWidget(QLabel("Summarizer model:"), 9, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "Summarizer model:", "10-summarizer-model"), 9, 0)
         context_layout.addWidget(self._create_help_label(summary_model_tooltip), 9, 1, Qt.AlignLeft)
         context_layout.addWidget(self.summary_model_lineedit, 9, 2, 1, 2)
 
@@ -1048,7 +1090,8 @@ class SettingsWindow(QDialog):
             "compacted into the session summary automatically once the current "
             "step finishes. Chat, Terminal and Browser only."
         )
-        context_layout.addWidget(QLabel("Auto-compact on low headroom:"), 10, 0)
+        context_layout.addWidget(self._create_context_setting_label(
+            "Auto-compact on low headroom:", "11-auto-compact-on-low-headroom"), 10, 0)
         context_layout.addWidget(self._create_help_label(auto_compact_tooltip), 10, 1, Qt.AlignLeft)
         context_layout.addWidget(self.auto_compact_checkbox, 10, 3)
 
