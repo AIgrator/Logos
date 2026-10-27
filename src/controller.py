@@ -24,7 +24,7 @@ from context import context_stats, handoff, model_context, project_rules
 from context.tokens import ModelMetadata
 from settings_manager import SettingsManager
 from ui.manager import UIManager
-from ui.text_render import render_reasoning, render_text
+from ui.text_render import render_text
 from ui.theme_manager import ThemeManager
 from ui.settings_window import SettingsWindow
 from handlers.chat_handler import ChatHandler
@@ -1671,7 +1671,6 @@ class AppController(QObject):
         except Exception:
             pass
         handler = self._handler_for_mode(self.session_mode)
-        reasoning_color = self.theme_manager.get_style("COLLAPSIBLE_META")
         for event in events:
             event_type = event.get("type")
             if event_type == "message":
@@ -1694,8 +1693,7 @@ class AppController(QObject):
             elif event_type == "reasoning":
                 text = event_text(event)
                 if text:
-                    self.ui.add_message(
-                        render_reasoning(text, reasoning_color))
+                    self.ui.add_reasoning(text, force_scroll=False)
             elif event_type in ("tool_call", "tool_result", "job_result"):
                 replayed = False
                 replay = getattr(handler, "replay_event", None)
@@ -2685,16 +2683,22 @@ class AppController(QObject):
         self.ui.set_title_bar_text(window_title)
         self.ui.refresh_model_button(title_string)
         self.ui.set_assistant_name(self._get_current_model_name())
+        meta = self.theme_manager.get_style("COLLAPSIBLE_META")
         if custom_notice:
-            notice = custom_notice
+            notice = (f'<p style="margin: 0; color: {meta};"><i>'
+                      f'{html.escape(custom_notice)}</i>')
             if self._can_continue():
                 notice += CONTINUE_LINK
+            notice += '</p>'
         elif self._can_continue():
-            notice = (f"<i>Switched to <b>{title_string}</b> (this session only). "
-                      f"Context preserved.</i>{CONTINUE_LINK}")
+            notice = (f'<p style="margin: 0; color: {meta};"><i>Switched to '
+                      f'{html.escape(title_string)} (this session only). '
+                      f'Context preserved.</i>{CONTINUE_LINK}</p>')
         else:
-            notice = (f"<i>Switched to <b>{title_string}</b> (this session only). "
-                      f"The new model takes over from your next message.</i>")
+            notice = (f'<p style="margin: 0; color: {meta};"><i>Switched to '
+                      f'{html.escape(title_string)} (this session only). '
+                      f'The new model takes over from your next '
+                      f'message.</i></p>')
         self.ui.add_message(notice, force_scroll=True, keep_stream=True)
         self._schedule_context_indicator_update()
         if self._summary_settings().get("handoff_on_model_switch", True):
@@ -2744,9 +2748,9 @@ class AppController(QObject):
             if pid == cur_pid and mid == cur_model:
                 return
             notice = (
-                "<i>Так как ваша текущая модель не удовлетворяет требованиям для этого "
+                "Так как ваша текущая модель не удовлетворяет требованиям для этого "
                 "режима работы, мы переключились на модель, выбранную вами по умолчанию "
-                "в настройках.</i>"
+                "в настройках."
             )
             self.switch_model(pid, mid, custom_notice=notice)
         except Exception as e:

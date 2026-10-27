@@ -1491,10 +1491,16 @@ class UIManager(QWidget):
         self.add_message(render_text(content, prefix_html, markdown_ok=False))
 
     def add_reasoning(self, content: str, force_scroll: bool = True):
-        """Adds model reasoning as muted text, distinct from a final answer."""
+        """Adds model reasoning as a muted, collapsed block."""
         color = self.controller.theme_manager.get_style("COLLAPSIBLE_META")
-        self.add_message(render_reasoning(content, color),
-                         force_scroll=force_scroll)
+        self.add_message({
+            'type': 'collapsible',
+            'title': 'Reasoning',
+            'content': render_reasoning(content, color),
+            'content_is_html': True,
+            'state': 'collapsed',
+            'title_color': color,
+        }, force_scroll=force_scroll)
 
     def add_message(self, html_content, force_scroll=False, keep_stream=False, role=None):
         if self.is_compact:

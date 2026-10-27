@@ -15,10 +15,11 @@ from PySide6.QtGui import (
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
+    QTextTable,
 )
 from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QMenu, QPushButton
 
-from src.ui.text_render import render_text
+from src.ui.text_render import USER_BUBBLE_PADDING, USER_BUBBLE_RADIUS, render_text
 from src.ui.utils import IconHoverFilter
 from src.ui.widgets.collapsible_block_formatter import CollapsibleBlockFormatter
 
@@ -1000,11 +1001,37 @@ class ChatWidget(QAbstractScrollArea):
         self.viewport().update()
         self._update_scroll_to_bottom_button()
 
+    def _user_bubble_rect(self, doc):
+        """Rect of the right-aligned bubble cell inside a user message doc.
+
+        The message HTML puts the prompt into a right-aligned table cell;
+        Qt rich text has no border-radius, so the background is painted by
+        hand under the cell's text blocks.
+        """
+        table = next((frame for frame in doc.rootFrame().childFrames()
+                      if isinstance(frame, QTextTable)), None)
+        if table is None or table.columns() < 2:
+            return None
+        cell = table.cellAt(0, table.columns() - 1)
+        layout = doc.documentLayout()
+        end_pos = cell.lastCursorPosition().position()
+        block = doc.findBlock(cell.firstCursorPosition().position())
+        rect = None
+        while block.isValid() and block.position() <= end_pos:
+            block_rect = layout.blockBoundingRect(block)
+            rect = block_rect if rect is None else rect.united(block_rect)
+            block = block.next()
+        if rect is None:
+            return None
+        pad = USER_BUBBLE_PADDING
+        return rect.adjusted(-pad, -pad, pad, pad)
+
     def paintEvent(self, event):
         painter = QPainter(self.viewport())
         bg_color = self.theme_manager.get_style("CHAT_BACKGROUND")
         if bg_color:
             painter.fillRect(event.rect(), QColor(bg_color))
+        bubble_color = self.theme_manager.get_style("USER_MESSAGE_BG")
         scroll_y = self.verticalScrollBar().value()
         start_sel, end_sel = self._get_selection_range()
         current_y = -scroll_y
@@ -1016,6 +1043,15 @@ class ChatWidget(QAbstractScrollArea):
             if message_rect.intersects(event.rect()):
                 painter.save()
                 painter.translate(x_offset, current_y)
+                if msg.get('role') == 'user' and bubble_color:
+                    bubble_rect = self._user_bubble_rect(doc)
+                    if bubble_rect is not None:
+                        painter.setRenderHint(
+                            QPainter.RenderHint.Antialiasing, True)
+                        painter.setPen(Qt.PenStyle.NoPen)
+                        painter.setBrush(QColor(bubble_color))
+                        painter.drawRoundedRect(
+                            bubble_rect, USER_BUBBLE_RADIUS, USER_BUBBLE_RADIUS)
                 ctx = QAbstractTextDocumentLayout.PaintContext()
                 ctx.palette = self.palette()
                 selections = []

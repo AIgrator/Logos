@@ -15,6 +15,11 @@ LIST_ITEM_RE = re.compile(r'^\s*(?:[-*+]|\d+[.)])\s+')
 LIST_START_RE = re.compile(r'(?m)^\s*(?:[-*+]|\d+[.)])\s+')
 INLINE_NUMBERED_RE = re.compile(r'(?<=\S) (?=\d{1,2}[.)]\s+)')
 
+# Qt rich text ignores border-radius, so ChatWidget paints the user bubble
+# background itself; these values keep the HTML cell and that paint in sync.
+USER_BUBBLE_PADDING = 8
+USER_BUBBLE_RADIUS = 12
+
 
 def looks_like_markdown(content: str) -> bool:
     if any(h in content for h in MARKDOWN_HINTS):
@@ -115,8 +120,9 @@ def render_user_message(content: str, background: str, text_color: str,
 
     The bubble hugs its content: an empty left spacer column caps it at 75%
     of the text column and keeps short messages narrow instead of stretching
-    them across the chat. Qt rich text ignores border-radius, so the corners
-    stay square.
+    them across the chat. The background is not painted here — ChatWidget
+    draws a rounded rect under the cell, because Qt rich text ignores
+    border-radius.
     """
     import html
 
@@ -135,9 +141,10 @@ def render_user_message(content: str, background: str, text_color: str,
         error_color,
     )
     return (
-        '<table align="right" cellspacing="0" cellpadding="8"><tr>'
+        '<table align="right" cellspacing="0" '
+        f'cellpadding="{USER_BUBBLE_PADDING}"><tr>'
         '<td width="25%"></td>'
-        f'<td bgcolor="{background}">'
+        '<td>'
         f'<p align="left" style="margin: 0; color: {text_color}; '
         f'white-space: pre-wrap; line-height: 1.35;">{escaped}</p>'
         f'{chips}{queued_html}</td>'
