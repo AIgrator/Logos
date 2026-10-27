@@ -50,8 +50,10 @@ def web_search(self, query: str) -> str:
 
     try:
         with DDGS() as ddgs:
-            # Fetch search results
-            results = ddgs.text(query, region='wt-wt', safesearch='moderate', timelimit='y')
+            # Fetch search results. Do not pass region='wt-wt': ddgs splits any
+            # region into "<country>-<lang>" and its Wikipedia engine would call
+            # the nonexistent wt.wikipedia.org, failing the whole search.
+            results = ddgs.text(query, safesearch='moderate', timelimit='y')
 
             if not results:
                 logging.warning(f"Web search for '{query}' returned no results.")
