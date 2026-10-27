@@ -67,7 +67,10 @@ field of a fresh CUA chain. There are no placeholders. The handler appends
 runtime safety paragraphs based on the live Vision settings:
 
 - `allow_system_surfaces` — permits Start menu / Windows Search to launch apps;
-- `restrict_to_allowed_apps` — limits launches to Vision `allowed_apps`;
+- `allowed_apps` — the checked Applications list is appended to the prompt and
+  becomes the enum of the native `launch_app` function tool;
+- `restrict_to_allowed_apps` — limits all interaction (and therefore launches)
+  to Vision `allowed_apps`;
 - `allow_shell_commands` — permits opening a terminal for read-only ground-truth
   checks; destructive commands still require approval.
 

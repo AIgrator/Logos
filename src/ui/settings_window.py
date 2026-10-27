@@ -576,9 +576,11 @@ class SettingsWindow(QDialog):
         layout = QVBoxLayout(group)
 
         description = QLabel(
-            "Applications the assistant may launch directly. With 'Restrict "
-            "actions to selected Applications' enabled in Vision settings, "
-            "only the checked apps can also be interacted with."
+            "Applications the assistant may launch directly. Checked apps "
+            "are listed to the Vision model, which can open them by name "
+            "without searching the Start menu. With 'Restrict actions to "
+            "selected Applications' enabled in Vision settings, only the "
+            "checked apps can also be interacted with."
         )
         description.setWordWrap(True)
         layout.addWidget(description)

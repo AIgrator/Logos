@@ -256,7 +256,8 @@ class BaseLLMProvider(ABC):
         screenshot_b64: str | None = None,
         previous_response_id: str | None = None,
         acknowledged_safety_checks: list[dict[str, Any]] | None = None,
-        instructions: str | None = None
+        instructions: str | None = None,
+        launch_apps: list[str] | None = None
     ) -> dict[str, Any]:
         """
         Executes one computer-use turn.
@@ -264,6 +265,10 @@ class BaseLLMProvider(ABC):
         First turn: pass `task` (and optionally an opening screenshot).
         Following turns: pass `previous_response_id` + `outputs` answered
         from the previous turn (computer and/or function outputs).
+
+        `launch_apps` is the user-selected Applications list (exact display
+        names). When non-empty, providers expose a `launch_app` function
+        tool restricted to those names; calls come back under `"launch"`.
 
         Every computer-use provider implements BOTH approval paths:
         native safety flags where the vendor supports them, and the
@@ -278,6 +283,7 @@ class BaseLLMProvider(ABC):
             "response_id": str | None,
             "pending_safety_checks": [ {"id":..., "code":..., "message":...} ],
             "ask": [ {"call_id":..., "question":...} ],
+            "launch": [ {"call_id":..., "app_name":...} ],
             "done_text": str | None   # final answer when the model stops calling
         }
         """

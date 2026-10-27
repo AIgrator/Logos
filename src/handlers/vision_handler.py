@@ -66,7 +66,7 @@ class CuaBudgetExceededError(Exception):
 # when the provider declares wants_first_screenshot()).
 _PROVIDER_KWARGS = frozenset({
     "task", "outputs", "previous_response_id", "instructions",
-    "screenshot_b64",
+    "screenshot_b64", "launch_apps",
 })
 
 KEY_ALIASES = {
@@ -403,6 +403,7 @@ class CuaTurnWorker(QThread):
                 "instructions_chars": len(protocol.get("instructions") or ""),
                 "instructions": protocol.get("instructions") if first else "<chain continues>",
                 "previous_response_id": protocol.get("previous_response_id"),
+                "launch_apps": protocol.get("launch_apps"),
                 "opening_screenshot_chars": len(protocol.get("screenshot_b64") or ""),
                 "outputs": [
                     {"kind": o.get("kind"), "call_id": o.get("call_id"),
@@ -433,6 +434,7 @@ class CuaTurnWorker(QThread):
                             for a in (turn.get("actions") or [])],
                 "pending_safety_checks": turn.get("pending_safety_checks"),
                 "ask": turn.get("ask"),
+                "launch": turn.get("launch"),
                 "done_text": turn.get("done_text"),
             })
 
@@ -490,6 +492,42 @@ class CuaTurnWorker(QThread):
                     self.turn_done.emit({"aborted": True})
                     return
 
+            # launch_app calls: deterministic, limited to the user's
+            # Applications list. Execute them before the computer actions
+            # so the follow-up screenshot shows the app the model asked for,
+            # and answer each call as a function output on the next turn.
+            launch_calls = turn.get("launch") or []
+            launched: list = []
+            launched_log: list = []
+            for call in launch_calls:
+                if self._stop:
+                    outcome = {"aborted": True}
+                    self.turn_done.emit(outcome)
+                    return
+                if self._handler._cua_wall_clock_exceeded():
+                    outcome = {
+                        "budget_exceeded": "**Stopped:** Vision task time "
+                                            "budget exhausted.",
+                        "executed": [],
+                        "launched": launched,
+                    }
+                    self.turn_done.emit(outcome)
+                    return
+                if not self._paused_spin("before launching an app"):
+                    outcome = {"aborted": True}
+                    self.turn_done.emit(outcome)
+                    return
+                app_name = str(call.get("app_name") or "").strip()
+                result = self._handler.launch_cua_app(app_name)
+                launched.append(f"launch_app({app_name or '?'})")
+                launched_log.append({"app": app_name, "result": result})
+                function_outs.append({
+                    "kind": "function",
+                    "call_id": call.get("call_id"),
+                    "function_name": "launch_app",
+                    "output_text": result,
+                })
+
             checks = turn.get("pending_safety_checks") or []
             pre_checks = self._handler.classify_cua_actions(actions)
             hard_blocks = [c for c in pre_checks if c.get("hard")]
@@ -537,6 +575,7 @@ class CuaTurnWorker(QThread):
                         "previous_response_id": turn.get("response_id"),
                         "outputs": _ack_outputs(
                             ack_ids, checks, shot_ack, function_outs),
+                        "launch_apps": self._handler.cua_launch_names(),
                     }
                     self._comm_log("REQUEST", {
                         "turn": turn_no,
@@ -558,6 +597,7 @@ class CuaTurnWorker(QThread):
                         "pending_safety_checks":
                             replayed.get("pending_safety_checks"),
                         "ask": replayed.get("ask"),
+                        "launch": replayed.get("launch"),
                         "done_text": replayed.get("done_text"),
                     })
                     if replayed.get("pending_safety_checks"):
@@ -571,6 +611,14 @@ class CuaTurnWorker(QThread):
                         outcome = {
                             "fatal": "**Error:** the provider asked a new question "
                                      "during safety replay; task paused."
+                        }
+                        self.turn_done.emit(outcome)
+                        return
+                    if replayed.get("launch"):
+                        outcome = {
+                            "fatal": "**Error:** the provider requested a new "
+                                     "application launch during safety replay; "
+                                     "task paused."
                         }
                         self.turn_done.emit(outcome)
                         return
@@ -634,6 +682,7 @@ class CuaTurnWorker(QThread):
                         f"one turn; the limit is {max_actions}. Split the step "
                         f"into smaller batches."),
                     "executed": [],
+                    "launched": launched,
                     "response_id": turn.get("response_id"),
                 }
                 self._comm_log("CONSUMED", {
@@ -778,6 +827,7 @@ class CuaTurnWorker(QThread):
                     outcome = {
                         "action_error": f"**Error:** {describe_action(action)} failed: {e}",
                         "executed": executed,
+                        "launched": launched,
                         "response_id": turn.get("response_id"),
                         "next_outputs": err_outs,
                         "asked": asked_log,
@@ -789,6 +839,7 @@ class CuaTurnWorker(QThread):
                         "turn": turn_no,
                         "status": "action_error",
                         "executed": executed,
+                        "launched": launched_log,
                         "asked": asked_log,
                         "error": outcome["action_error"],
                     })
@@ -828,11 +879,13 @@ class CuaTurnWorker(QThread):
             self._comm_log("CONSUMED", {
                 "turn": turn_no,
                 "executed": executed,
+                "launched": launched_log,
                 "asked": asked_log,
                 "post_screenshot_file": shot_file,
             })
             outcome = {
                 "executed": executed,
+                "launched": launched,
                 "response_id": turn.get("response_id"),
                 "asked": asked_log,
                 "shot_file": shot_file,
@@ -933,6 +986,45 @@ class VisionHandler(BaseAgent):
             return list(apps or [])
         except Exception:
             return []
+
+    def cua_launch_names(self) -> list[str]:
+        """Exact display names of the user-selected launchable apps."""
+        names: list[str] = []
+        for app in self.cua_allowed_apps():
+            if not isinstance(app, dict):
+                continue
+            name = " ".join(str(app.get("name") or "").split())
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def launch_cua_app(self, app_name: str) -> str:
+        """Launches one user-selected app; returns a model-readable result."""
+        name = " ".join(str(app_name or "").split())
+        apps = [app for app in self.cua_allowed_apps()
+                if isinstance(app, dict)
+                and str(app.get("name") or "").strip()]
+        if not name:
+            return "Error: launch_app requires app_name."
+        match = next(
+            (app for app in apps
+             if " ".join(str(app.get("name")).split()).lower()
+             == name.lower()),
+            None)
+        if match is None:
+            available = ", ".join(
+                str(app.get("name")).strip() for app in apps) or "none"
+            return (f"Error: '{name}' is not in the Applications list. "
+                    f"Available applications: {available}.")
+        try:
+            from src.apps.launcher import CrossPlatformAppLauncher
+            CrossPlatformAppLauncher().launch(match)
+        except Exception as e:
+            logging.warning(f"launch_app failed for '{name}': {e}")
+            return f"Error: could not launch '{name}': {e}"
+        display_name = " ".join(str(match.get("name") or name).split())
+        logging.info(f"launch_app: launched '{display_name}'.")
+        return f"Launched '{display_name}' and returned to the task."
 
     def cua_gate_apps(self) -> list:
         if not self._cua_restrict_allowed_apps():
@@ -1337,6 +1429,17 @@ class VisionHandler(BaseAgent):
         base_text = self._cua_system_cache or ""
         if not base_text:
             return ""
+        apps = self.cua_launch_names()
+        app_block = ""
+        if apps:
+            app_block = (
+                "\n- Launching applications: when the task needs an app "
+                "that is not on screen, call the \"launch_app\" tool with "
+                "an exact name from this list instead of searching the "
+                "Start menu. If the app you need is not listed, continue "
+                "through the desktop or ask the user.\n"
+                "Available applications:\n"
+                + "\n".join(f"  - {name}" for name in apps))
         surfaces = ""
         if self._cua_system_surfaces_allowed():
             if self._cua_restrict_allowed_apps():
@@ -1352,7 +1455,7 @@ class VisionHandler(BaseAgent):
                     "entry still require approval."
                 )
         if self._cua_shell_allowed():
-            return base_text + surfaces + (
+            return base_text + app_block + surfaces + (
                 "\n- Ground-truth verification: when a task needs facts the "
                 "screenshots can't prove (folder sizes, file counts, disk "
                 "state), you may open a terminal yourself (Win+R, type "
@@ -1361,7 +1464,7 @@ class VisionHandler(BaseAgent):
                 "commands. Anything modifying or deleting falls under the "
                 "destruction rule above and requires user approval first."
             )
-        return base_text + surfaces + (
+        return base_text + app_block + surfaces + (
             "\n- Work through the graphical interface only. Do not open "
             "terminal or console windows and do not type shell commands."
         )
@@ -1462,12 +1565,17 @@ class VisionHandler(BaseAgent):
                 self._set_state(VisionState.PAUSED_ON_ERROR)
                 self._stop_thinking_timer()
                 return
-            request = {"task": task, "instructions": instructions}
+            request = {
+                "task": task,
+                "instructions": instructions,
+                "launch_apps": self.cua_launch_names(),
+            }
         else:
             request = {
                 "previous_response_id": self._cua_response_id,
                 "outputs": list(getattr(self, "_cua_outbox", None) or []),
                 "prev_shot_file": getattr(self, "_last_shot_file", None),
+                "launch_apps": self.cua_launch_names(),
             }
         if not request.get("task") and not request.get("outputs"):
             if self._cua_response_id is not None and self.original_user_request:
@@ -1648,6 +1756,7 @@ class VisionHandler(BaseAgent):
             self._continue_loop(outcome["action_error"])
             return
         executed = outcome.get("executed") or []
+        launched = outcome.get("launched") or []
         asked = outcome.get("asked") or []
         self._cua_response_id = outcome.get("response_id")
         self._cua_outbox = outcome.get("next_outputs") or []
@@ -1656,7 +1765,7 @@ class VisionHandler(BaseAgent):
             self._cua_restart_chain(
                 "The previous turn produced no callable outputs (or no "
                 "response id). Re-observe the screen and continue.")
-        parts = list(executed)
+        parts = list(launched) + list(executed)
         parts += [f"asked: {a.get('question', '')[:80]}"
                   for a in asked]
         line = f"turn {self._cua_turns}: " + (

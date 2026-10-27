@@ -114,6 +114,28 @@ class GoogleProvider(BaseLLMProvider):
         },
     }
 
+    LAUNCH_APP_TOOL = {
+        "type": "function",
+        "name": "launch_app",
+        "description": (
+            "Launch an installed application by its exact name. Use it "
+            "whenever the task needs an app that is not already on screen "
+            "instead of searching the Start menu yourself."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "app_name": {
+                    "type": "string",
+                    "description": (
+                        "The exact application name from the Available "
+                        "applications list."),
+                }
+            },
+            "required": ["app_name"],
+        },
+    }
+
     def supports_computer_use(self) -> bool:
         return True
 
@@ -280,6 +302,21 @@ class GoogleProvider(BaseLLMProvider):
         except Exception:
             pass
 
+    def _launch_app_tool(self, launch_apps) -> dict:
+        return {
+            **self.LAUNCH_APP_TOOL,
+            "parameters": {
+                **self.LAUNCH_APP_TOOL["parameters"],
+                "properties": {
+                    **self.LAUNCH_APP_TOOL["parameters"]["properties"],
+                    "app_name": {
+                        **self.LAUNCH_APP_TOOL["parameters"]["properties"]["app_name"],
+                        "enum": [str(name) for name in launch_apps],
+                    },
+                },
+            },
+        }
+
     def computer_use_turn(
         self,
         task: str | None = None,
@@ -287,6 +324,7 @@ class GoogleProvider(BaseLLMProvider):
         previous_response_id: str | None = None,
         instructions: str | None = None,
         screenshot_b64: str | None = None,
+        launch_apps: list[str] | None = None,
     ) -> dict:
         """
         One Computer Use turn via the Interactions API.
@@ -296,10 +334,12 @@ class GoogleProvider(BaseLLMProvider):
         `previous_response_id` (= prior interaction id) + `outputs` answered
         from the previous turn. Each computer output becomes one
         function_result carrying the fresh screenshot on the last call;
-        ask_user answers ride as plain-text function results.
+        ask_user answers ride as plain-text function results. A non-empty
+        `launch_apps` list adds the `launch_app` custom function restricted
+        to those names.
 
         Returns the shared contract: {"actions", "call_id", "call_ids",
-        "response_id", "pending_safety_checks", "ask", "done_text"}.
+        "response_id", "pending_safety_checks", "ask", "launch", "done_text"}.
         """
         from google.genai.errors import APIError as _GenAIAPIError
         try:
@@ -309,6 +349,8 @@ class GoogleProvider(BaseLLMProvider):
                  "enable_prompt_injection_detection": True},
                 dict(self.ASK_USER_TOOL),
             ]
+            if launch_apps:
+                tools.append(self._launch_app_tool(launch_apps))
 
             sent_size = self._sent_image_size(screenshot_b64)
             if previous_response_id is None:
@@ -356,7 +398,8 @@ class GoogleProvider(BaseLLMProvider):
                         follow.append({
                             "type": "function_result",
                             "call_id": cid,
-                            "name": "ask_user",
+                            "name": (out.get("function_name")
+                                     or "ask_user"),
                             "result": out.get("output_text", ""),
                         })
                         continue
@@ -404,6 +447,7 @@ class GoogleProvider(BaseLLMProvider):
             out_call_id = None
             safety: list = []
             asks: list = []
+            launches: list = []
             done_parts: list = []
             for step in steps:
                 stype = self._field(step, "type", "")
@@ -428,6 +472,12 @@ class GoogleProvider(BaseLLMProvider):
                         "call_id": fid,
                         "question": fargs.get("question",
                                              fargs.get("reason", "")),
+                    })
+                    continue
+                if fname == "launch_app":
+                    launches.append({
+                        "call_id": fid,
+                        "app_name": fargs.get("app_name", ""),
                     })
                     continue
                 call_ids.append(fid)
@@ -461,6 +511,7 @@ class GoogleProvider(BaseLLMProvider):
                 "response_id": chain_id,
                 "pending_safety_checks": safety,
                 "ask": asks,
+                "launch": launches,
                 "done_text": done_text,
             }
         except _GenAIAPIError as e:

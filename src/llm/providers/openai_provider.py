@@ -100,12 +100,51 @@ class OpenAIProvider(BaseLLMProvider):
         },
     }
 
+    LAUNCH_APP_TOOL = {
+        "type": "function",
+        "name": "launch_app",
+        "description": (
+            "Launch an installed application by its exact name. Use it "
+            "whenever the task needs an app that is not already on screen "
+            "instead of searching the Start menu yourself."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "app_name": {
+                    "type": "string",
+                    "description": (
+                        "The exact application name from the Available "
+                        "applications list."),
+                }
+            },
+            "required": ["app_name"],
+        },
+    }
+
+    def _launch_app_tool(self, launch_apps) -> dict:
+        tool = {
+            **self.LAUNCH_APP_TOOL,
+            "parameters": {
+                **self.LAUNCH_APP_TOOL["parameters"],
+                "properties": {
+                    **self.LAUNCH_APP_TOOL["parameters"]["properties"],
+                    "app_name": {
+                        **self.LAUNCH_APP_TOOL["parameters"]["properties"]["app_name"],
+                        "enum": [str(name) for name in launch_apps],
+                    },
+                },
+            },
+        }
+        return tool
+
     def computer_use_turn(
         self,
         task: str | None = None,
         outputs: list | None = None,
         previous_response_id: str | None = None,
-        instructions: str | None = None
+        instructions: str | None = None,
+        launch_apps: list[str] | None = None,
     ) -> dict:
         """
         One turn of the OpenAI computer-use loop (Responses API, structured
@@ -115,7 +154,9 @@ class OpenAIProvider(BaseLLMProvider):
         Tools sent: `computer` + the `ask_user` function tool, so the model
         itself decides by meaning when a human answer is needed. The loop
         blocks on our dialog and resumes with the answer in the same chain
-        (no restarts, no punctuation heuristics).
+        (no restarts, no punctuation heuristics). When `launch_apps` is a
+        non-empty list of app names, the `launch_app` function tool is added,
+        restricted to those names (the user-selected Applications list).
 
         `outputs` (follow-up turns) is a list of:
           {"kind": "computer", "call_id":..., "screenshot_b64":...,
@@ -124,7 +165,8 @@ class OpenAIProvider(BaseLLMProvider):
 
         Returns {"actions", "call_id", "response_id",
                  "pending_safety_checks", "done_text",
-                 "ask": [{"call_id":..., "question":...}]}.
+                 "ask": [{"call_id":..., "question":...}],
+                 "launch": [{"call_id":..., "app_name":...}]}.
         """
         from openai import (
             AuthenticationError, RateLimitError,
@@ -184,9 +226,12 @@ class OpenAIProvider(BaseLLMProvider):
                             "output": out.get("output_text", ""),
                         })
 
+            tools = [{"type": "computer"}, self.ASK_USER_TOOL]
+            if launch_apps:
+                tools.append(self._launch_app_tool(launch_apps))
             kwargs: dict = {
                 "model": self.model,
-                "tools": [{"type": "computer"}, self.ASK_USER_TOOL],
+                "tools": tools,
                 "input": input_items,
                 "timeout": 90,
             }
@@ -205,6 +250,7 @@ class OpenAIProvider(BaseLLMProvider):
             out_call_id = None
             safety: list = []
             asks: list = []
+            launches: list = []
             for item in (response.output or []):
                 if getattr(item, "type", "") == "computer_call":
                     out_call_id = getattr(item, "call_id", None)
@@ -229,6 +275,11 @@ class OpenAIProvider(BaseLLMProvider):
                             "call_id": getattr(item, "call_id", None),
                             "question": args.get("question", ""),
                         })
+                    elif getattr(item, "name", "") == "launch_app":
+                        launches.append({
+                            "call_id": getattr(item, "call_id", None),
+                            "app_name": args.get("app_name", ""),
+                        })
 
             done_text = None
             try:
@@ -243,6 +294,7 @@ class OpenAIProvider(BaseLLMProvider):
                 "pending_safety_checks": safety,
                 "done_text": done_text,
                 "ask": asks,
+                "launch": launches,
             }
 
         except (AuthenticationError, RateLimitError) as e:

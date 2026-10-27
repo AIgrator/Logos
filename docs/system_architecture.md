@@ -322,7 +322,7 @@ Details: [adding_new_llm_provider_guide.md](./adding_new_llm_provider_guide.md) 
 
 - `src/apps/installed_apps.py` scans installed programs with `app-scanner` and caches results in `cache/app_cache.json`. The cache is refreshed only by "Scan for Applications" in settings.
 - Windows identifies apps by `appid`; macOS/Linux by path. `src/apps/launcher.py` launches with `explorer.exe shell:Appsfolder\{appid}`, `open <path>` or `xdg-open <path>`.
-- `launch_app` matches the requested name case-insensitively against the scanned list, which avoids launching the wrong program.
+- Vision exposes the checked `allowed_apps` names to the model and offers a native `launch_app` function tool; the requested name is matched case-insensitively against that list, which avoids launching the wrong program.
 - Vision is input-blocked on Wayland and reports the limitation instead of silently failing; X11 is the supported Linux session.
 
 ---

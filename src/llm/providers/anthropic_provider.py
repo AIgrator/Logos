@@ -117,6 +117,26 @@ class AnthropicProvider(BaseLLMProvider):
             "required": ["question"],
         },
     }
+    LAUNCH_APP_TOOL = {
+        "name": "launch_app",
+        "description": (
+            "Launch an installed application by its exact name. Use it "
+            "whenever the task needs an app that is not already on screen "
+            "instead of searching the Start menu yourself."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "app_name": {
+                    "type": "string",
+                    "description": (
+                        "The exact application name from the Available "
+                        "applications list."),
+                }
+            },
+            "required": ["app_name"],
+        },
+    }
     MAX_CUA_CHAINS = 32
 
     # computer_toolset members -> our executor action types. All 17 covered
@@ -145,12 +165,28 @@ class AnthropicProvider(BaseLLMProvider):
     def supports_computer_use(self) -> bool:
         return True
 
+    def _launch_app_tool(self, launch_apps) -> dict:
+        return {
+            **self.LAUNCH_APP_TOOL,
+            "input_schema": {
+                **self.LAUNCH_APP_TOOL["input_schema"],
+                "properties": {
+                    **self.LAUNCH_APP_TOOL["input_schema"]["properties"],
+                    "app_name": {
+                        **self.LAUNCH_APP_TOOL["input_schema"]["properties"]["app_name"],
+                        "enum": [str(name) for name in launch_apps],
+                    },
+                },
+            },
+        }
+
     def computer_use_turn(
         self,
         task: str | None = None,
         outputs: list | None = None,
         previous_response_id: str | None = None,
-        instructions: str | None = None
+        instructions: str | None = None,
+        launch_apps: list[str] | None = None,
     ) -> dict:
         """
         One computer-use turn via Messages API (non-streaming; the CUA
@@ -160,7 +196,8 @@ class AnthropicProvider(BaseLLMProvider):
         the `ask_user` custom tool (same array, per docs). Member calls
         arrive as tool_use blocks with toolset_name "computer"; answers go
         back as tool_result blocks echoing toolset_name. Coordinates are
-        screenshot pixels, like OpenAI.
+        screenshot pixels, like OpenAI. A non-empty `launch_apps` list adds
+        the `launch_app` custom tool restricted to those names.
 
         One action per turn (disable_parallel_tool_use): matches the
         worker's single-call output shape, no outbox rework needed.
@@ -175,6 +212,8 @@ class AnthropicProvider(BaseLLMProvider):
             except (ValueError, TypeError):
                 max_tokens = 4096
             tools = [dict(self.COMPUTER_TOOLSET), dict(self.ASK_USER_TOOL)]
+            if launch_apps:
+                tools.append(self._launch_app_tool(launch_apps))
             # Batches allowed (like OpenAI): the worker answers every
             # block id, so multi-action turns stay chain-valid.
             tool_choice = {"type": "auto"}
@@ -260,6 +299,7 @@ class AnthropicProvider(BaseLLMProvider):
             out_call_id = None
             all_ids: list = []
             asks: list = []
+            launches: list = []
             done_parts: list = []
             for block in (response.content or []):
                 btype = getattr(block, "type", "")
@@ -293,6 +333,11 @@ class AnthropicProvider(BaseLLMProvider):
                         "call_id": bid,
                         "question": block_input.get("question", ""),
                     })
+                elif name == "launch_app" and not tset:
+                    launches.append({
+                        "call_id": bid,
+                        "app_name": block_input.get("app_name", ""),
+                    })
                 # Unknown third-party blocks are ignored (never crash a turn).
 
             done_text = "".join(done_parts).strip() or None
@@ -303,6 +348,7 @@ class AnthropicProvider(BaseLLMProvider):
                 "response_id": chain_id,
                 "pending_safety_checks": [],
                 "ask": asks,
+                "launch": launches,
                 "done_text": done_text,
             }
         except (AuthenticationError, RateLimitError) as e:
