@@ -8,51 +8,92 @@ model_selected(provider_id, model_id) with the stored model id
 Hovering a model shows a floating info panel (provider / input / reasoning /
 context) to the right of the list, mirroring opencode's model picker.
 
-The footer carries the per-model reasoning effort control. It follows the
-highlighted model and emits reasoning_effort_changed for that exact model.
+Models that accept a reasoning effort show the current level as a chip on the
+right of the row. Clicking the chip (or right-clicking the row) opens the level
+menu for that exact model without switching to it, so the target is always the
+row the user is pointing at.
 """
 import logging
 
-from PySide6.QtCore import Qt, Signal, QPoint, QPointF, QEvent
-from PySide6.QtGui import QColor, QPainter, QPolygonF
+from PySide6.QtCore import Qt, Signal, QPoint, QEvent, QRect
+from PySide6.QtGui import QColor, QCursor, QPainter
 from PySide6.QtWidgets import (
     QApplication,
-    QComboBox,
     QDialog,
-    QFrame,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QListWidget,
     QListWidgetItem,
+    QMenu,
+    QStyle,
+    QStyledItemDelegate,
+    QStyleOptionViewItem,
     QVBoxLayout,
-    QWidget,
 )
 
 from context.tokens import ModelMetadata
 from llm.reasoning_effort import label as effort_label
 
 
-class _EffortCombo(QComboBox):
-    """Effort dropdown with a painted chevron.
+def build_effort_menu(parent, levels: list, current: str, on_pick) -> QMenu:
+    """Level menu shared by the picker rows and the composer effort badge."""
+    menu = QMenu(parent)
+    menu.setStyleSheet(
+        "QMenu { background-color: #252526; color: #d4d4d4;"
+        " border: 1px solid #3a3a3a; padding: 4px; }"
+        "QMenu::item { padding: 4px 18px 4px 22px; }"
+        "QMenu::item:selected { background-color: #094771; }"
+    )
+    for level in levels:
+        action = menu.addAction(effort_label(level))
+        action.setCheckable(True)
+        action.setChecked(level == current)
+        action.triggered.connect(lambda _checked=False, lvl=level: on_pick(lvl))
+    return menu
 
-    A styled QComboBox loses the native arrow, which made the footer row
-    read as a static label instead of a control.
-    """
 
-    def paintEvent(self, event):
-        super().paintEvent(event)
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.setBrush(QColor("#b8b8b8") if self.isEnabled() else QColor("#666666"))
-        cx = float(self.width() - 12)
-        cy = self.height() / 2.0
-        painter.drawPolygon(QPolygonF([
-            QPointF(cx - 4.0, cy - 2.0),
-            QPointF(cx + 4.0, cy - 2.0),
-            QPointF(cx, cy + 3.0),
-        ]))
+class _ModelItemDelegate(QStyledItemDelegate):
+    """Paints the model name on the left and its effort level as a chip."""
+
+    _RIGHT_MARGIN = 8
+    _CHIP_PAD_X = 7
+    _CHIP_HEIGHT = 18
+    _NAME_GAP = 10
+
+    @classmethod
+    def chip_rect(cls, rect: QRect, metrics, text: str) -> QRect:
+        width = metrics.horizontalAdvance(text) + cls._CHIP_PAD_X * 2
+        height = min(cls._CHIP_HEIGHT, max(12, rect.height() - 4))
+        x = rect.right() - cls._RIGHT_MARGIN - width + 1
+        y = rect.top() + (rect.height() - height) // 2
+        return QRect(x, y, width, height)
+
+    def paint(self, painter, option, index):
+        data = index.data(Qt.ItemDataRole.UserRole) or {}
+        effort = ""
+        if data.get("kind") == "model" and data.get("effort_levels"):
+            effort = effort_label(data.get("effort_current", ""))
+        if not effort:
+            super().paint(painter, option, index)
+            return
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        chip = self.chip_rect(opt.rect, opt.fontMetrics, effort)
+        available = chip.left() - opt.rect.left() - self._NAME_GAP
+        opt.text = opt.fontMetrics.elidedText(
+            opt.text, Qt.TextElideMode.ElideRight, max(0, available))
+        style = opt.widget.style() if opt.widget is not None else QApplication.style()
+        style.drawControl(
+            QStyle.ControlElement.CE_ItemViewItem, opt, painter, opt.widget)
+        painter.save()
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(QColor("#d0d0d0" if selected else "#5f5f5f"))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawRoundedRect(chip.adjusted(0, 0, -1, -1), 3.0, 3.0)
+        painter.setPen(QColor("#ffffff" if selected else "#c9c9c9"))
+        painter.drawText(chip, Qt.AlignmentFlag.AlignCenter, effort)
+        painter.restore()
 
 
 class ModelSwitchPopup(QDialog):
@@ -78,13 +119,6 @@ class ModelSwitchPopup(QDialog):
             "QListWidget::item { padding: 5px 8px; }"
             "QListWidget::item:selected { background-color: #094771; color: #ffffff; }"
             "QListWidget::item:hover:!selected { background-color: #2a2d2e; }"
-            "QComboBox { background-color: #252526; color: #d4d4d4; border: 1px solid #3a3a3a;"
-            " padding: 3px 22px 3px 6px; font-size: 12px; }"
-            "QComboBox:hover { border-color: #5c5c5c; background-color: #2a2a2b; }"
-            "QComboBox:disabled { color: #777777; }"
-            "QComboBox QAbstractItemView { background-color: #252526; color: #d4d4d4;"
-            " selection-background-color: #094771; }"
-            "QComboBox::drop-down { border: none; width: 18px; }"
         )
 
         layout = QVBoxLayout(self)
@@ -99,41 +133,23 @@ class ModelSwitchPopup(QDialog):
 
         self.model_list = QListWidget(self)
         self.model_list.setMouseTracking(True)
+        self.model_list.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.model_list.setTextElideMode(Qt.TextElideMode.ElideRight)
+        self.model_list.setItemDelegate(_ModelItemDelegate(self.model_list))
+        self.model_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.model_list.customContextMenuRequested.connect(self._on_list_context_menu)
         self.model_list.itemClicked.connect(self._on_item_clicked)
         self.model_list.itemEntered.connect(self._update_details_from_item)
         self.model_list.currentItemChanged.connect(
             lambda cur, _prev: self._update_details_from_item(cur))
         self.model_list.installEventFilter(self)
+        self.model_list.viewport().installEventFilter(self)
         layout.addWidget(self.model_list, 1)
 
-        # Footer: reasoning effort of the highlighted model. The row stays
-        # visible for models without effort control (disabled, explained)
-        # so the dialog height never jumps while hovering.
-        self._effort_data = None
-        self._active_model_data = None
-        self.effort_separator = QFrame(self)
-        self.effort_separator.setFixedHeight(1)
-        self.effort_separator.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
-        self.effort_separator.setStyleSheet("background-color: #333333;")
-        layout.addWidget(self.effort_separator)
-        self.effort_row = QWidget(self)
-        effort_layout = QHBoxLayout(self.effort_row)
-        effort_layout.setContentsMargins(4, 2, 4, 3)
-        effort_layout.setSpacing(6)
-        self.effort_label = QLabel("Effort", self.effort_row)
-        self.effort_label.setStyleSheet("QLabel { color: #8a8a8a; font-size: 12px; }")
-        self.effort_combo = _EffortCombo(self.effort_row)
-        self.effort_combo.setToolTip(
-            "Reasoning effort for the highlighted model. "
-            "Saved separately for each model.")
-        self.effort_combo.currentIndexChanged.connect(self._on_effort_changed)
-        effort_layout.addWidget(self.effort_label)
-        effort_layout.addWidget(self.effort_combo, 1)
-        layout.addWidget(self.effort_row)
-        self._show_effort_for(None)
-
-        # Floating info panel (not a permanent widget), shown to the right of
-        # the highlighted model and hidden when the pointer leaves the list.
+        # Floating info panel (not a permanent widget), shown next to the
+        # highlighted model and hidden when the pointer leaves the list.
+        self._details_data = None
         self._details = QLabel(None, Qt.WindowType.ToolTip)
         self._details.setTextFormat(Qt.TextFormat.RichText)
         self._details.setStyleSheet(
@@ -145,10 +161,23 @@ class ModelSwitchPopup(QDialog):
     def eventFilter(self, obj, event):
         if obj is self.model_list and event.type() == QEvent.Type.Leave:
             self._details.hide()
+        elif obj is self.model_list.viewport():
+            if event.type() == QEvent.Type.MouseMove:
+                pos = event.position().toPoint()
+                item = self.model_list.itemAt(pos)
+                over_chip = (item is not None
+                             and self._effort_chip_rect(item).adjusted(-4, -3, 4, 3).contains(pos))
+                self.model_list.viewport().setCursor(
+                    Qt.CursorShape.PointingHandCursor if over_chip
+                    else Qt.CursorShape.ArrowCursor)
+            elif event.type() == QEvent.Type.Leave:
+                self.model_list.viewport().setCursor(Qt.CursorShape.ArrowCursor)
+                self._details.hide()
         return super().eventFilter(obj, event)
 
     def hideEvent(self, event):
         self._details.hide()
+        self._details_data = None
         super().hideEvent(event)
 
     def set_sections(self, sections: list):
@@ -159,7 +188,7 @@ class ModelSwitchPopup(QDialog):
         effort_levels, effort_current).
         """
         self._details.hide()
-        self._active_model_data = None
+        self._details_data = None
         self.model_list.clear()
         self.search.clear()
         for entry in sections:
@@ -191,8 +220,7 @@ class ModelSwitchPopup(QDialog):
                     "effort_current": entry.get("effort_current") or "",
                 }
                 item.setData(Qt.ItemDataRole.UserRole, data)
-                if entry.get("is_current"):
-                    self._active_model_data = data
+                item.setToolTip(self._model_tooltip(data))
                 self.model_list.addItem(item)
         self._apply_filter("")
 
@@ -241,44 +269,43 @@ class ModelSwitchPopup(QDialog):
         )
         return f'<table cellspacing="0" cellpadding="0">{body}</table>'
 
-    def _show_effort_for(self, data):
-        """Points the footer control at a model entry (None = no model)."""
-        levels = list((data or {}).get("effort_levels") or [])
-        self.effort_combo.blockSignals(True)
-        try:
-            self.effort_combo.clear()
-            if levels:
-                self._effort_data = data
-                for level in levels:
-                    self.effort_combo.addItem(effort_label(level), level)
-                index = self.effort_combo.findData(data.get("effort_current", ""))
-                self.effort_combo.setCurrentIndex(index if index >= 0 else 0)
-                self.effort_combo.setEnabled(True)
-                self.effort_label.setEnabled(True)
-            else:
-                self._effort_data = None
-                self.effort_combo.addItem("Not supported", "")
-                self.effort_combo.setCurrentIndex(0)
-                self.effort_combo.setEnabled(False)
-                self.effort_label.setEnabled(False)
-        finally:
-            self.effort_combo.blockSignals(False)
+    @staticmethod
+    def _model_tooltip(data: dict) -> str:
+        if data.get("effort_levels"):
+            return (f"Reasoning effort: {effort_label(data.get('effort_current', ''))}. "
+                    "Click the model name to switch; click the effort value to change it.")
+        return "Click to switch to this model."
 
-    def _on_effort_changed(self, index: int):
-        data = self._effort_data
-        if not data or index < 0:
-            return
-        level = self.effort_combo.itemData(index) or ""
-        if not level:
-            return
+    def _effort_chip_rect(self, item) -> QRect:
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        if data.get("kind") != "model" or not data.get("effort_levels"):
+            return QRect()
+        text = effort_label(data.get("effort_current", ""))
+        rect = self.model_list.visualItemRect(item)
+        return _ModelItemDelegate.chip_rect(
+            rect, self.model_list.fontMetrics(), text)
+
+    def _build_effort_menu(self, item):
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        levels = list(data.get("effort_levels") or [])
+        if data.get("kind") != "model" or not levels:
+            return None
+        return build_effort_menu(
+            self, levels, data.get("effort_current", ""),
+            lambda level: self._set_effort(data, level))
+
+    def _show_effort_menu(self, item):
+        menu = self._build_effort_menu(item)
+        if menu is not None:
+            menu.exec(QCursor.pos())
+
+    def _set_effort(self, data: dict, level: str):
         pid = data.get("provider_id", "")
         mid = data.get("model_id", "")
-        data["effort_current"] = level
-        active = self._active_model_data
-        if (active and active.get("provider_id") == pid
-                and active.get("model_id") == mid):
-            active["effort_current"] = level
-        # Keep every list copy of this model in sync (and the open panel).
+        if not pid or not mid or not level:
+            return
+        if data.get("effort_current") == level:
+            return
         for i in range(self.model_list.count()):
             other = self.model_list.item(i)
             odata = other.data(Qt.ItemDataRole.UserRole) or {}
@@ -286,9 +313,13 @@ class ModelSwitchPopup(QDialog):
                     and odata.get("model_id") == mid):
                 odata["effort_current"] = level
                 other.setData(Qt.ItemDataRole.UserRole, odata)
-                if self._details.isVisible():
-                    self._details.setText(self._details_html(odata))
-                    self._details.adjustSize()
+                other.setToolTip(self._model_tooltip(odata))
+        shown = self._details_data
+        if (shown is not None and shown.get("provider_id") == pid
+                and shown.get("model_id") == mid):
+            shown["effort_current"] = level
+            self._details.setText(self._details_html(shown))
+            self._details.adjustSize()
         logging.info(f"Reasoning effort changed: {pid} / {mid} -> {level}")
         self.reasoning_effort_changed.emit(pid, mid, level)
 
@@ -299,9 +330,7 @@ class ModelSwitchPopup(QDialog):
         data = item.data(Qt.ItemDataRole.UserRole) or {}
         if data.get("kind") != "model":
             return
-        # Footer follows the hovered model and keeps pointing at it when the
-        # pointer moves down to the combo (no revert on list leave).
-        self._show_effort_for(data)
+        self._details_data = data
         self._details.setText(self._details_html(data))
         self._details.adjustSize()
         rect = self.model_list.visualItemRect(item)
@@ -318,9 +347,7 @@ class ModelSwitchPopup(QDialog):
 
     def _apply_filter(self, query: str):
         self._details.hide()
-        # Typing/clearing the search invalidates the hovered target: fall back
-        # to the active model until the pointer highlights another one.
-        self._show_effort_for(self._active_model_data)
+        self._details_data = None
         query = (query or "").strip().lower()
         # First pass: model visibility.
         for i in range(self.model_list.count()):
@@ -354,9 +381,25 @@ class ModelSwitchPopup(QDialog):
                     break
             item.setHidden(query != "" and not visible_child)
 
+    def _on_list_context_menu(self, pos):
+        item = self.model_list.itemAt(pos)
+        if item is None:
+            return
+        data = item.data(Qt.ItemDataRole.UserRole) or {}
+        if data.get("kind") == "model" and data.get("effort_levels"):
+            self._show_effort_menu(item)
+
     def _on_item_clicked(self, item: QListWidgetItem):
         data = item.data(Qt.ItemDataRole.UserRole) or {}
         if data.get("kind") != "model":
+            return
+        click_pos = self.model_list.viewport().mapFromGlobal(QCursor.pos())
+        self._activate_model_item(item, data, click_pos)
+
+    def _activate_model_item(self, item, data: dict, click_pos):
+        """Chip click edits the effort; anywhere else switches to the model."""
+        if self._effort_chip_rect(item).adjusted(-4, -3, 4, 3).contains(click_pos):
+            self._show_effort_menu(item)
             return
         logging.info(
             f"ModelSwitchPopup selected: {data.get('provider_id')} / {data.get('model_id')}"

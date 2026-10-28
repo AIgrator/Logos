@@ -11,11 +11,11 @@ from urllib.parse import quote
 import qtawesome as qta
 from PIL import Image, ImageChops, ImageDraw, ImageOps
 from PIL.ImageQt import ImageQt
-from PySide6.QtCore import (QBuffer, QIODevice, QEasingCurve, QMimeData, QPoint,
+from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QEasingCurve, QMimeData, QPoint,
                             QPropertyAnimation, QRect, QSize, Qt, Signal, QTimer, Slot)
-from PySide6.QtGui import (QActionGroup, QColor, QIcon, QImage, QPainter, QPen, QPixmap,
+from PySide6.QtGui import (QActionGroup, QColor, QCursor, QIcon, QImage, QPainter, QPen, QPixmap,
                            QTextCursor, QTextOption)
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QListWidget, QListWidgetItem, QMainWindow,
+from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QMenu, QPushButton, QSizeGrip,
                                QTextEdit, QVBoxLayout, QWidget)
 
@@ -24,6 +24,7 @@ from llm.custom_providers import provider_is_configured
 from llm.model_config_manager import ModelConfigManager
 from llm.mode_capabilities import ModeCapabilities
 from llm.reasoning_effort import effective as effective_effort
+from llm.reasoning_effort import label as effort_label
 from llm.reasoning_effort import levels as effort_levels
 from states import ControllerState
 
@@ -33,7 +34,7 @@ from .widgets.attachment_chip import AttachmentChip
 from .widgets.image_preview_dialog import ImagePreviewDialog
 from .text_render import render_reasoning, render_text, render_user_message
 from .widgets.chat_widget import ChatWidget
-from .widgets.model_switch_popup import ModelSwitchPopup
+from .widgets.model_switch_popup import ModelSwitchPopup, build_effort_menu
 from .widgets.custom_title_bar import CustomTitleBar
 from .widgets.flow_layout import FlowLayout
 from .widgets.non_scrollable_scroll_area import NonScrollableScrollArea
@@ -508,6 +509,17 @@ class UIManager(QWidget):
         self.model_button.clicked.connect(self._show_model_switch_popup)
         self.model_switch_popup = None
 
+        # Current model's reasoning effort, mirrored from the model picker.
+        self.model_effort_badge = QLabel("", self)
+        self.model_effort_badge.setObjectName("ModelEffortBadge")
+        self.model_effort_badge.setFixedHeight(24)
+        self.model_effort_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.model_effort_badge.setCursor(Qt.PointingHandCursor)
+        self.model_effort_badge.setToolTip(
+            "Reasoning effort for the current model. Click to change.")
+        self.model_effort_badge.setVisible(False)
+        self.model_effort_badge.installEventFilter(self)
+
         self.pause_icon = None
         self.play_icon = None
 
@@ -549,6 +561,8 @@ class UIManager(QWidget):
 
         self.mode_model_layout.addWidget(self.mode_button)
         self.mode_model_layout.addWidget(self.model_button, 1)
+        self.mode_model_layout.addWidget(
+            self.model_effort_badge, 0, Qt.AlignmentFlag.AlignVCenter)
         self.pause_task_button = QPushButton()
         self.pause_task_button.setIconSize(QSize(20, 20))
         self.pause_task_button.setFixedSize(QSize(36, 36))
@@ -628,6 +642,8 @@ class UIManager(QWidget):
         self.controller.files_found_signal.connect(self._on_files_found)
         self.settings_manager.settings_changed.connect(self.on_settings_changed)
         self.controller.theme_manager.theme_changed.connect(self._update_icon_colors)
+        self.controller.theme_manager.theme_changed.connect(
+            self._refresh_model_effort_badge)
         self._update_icon_colors()
         self._reflow_toolbar()
         init_duration = time.perf_counter() - init_start
@@ -1043,6 +1059,56 @@ class UIManager(QWidget):
     def refresh_model_button(self, title: str):
         """Updates the toolbar model button text (called on switch/settings change)."""
         self.model_button.setText(f"⚡ {title}")
+        self._refresh_model_effort_badge()
+
+    def _active_effort_fields(self):
+        """(provider_id, model_id, levels, current) for the active model."""
+        provider_id = self.settings_manager.get("active_provider") or ""
+        providers = self.settings_manager.get("llm_providers", {}) or {}
+        provider = providers.get(provider_id) or {}
+        model_id = provider.get("model") or ""
+        available = effort_levels(provider_id, model_id) if provider_id and model_id else []
+        if not available:
+            return provider_id, model_id, [], ""
+        saved = provider.get("reasoning_efforts")
+        selected = str(saved.get(model_id) or "") if isinstance(saved, dict) else ""
+        return (provider_id, model_id, available,
+                effective_effort(provider_id, model_id, selected))
+
+    def _refresh_model_effort_badge(self):
+        """Mirrors the active model's reasoning effort next to the model button."""
+        _pid, _mid, _levels, effort = self._active_effort_fields()
+        if not effort:
+            self.model_effort_badge.clear()
+            self.model_effort_badge.setVisible(False)
+            self._schedule_toolbar_reflow()
+            return
+        color = self.controller.theme_manager.get_style("COLLAPSIBLE_META")
+        self.model_effort_badge.setStyleSheet(
+            "QLabel#ModelEffortBadge {"
+            f" border: 1px solid {color}; border-radius: 4px;"
+            f" color: {color}; font-size: 11px; padding: 0px 8px; }}"
+            "QLabel#ModelEffortBadge:hover { background-color: rgba(255, 255, 255, 0.08); }")
+        self.model_effort_badge.setText(effort_label(effort))
+        self.model_effort_badge.setVisible(True)
+        self._schedule_toolbar_reflow()
+
+    def _show_effort_badge_menu(self):
+        provider_id, model_id, levels, current = self._active_effort_fields()
+        if not levels:
+            return
+        menu = build_effort_menu(
+            self, levels, current,
+            lambda level: self.reasoning_effort_changed.emit(provider_id, model_id, level))
+        menu.exec(QCursor.pos())
+
+    def eventFilter(self, obj, event):
+        if (obj is self.model_effort_badge
+                and event.type() == QEvent.Type.MouseButtonRelease
+                and event.button() == Qt.MouseButton.LeftButton):
+            self._show_effort_badge_menu()
+            return True
+        return super().eventFilter(obj, event)
 
     def _show_model_switch_popup(self):
         if self.model_switch_popup is None:
@@ -1187,6 +1253,8 @@ class UIManager(QWidget):
             self.toggle_button, self.attachment_button,
             self.mode_button, self.model_button, self.send_button,
         ]
+        if not self.model_effort_badge.isHidden():
+            widgets.append(self.model_effort_badge)
         if not self.context_indicator_button.isHidden():
             widgets.append(self.context_indicator_button)
         if not self.pause_task_button.isHidden():
@@ -1260,7 +1328,7 @@ class UIManager(QWidget):
             return
         self._toolbar_single_row = single
 
-        extras = [self.mode_button, self.model_button]
+        extras = [self.mode_button, self.model_button, self.model_effort_badge]
         for w in extras:
             self.bottom_toolbar_layout.removeWidget(w)
             self.mode_model_layout.removeWidget(w)
@@ -1275,10 +1343,14 @@ class UIManager(QWidget):
                 anchor = 1
             self.bottom_toolbar_layout.insertWidget(anchor + 1, self.mode_button)
             self.bottom_toolbar_layout.insertWidget(anchor + 2, self.model_button, 1)
+            self.bottom_toolbar_layout.insertWidget(
+                anchor + 3, self.model_effort_badge, 0, Qt.AlignmentFlag.AlignVCenter)
             self.mode_model_container.setVisible(False)
         else:
             self.mode_model_layout.addWidget(self.mode_button)
             self.mode_model_layout.addWidget(self.model_button, 1)
+            self.mode_model_layout.addWidget(
+                self.model_effort_badge, 0, Qt.AlignmentFlag.AlignVCenter)
             self.mode_model_container.setVisible(True)
 
     def set_vision_mode_loading(self, is_loading: bool):
