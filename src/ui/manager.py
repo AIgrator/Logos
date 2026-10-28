@@ -379,6 +379,8 @@ class UIManager(QWidget):
         self.sidebar.settings_requested.connect(self.settings_button_clicked.emit)
         self.sidebar.project_renamed.connect(self.project_renamed.emit)
         self.sidebar.project_removed.connect(self.project_removed.emit)
+        self.sidebar.session_renamed.connect(self.session_renamed.emit)
+        self.sidebar.session_deleted.connect(self.session_deleted.emit)
         self._restore_sidebar_state()
 
         self.chat_widget = ChatWidget(self.controller.theme_manager)

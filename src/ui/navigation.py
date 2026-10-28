@@ -20,8 +20,10 @@ AVATAR_COLORS = [
     "#06b6d4", "#ef4444", "#6366f1", "#84cc16", "#f97316",
 ]
 
-# Sidebar tree rows: path in Qt.UserRole, row type in the next role.
+# Sidebar tree rows: path in Qt.UserRole, row type and session title in the
+# next two roles.
 _ITEM_KIND_ROLE = Qt.UserRole + 1
+_ITEM_TITLE_ROLE = Qt.UserRole + 2
 _SIDEBAR_SESSION_LIMIT = 50
 
 
@@ -145,7 +147,11 @@ class _ProjectMenuMixin:
         else:
             kind = ""
             path = item.data(Qt.UserRole)
-        if not path or kind == "session":
+        if not path:
+            return
+        if kind == "session":
+            title = item.data(0, _ITEM_TITLE_ROLE) or ""
+            self._show_session_menu(path, title, pos, self.project_list)
             return
         menu = QMenu(self)
         rename_action = menu.addAction("Rename...")
@@ -164,6 +170,24 @@ class _ProjectMenuMixin:
                 self, self._project_name(path))
             if confirmed:
                 self.project_removed.emit(path, delete_data)
+
+    def _show_session_menu(self, path: str, title: str, pos, view):
+        """Rename/reveal/delete menu shared by the home screen and sidebar."""
+        menu = QMenu(self)
+        rename_action = menu.addAction("Rename...")
+        reveal_action = menu.addAction("Show in Explorer")
+        menu.addSeparator()
+        delete_action = menu.addAction("Delete Session...")
+        chosen = menu.exec(view.viewport().mapToGlobal(pos))
+        if chosen is rename_action:
+            new_title = _ask_session_title(self, title or "Empty session")
+            if new_title:
+                self.session_renamed.emit(path, new_title)
+        elif chosen is reveal_action:
+            _reveal_in_explorer(path)
+        elif chosen is delete_action:
+            if _confirm_session_deletion(self, title):
+                self.session_deleted.emit(path)
 
 
 class HomePage(_ProjectMenuMixin, QWidget):
@@ -417,24 +441,9 @@ class HomePage(_ProjectMenuMixin, QWidget):
         path = item.data(Qt.UserRole) if item is not None else ""
         if not path:
             return
-        menu = QMenu(self)
-        rename_action = menu.addAction("Rename...")
-        reveal_action = menu.addAction("Show in Explorer")
-        menu.addSeparator()
-        delete_action = menu.addAction("Delete Session...")
-        chosen = menu.exec(self.session_list.viewport().mapToGlobal(pos))
-        if chosen is rename_action:
-            info = self._session_info(path)
-            current = info.get("title") or "Empty session"
-            title = _ask_session_title(self, current)
-            if title:
-                self.session_renamed.emit(path, title)
-        elif chosen is reveal_action:
-            _reveal_in_explorer(path)
-        elif chosen is delete_action:
-            info = self._session_info(path)
-            if _confirm_session_deletion(self, info.get("title") or ""):
-                self.session_deleted.emit(path)
+        info = self._session_info(path)
+        self._show_session_menu(
+            path, info.get("title") or "", pos, self.session_list)
 
 
 class ProjectSidebar(_ProjectMenuMixin, QWidget):
@@ -449,6 +458,8 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
     settings_requested = Signal()
     project_renamed = Signal(str, str)   # project path, new name
     project_removed = Signal(str, bool)  # project path, delete .logos data
+    session_renamed = Signal(str, str)   # session path, new title
+    session_deleted = Signal(str)        # session path
 
     EXPANDED_WIDTH = 238
     COLLAPSED_WIDTH = 54
@@ -684,6 +695,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
             child.setText(0, title)
             child.setData(0, Qt.UserRole, session.get("path", ""))
             child.setData(0, _ITEM_KIND_ROLE, "session")
+            child.setData(0, _ITEM_TITLE_ROLE, session.get("title") or "")
             objective = session.get("objective") or ""
             tooltip = title
             if objective and objective != title:
