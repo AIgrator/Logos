@@ -12,13 +12,17 @@ from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPix
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMessageBox, QMenu, QPushButton,
-                               QVBoxLayout, QWidget)
+                               QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 
 AVATAR_COLORS = [
     "#3b82f6", "#8b5cf6", "#ec4899", "#f59e0b", "#10b981",
     "#06b6d4", "#ef4444", "#6366f1", "#84cc16", "#f97316",
 ]
+
+# Sidebar tree rows: path in Qt.UserRole, row type in the next role.
+_ITEM_KIND_ROLE = Qt.UserRole + 1
+_SIDEBAR_SESSION_LIMIT = 50
 
 
 def _theme_colors(theme_manager) -> dict:
@@ -133,8 +137,15 @@ class _ProjectMenuMixin:
 
     def _show_project_item_menu(self, pos):
         item = self.project_list.itemAt(pos)
-        path = item.data(Qt.UserRole) if item is not None else ""
-        if not path:
+        if item is None:
+            return
+        if isinstance(item, QTreeWidgetItem):
+            kind = item.data(0, _ITEM_KIND_ROLE)
+            path = item.data(0, Qt.UserRole)
+        else:
+            kind = ""
+            path = item.data(Qt.UserRole)
+        if not path or kind == "session":
             return
         menu = QMenu(self)
         rename_action = menu.addAction("Rename...")
@@ -431,6 +442,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
     home_requested = Signal()
     project_selected = Signal(str)
+    session_selected = Signal(str)
     new_session_requested = Signal()
     context_requested = Signal()
     journal_requested = Signal()
@@ -447,6 +459,11 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.theme_manager = theme_manager
         self.collapsed = False
         self._projects = []
+        self._project_items = {}
+        self._expanded_projects = set()
+        self._collapsed_projects = set()
+        self._active_project = ""
+        self._active_session = ""
         self._build_ui()
         self.refresh()
         if hasattr(self.theme_manager, "theme_changed"):
@@ -489,13 +506,22 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.section_label.setContentsMargins(13, 8, 6, 0)
         root.addWidget(self.section_label)
 
-        self.project_list = QListWidget()
+        self.project_list = QTreeWidget()
+        self.project_list.setHeaderHidden(True)
+        self.project_list.setColumnCount(1)
         self.project_list.setIconSize(QSize(24, 24))
+        self.project_list.setIndentation(14)
+        self.project_list.setRootIsDecorated(True)
+        self.project_list.setExpandsOnDoubleClick(False)
+        self.project_list.setAnimated(False)
         self.project_list.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.project_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.project_list.setTextElideMode(Qt.ElideRight)
         self.project_list.setWordWrap(False)
-        self.project_list.itemClicked.connect(self._on_project_clicked)
+        self.project_list.header().setStretchLastSection(True)
+        self.project_list.itemClicked.connect(self._on_tree_item_clicked)
+        self.project_list.itemExpanded.connect(self._on_tree_item_expanded)
+        self.project_list.itemCollapsed.connect(self._on_tree_item_collapsed)
         self.project_list.setContextMenuPolicy(Qt.CustomContextMenu)
         self.project_list.customContextMenuRequested.connect(
             self._show_project_item_menu)
@@ -544,12 +570,15 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
             }}
             QLabel {{ color: {colors['muted']}; background: transparent; }}
             QLabel#SidebarSection {{ font-size: 11px; font-weight: 600; }}
-            QListWidget {{ background: transparent; border: none; outline: none; }}
-            QListWidget::item {{
+            QTreeWidget {{
+                background: transparent; border: none; outline: none;
+                show-decoration-selected: 0;
+            }}
+            QTreeWidget::item {{
                 color: {colors['text']}; padding: {item_padding}; border-radius: 7px;
             }}
-            QListWidget::item:hover {{ background: {colors['hover']}; }}
-            QListWidget::item:selected {{ background: {colors['selected']}; color: {colors['text']}; }}
+            QTreeWidget::item:hover {{ background: {colors['hover']}; }}
+            QTreeWidget::item:selected {{ background: {colors['selected']}; color: {colors['text']}; }}
             QScrollBar:vertical {{
                 background: transparent; width: 6px; margin: 2px 0;
             }}
@@ -586,6 +615,8 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
     def set_collapsed(self, collapsed: bool):
         self.collapsed = bool(collapsed)
         self.setFixedWidth(self.COLLAPSED_WIDTH if self.collapsed else self.EXPANDED_WIDTH)
+        self.project_list.setRootIsDecorated(not self.collapsed)
+        self.project_list.setIndentation(0 if self.collapsed else 14)
         self.collapse_button.setToolTip("Expand sidebar" if self.collapsed else "Collapse sidebar")
         self.home_button.setText("" if self.collapsed else "Home")
         self.new_session_button.setText("" if self.collapsed else "New session")
@@ -598,39 +629,142 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
     def refresh(self):
         self._projects = self.project_manager.recent_projects() if self.project_manager else []
+        paths = {project.get("path", "") for project in self._projects}
+        self._expanded_projects &= paths
+        self._collapsed_projects &= paths
+        active = self.project_manager.get_active_root() if self.project_manager else ""
+        if active and active not in self._collapsed_projects:
+            self._expanded_projects.add(active)
         self._render_projects()
 
     def _render_projects(self):
         self.project_list.blockSignals(True)
         self.project_list.clear()
-        active = self.project_manager.get_active_root() if self.project_manager else ""
+        self._project_items = {}
         for project in self._projects:
             name = project.get("name") or os.path.basename(project.get("path", ""))
             path = project.get("path", "")
-            item = QListWidgetItem(make_letter_icon(name), "" if self.collapsed else name)
-            item.setData(Qt.UserRole, path)
-            item.setToolTip(name)
-            self.project_list.addItem(item)
-            if path == active:
-                self.project_list.setCurrentItem(item)
-                self.project_list.scrollToItem(
-                    item, QAbstractItemView.EnsureVisible)
+            item = QTreeWidgetItem(self.project_list)
+            item.setIcon(0, make_letter_icon(name))
+            item.setText(0, "" if self.collapsed else name)
+            item.setData(0, Qt.UserRole, path)
+            item.setData(0, _ITEM_KIND_ROLE, "project")
+            item.setToolTip(0, name)
+            self._project_items[path] = item
+            if not self.collapsed and path in self._expanded_projects:
+                self._populate_sessions(item, path)
+                item.setExpanded(True)
+            elif not self.collapsed:
+                self._add_sessions_placeholder(item)
         if not self._projects:
-            empty = QListWidgetItem("" if self.collapsed else "No projects yet")
+            empty = QTreeWidgetItem(self.project_list)
+            empty.setText(0, "" if self.collapsed else "No projects yet")
             empty.setFlags(Qt.NoItemFlags)
-            self.project_list.addItem(empty)
         self.project_list.blockSignals(False)
+        self._select_active()
 
-    def set_active_project(self, path: str):
-        for row in range(self.project_list.count()):
-            item = self.project_list.item(row)
-            if item.data(Qt.UserRole) == path:
-                self.project_list.setCurrentItem(item)
-                self.project_list.scrollToItem(
-                    item, QAbstractItemView.EnsureVisible)
-                return
+    def _add_sessions_placeholder(self, item):
+        """A disabled child keeps the expand arrow without reading journals."""
+        placeholder = QTreeWidgetItem(item)
+        placeholder.setFlags(Qt.NoItemFlags)
+        placeholder.setData(0, _ITEM_KIND_ROLE, "placeholder")
 
-    def _on_project_clicked(self, item):
-        path = item.data(Qt.UserRole) if item is not None else ""
-        if path:
-            self.project_selected.emit(path)
+    def _populate_sessions(self, item, path):
+        item.takeChildren()
+        sessions = []
+        if self.project_manager is not None:
+            try:
+                sessions = self.project_manager.list_sessions(
+                    path, limit=_SIDEBAR_SESSION_LIMIT)
+            except Exception as e:
+                logging.warning(f"Could not list sessions for {path}: {e}")
+        for session in sessions:
+            title = session.get("title") or "Empty session"
+            child = QTreeWidgetItem(item)
+            child.setText(0, title)
+            child.setData(0, Qt.UserRole, session.get("path", ""))
+            child.setData(0, _ITEM_KIND_ROLE, "session")
+            objective = session.get("objective") or ""
+            tooltip = title
+            if objective and objective != title:
+                tooltip += f"\n{objective}"
+            tooltip += f"\n{session.get('path', '')}"
+            child.setToolTip(0, tooltip)
+        if not sessions:
+            empty = QTreeWidgetItem(item)
+            empty.setText(0, "No sessions")
+            empty.setFlags(Qt.NoItemFlags)
+
+    def _has_sessions_placeholder(self, item) -> bool:
+        for row in range(item.childCount()):
+            if item.child(row).data(0, _ITEM_KIND_ROLE) == "placeholder":
+                return True
+        return False
+
+    def _select_active(self):
+        item = self._project_items.get(self._active_project)
+        if item is None:
+            return
+        target = None
+        if self._active_session and item.isExpanded():
+            for row in range(item.childCount()):
+                child = item.child(row)
+                if (child.data(0, _ITEM_KIND_ROLE) == "session"
+                        and child.data(0, Qt.UserRole) == self._active_session):
+                    target = child
+                    break
+        target = target or item
+        self.project_list.setCurrentItem(target)
+        self.project_list.scrollToItem(target, QAbstractItemView.EnsureVisible)
+
+    def _on_tree_item_clicked(self, item, _column):
+        if item is None:
+            return
+        kind = item.data(0, _ITEM_KIND_ROLE)
+        path = item.data(0, Qt.UserRole)
+        if kind == "session":
+            if path:
+                self.session_selected.emit(path)
+            return
+        if kind != "project" or not path:
+            return
+        if not self.collapsed:
+            self._collapsed_projects.discard(path)
+            self._expanded_projects.add(path)
+            if item.childCount() and not item.isExpanded():
+                item.setExpanded(True)
+        self.project_selected.emit(path)
+
+    def _on_tree_item_expanded(self, item):
+        if item.data(0, _ITEM_KIND_ROLE) != "project":
+            return
+        path = item.data(0, Qt.UserRole)
+        if not path:
+            return
+        self._expanded_projects.add(path)
+        self._collapsed_projects.discard(path)
+        if self._has_sessions_placeholder(item):
+            self._populate_sessions(item, path)
+            self._select_active()
+
+    def _on_tree_item_collapsed(self, item):
+        if item.data(0, _ITEM_KIND_ROLE) != "project":
+            return
+        path = item.data(0, Qt.UserRole)
+        if not path:
+            return
+        self._expanded_projects.discard(path)
+        self._collapsed_projects.add(path)
+
+    def set_active_project(self, path: str, session_path: str = ""):
+        previous = self._active_project
+        self._active_project = path or ""
+        self._active_session = session_path if self._active_project else ""
+        item = self._project_items.get(self._active_project)
+        if (item is not None and not self.collapsed
+                and previous != self._active_project):
+            self._collapsed_projects.discard(self._active_project)
+            self._expanded_projects.add(self._active_project)
+            if item.childCount() and not item.isExpanded():
+                item.setExpanded(True)
+        self._select_active()

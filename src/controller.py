@@ -581,6 +581,7 @@ class AppController(QObject):
         try:
             if self.project_manager.set_session_objective(self.session_file, objective):
                 self.session_objective = objective
+                self.ui.refresh_sidebar()
         except Exception as e:
             logging.warning(f"Could not store session objective: {e}")
 

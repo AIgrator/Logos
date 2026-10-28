@@ -372,6 +372,7 @@ class UIManager(QWidget):
         self.home_page.session_deleted.connect(self.session_deleted.emit)
         self.sidebar.home_requested.connect(self.home_requested.emit)
         self.sidebar.project_selected.connect(self.project_switch_requested.emit)
+        self.sidebar.session_selected.connect(self.session_open_requested.emit)
         self.sidebar.new_session_requested.connect(self.new_session_requested.emit)
         self.sidebar.context_requested.connect(self.context_requested.emit)
         self.sidebar.journal_requested.connect(self.journal_requested.emit)
@@ -1322,7 +1323,8 @@ class UIManager(QWidget):
         tooltip = path or "Switch project"
         self.custom_title_bar.set_project_name(display, tooltip)
         try:
-            self.sidebar.set_active_project(path)
+            self.sidebar.set_active_project(
+                path, getattr(self.controller, "session_file", ""))
         except Exception:
             pass
 
@@ -1349,15 +1351,21 @@ class UIManager(QWidget):
             # equal left/right inset provides the visual padding.
             self.layout.setContentsMargins(0, 11, 11, 11)
 
-    def refresh_project_views(self):
-        """Reloads project/session lists in the sidebar and home screen."""
+    def refresh_sidebar(self):
+        """Reloads the sidebar tree and restores the active project/session."""
         try:
             self.sidebar.refresh()
             manager = getattr(self.controller, "project_manager", None)
             if manager is not None:
-                self.sidebar.set_active_project(manager.get_active_root())
+                self.sidebar.set_active_project(
+                    manager.get_active_root(),
+                    getattr(self.controller, "session_file", ""))
         except Exception as e:
             logging.warning(f"Could not refresh sidebar: {e}")
+
+    def refresh_project_views(self):
+        """Reloads project/session lists in the sidebar and home screen."""
+        self.refresh_sidebar()
         try:
             self.home_page.refresh()
         except Exception as e:
