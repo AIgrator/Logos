@@ -3,6 +3,7 @@ name = "logos"
 version = "0.1.0"
 description = "A desktop AI assistant that sees your screen and clicks buttons for you. What could possibly go wrong?"
 readme = "README.md"
+license = { text = "MIT" }
 requires-python = "==3.12.*"
 dependencies = [
     "pyside6",

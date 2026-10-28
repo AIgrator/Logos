@@ -2,6 +2,8 @@
 This module defines the settings window for the application.
 """
 import copy
+import os
+import logging
 
 from PySide6.QtWidgets import (
     QDialog,
@@ -26,7 +28,8 @@ from PySide6.QtWidgets import (
     QToolButton,
     QFrame,
     QRadioButton,
-    QMessageBox
+    QMessageBox,
+    QPlainTextEdit,
 )
 from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QPalette
@@ -39,6 +42,7 @@ from src.ui.theme_manager import (
 
 from settings_manager import SettingsManager
 from llm import PROVIDERS, providers_ready, start_provider_warmup
+from build_info import APP_VERSION
 from src.ui.widgets.font_manager.font_combobox import FontComboBox
 from src.ui.widgets.hotkey.hotkey_edit import HotkeyEdit
 from src.apps.installed_apps import AppScanner
@@ -46,12 +50,25 @@ from src.ui.widgets.llm_provider_widget import LLMProviderWidget
 from src.ui.widgets.mode_model_widget import ModeModelWidget
 from src.ui.widgets.custom_provider_dialog import CustomProviderDialog
 from src.ui.utils import CustomToolTipManager, NavButtonHoverFilter
-import logging
 
 from src.ui.widgets.busy_spinner import BusySpinner
 
 CONTEXT_SETTINGS_DOC_URL = (
     "https://github.com/AIgrator/Logos/blob/main/docs/context_settings.md")
+PROJECT_URL = "https://github.com/AIgrator/Logos"
+ISSUES_URL = f"{PROJECT_URL}/issues"
+LICENSE_FILE = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "LICENSE")
+
+
+def _read_license_text() -> str:
+    try:
+        with open(LICENSE_FILE, encoding="utf-8") as license_file:
+            return license_file.read().strip()
+    except OSError as e:
+        logging.warning(f"Could not read license file {LICENSE_FILE}: {e}")
+        return "MIT License"
 
 
 class SettingsWindow(QDialog):
@@ -160,10 +177,14 @@ class SettingsWindow(QDialog):
             "vision": ("fa5s.robot", "Vision"),
             "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
             "apps": ("fa5s.th-large", "Applications"),
-            "context": ("fa5s.file-alt", "Context")
+            "context": ("fa5s.file-alt", "Context"),
+            "about": ("fa5s.info-circle", "About"),
         }
 
         for key, (icon_name, tooltip) in self.nav_sections.items():
+            if key == "about":
+                # Keep About pinned to the bottom of the navigation bar.
+                nav_layout.addStretch(1)
             button = QToolButton()
             # The icon is now set and managed by the NavButtonHoverFilter
             button.setIconSize(QSize(24, 24))
@@ -204,6 +225,7 @@ class SettingsWindow(QDialog):
             "compact": self._create_compact_mode_section(),
             "apps": self._create_apps_section(),
             "context": self._create_context_section(),
+            "about": self._create_about_section(),
         }
 
         self.section_stack = QStackedWidget()
@@ -1313,6 +1335,73 @@ class SettingsWindow(QDialog):
             "Auto-compact on low headroom:", "11-auto-compact-on-low-headroom"), 10, 0)
         context_layout.addWidget(self._create_help_label(auto_compact_tooltip), 10, 1, Qt.AlignLeft)
         context_layout.addWidget(self.auto_compact_checkbox, 10, 3)
+
+        return group
+
+    def _create_about_link(self, text, url):
+        """Creates a label that opens an external URL in the default browser."""
+        label = QLabel(f'<a href="{url}">{text}</a>')
+        label.setTextFormat(Qt.RichText)
+        label.setOpenExternalLinks(True)
+        label.setToolTip(f"Open {url}")
+        return label
+
+    def _create_about_section(self):
+        """Creates the About section pinned to the bottom of the navigation."""
+        group = QGroupBox("About")
+        layout = QVBoxLayout(group)
+        layout.setSpacing(14)
+
+        header_layout = QHBoxLayout()
+        header_layout.setSpacing(14)
+        logo_label = QLabel()
+        logo_label.setPixmap(QIcon("assets/ico.ico").pixmap(QSize(64, 64)))
+        header_layout.addWidget(logo_label, 0, Qt.AlignTop)
+
+        title_layout = QVBoxLayout()
+        title_layout.setSpacing(2)
+        name_label = QLabel("Logos")
+        name_font = name_label.font()
+        name_font.setPointSize(name_font.pointSize() + 8)
+        name_font.setBold(True)
+        name_label.setFont(name_font)
+        version_label = QLabel(f"Version {APP_VERSION}")
+        version_label.setStyleSheet("color: #9E9E9E;")
+        title_layout.addWidget(name_label)
+        title_layout.addWidget(version_label)
+        title_layout.addStretch(1)
+        header_layout.addLayout(title_layout, 1)
+        layout.addLayout(header_layout)
+
+        details_layout = QGridLayout()
+        details_layout.setHorizontalSpacing(16)
+        details_layout.setVerticalSpacing(8)
+        details_layout.setColumnStretch(1, 1)
+        details = [
+            ("Author", QLabel("Yaroslav Litvinchenko")),
+            ("Email", self._create_about_link(
+                "aigrator@gmail.com", "mailto:aigrator@gmail.com")),
+            ("GitHub", self._create_about_link(
+                "github.com/AIgrator/Logos", PROJECT_URL)),
+            ("Issue Tracker", self._create_about_link(
+                "github.com/AIgrator/Logos/issues", ISSUES_URL)),
+            ("License", QLabel("MIT")),
+            ("Copyright", QLabel("Copyright (c) 2026 Yaroslav Litvinchenko")),
+        ]
+        for row, (title, value) in enumerate(details):
+            field_label = QLabel(title)
+            field_label.setStyleSheet("font-weight: bold;")
+            value.setWordWrap(True)
+            details_layout.addWidget(field_label, row, 0)
+            details_layout.addWidget(value, row, 1)
+        layout.addLayout(details_layout)
+
+        license_box = QPlainTextEdit()
+        license_box.setPlainText(_read_license_text())
+        license_box.setReadOnly(True)
+        license_box.setFixedHeight(170)
+        license_box.setToolTip("MIT License (LICENSE file in the project root)")
+        layout.addWidget(license_box)
 
         return group
 

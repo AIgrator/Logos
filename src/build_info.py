@@ -11,6 +11,9 @@ import subprocess
 _repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _cached = None
 
+# Shown in Settings > About; keep in sync with pyproject.toml.
+APP_VERSION = "0.1.0"
+
 
 def _run_git(args, timeout=8):
     try:
