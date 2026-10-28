@@ -7,8 +7,9 @@ import zlib
 from datetime import date, datetime, timedelta
 
 import qtawesome as qta
-from PySide6.QtCore import QSize, Qt, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices, QFont, QIcon, QPainter, QPixmap
+from PySide6.QtCore import QPoint, QSize, Qt, QUrl, Signal
+from PySide6.QtGui import (QActionGroup, QColor, QDesktopServices, QFont, QIcon,
+                           QPainter, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout,
                                QInputDialog, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMessageBox, QMenu, QPushButton,
@@ -680,15 +681,19 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         placeholder.setFlags(Qt.NoItemFlags)
         placeholder.setData(0, _ITEM_KIND_ROLE, "placeholder")
 
+    def _list_sessions(self, path: str) -> list:
+        if self.project_manager is None:
+            return []
+        try:
+            return self.project_manager.list_sessions(
+                path, limit=_SIDEBAR_SESSION_LIMIT)
+        except Exception as e:
+            logging.warning(f"Could not list sessions for {path}: {e}")
+            return []
+
     def _populate_sessions(self, item, path):
         item.takeChildren()
-        sessions = []
-        if self.project_manager is not None:
-            try:
-                sessions = self.project_manager.list_sessions(
-                    path, limit=_SIDEBAR_SESSION_LIMIT)
-            except Exception as e:
-                logging.warning(f"Could not list sessions for {path}: {e}")
+        sessions = self._list_sessions(path)
         for session in sessions:
             title = session.get("title") or "Empty session"
             child = QTreeWidgetItem(item)
@@ -740,12 +745,60 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
             return
         if kind != "project" or not path:
             return
-        if not self.collapsed:
-            self._collapsed_projects.discard(path)
-            self._expanded_projects.add(path)
-            if item.childCount() and not item.isExpanded():
-                item.setExpanded(True)
+        if self.collapsed:
+            self._open_collapsed_project(item, path)
+            return
+        self._collapsed_projects.discard(path)
+        self._expanded_projects.add(path)
+        if item.childCount() and not item.isExpanded():
+            item.setExpanded(True)
         self.project_selected.emit(path)
+
+    def _open_collapsed_project(self, item, path):
+        """One session opens directly; several open the chooser flyout."""
+        sessions = self._list_sessions(path)
+        if len(sessions) > 1:
+            self._show_session_flyout(item, path, sessions)
+            self._select_active()
+            return
+        if len(sessions) == 1:
+            session_path = sessions[0].get("path", "")
+            if path != self._active_project:
+                self.project_selected.emit(path)
+            elif session_path and session_path != self._active_session:
+                self.session_selected.emit(session_path)
+            return
+        self.project_selected.emit(path)
+
+    def _show_session_flyout(self, item, path, sessions):
+        """Session chooser anchored to a project tile in the collapsed rail."""
+        menu = QMenu(self)
+        menu.setToolTipsVisible(True)
+        menu.addSection(self._project_name(path))
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        is_active_project = path == self._active_project
+        for session in sessions:
+            session_path = session.get("path", "")
+            title = session.get("title") or "Empty session"
+            action = menu.addAction(title)
+            action.setCheckable(True)
+            action.setActionGroup(group)
+            action.setData(session_path)
+            action.setChecked(
+                is_active_project and session_path == self._active_session)
+            objective = session.get("objective") or ""
+            tooltip = title
+            if objective and objective != title:
+                tooltip += f"\n{objective}"
+            tooltip += f"\n{session_path}"
+            action.setToolTip(tooltip)
+        viewport = self.project_list.viewport()
+        top = viewport.mapTo(self, QPoint(0, self.project_list.visualItemRect(item).top())).y()
+        chosen = menu.exec(self.mapToGlobal(QPoint(self.width(), top - 6)))
+        chosen_path = chosen.data() if chosen is not None else ""
+        if chosen_path and chosen_path != self._active_session:
+            self.session_selected.emit(chosen_path)
 
     def _on_tree_item_expanded(self, item):
         if item.data(0, _ITEM_KIND_ROLE) != "project":
