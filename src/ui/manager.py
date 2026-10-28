@@ -547,12 +547,12 @@ class UIManager(QWidget):
         self.pause_task_button.installEventFilter(self.pause_task_hover_filter)
         self.pause_task_button.clicked.connect(self._on_pause_task_clicked)
         self.pause_task_button.setVisible(False)
-        self.mode_model_layout.addWidget(self.pause_task_button)
         self.bottom_toolbar_layout.addStretch()
         # One morphing action button: Stop while thinking with empty input,
         # Send otherwise (sending cancels the in-flight response).
         self._thinking_active = False
         self.bottom_toolbar_layout.addWidget(self.context_indicator_button)
+        self.bottom_toolbar_layout.addWidget(self.pause_task_button)
         self.bottom_toolbar_layout.addWidget(self.send_button)
         self.bottom_toolbar_layout.addWidget(self.cancel_button)
         self.cancel_button.setVisible(False)
@@ -1229,24 +1229,25 @@ class UIManager(QWidget):
             return
         self._toolbar_single_row = single
 
-        extras = [self.mode_button, self.model_button, self.pause_task_button]
+        extras = [self.mode_button, self.model_button]
         for w in extras:
             self.bottom_toolbar_layout.removeWidget(w)
             self.mode_model_layout.removeWidget(w)
 
         if single:
             # Keep the mode/model dropdowns next to the attach button (left
-            # side), before the stretch that pushes Send to the right.
+            # side), before the stretch that pushes Send to the right. The
+            # model selector keeps its stretch so it fills the spare width
+            # here too, exactly like in the two-row layout.
             anchor = self.bottom_toolbar_layout.indexOf(self.attachment_button)
             if anchor < 0:
                 anchor = 1
-            for offset, w in enumerate(extras):
-                self.bottom_toolbar_layout.insertWidget(anchor + 1 + offset, w)
+            self.bottom_toolbar_layout.insertWidget(anchor + 1, self.mode_button)
+            self.bottom_toolbar_layout.insertWidget(anchor + 2, self.model_button, 1)
             self.mode_model_container.setVisible(False)
         else:
             self.mode_model_layout.addWidget(self.mode_button)
             self.mode_model_layout.addWidget(self.model_button, 1)
-            self.mode_model_layout.addWidget(self.pause_task_button)
             self.mode_model_container.setVisible(True)
 
     def set_vision_mode_loading(self, is_loading: bool):
