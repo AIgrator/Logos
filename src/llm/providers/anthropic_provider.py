@@ -180,6 +180,24 @@ class AnthropicProvider(BaseLLMProvider):
             },
         }
 
+    def _effort_kwargs(self) -> dict:
+        """Adaptive thinking + effort level, or nothing when the model has no
+        effort control. Forced tool choice is incompatible with thinking, so
+        callers on that path must not use this."""
+        if not self.reasoning_effort:
+            return {}
+        return {
+            "thinking": {"type": "adaptive"},
+            "output_config": {"effort": self.reasoning_effort},
+        }
+
+    def _thinking_max_tokens(self, max_tokens: int) -> int:
+        """Adaptive thinking shares max_tokens with the answer; keep a floor
+        so the default 4096 cannot be spent entirely on thinking."""
+        if self.reasoning_effort:
+            return max(int(max_tokens), 8192)
+        return max_tokens
+
     def computer_use_turn(
         self,
         task: str | None = None,
@@ -211,6 +229,7 @@ class AnthropicProvider(BaseLLMProvider):
                 max_tokens = int(self.provider_config.get("max_tokens", 4096))
             except (ValueError, TypeError):
                 max_tokens = 4096
+            max_tokens = self._thinking_max_tokens(max_tokens)
             tools = [dict(self.COMPUTER_TOOLSET), dict(self.ASK_USER_TOOL)]
             if launch_apps:
                 tools.append(self._launch_app_tool(launch_apps))
@@ -291,6 +310,7 @@ class AnthropicProvider(BaseLLMProvider):
                 system=system,
                 messages=messages,
                 timeout=90,
+                **self._effort_kwargs(),
             )
             self._record_usage(getattr(response, "usage", None))
             messages.append({"role": "assistant", "content": response.content})
@@ -580,6 +600,12 @@ class AnthropicProvider(BaseLLMProvider):
             else:
                 logger.warning(f"Schema '{schema_name}' requested but not found. Proceeding without forced tool.")
 
+        if not use_forced_tool:
+            # Adaptive thinking cannot be combined with a forced tool call.
+            request_body.update(self._effort_kwargs())
+            request_body["max_tokens"] = self._thinking_max_tokens(
+                request_body["max_tokens"])
+
         try:
             response = self.client.messages.create(**request_body)
             self._record_usage(getattr(response, "usage", None))
@@ -748,6 +774,7 @@ class AnthropicProvider(BaseLLMProvider):
             max_tokens = int(self.provider_config.get("max_tokens", 4096))
         except (ValueError, TypeError):
             max_tokens = 4096
+        max_tokens = self._thinking_max_tokens(max_tokens)
         self.is_cancelling = False
         raw_llm_logger = logging.getLogger('llm_raw_response')
 
@@ -772,7 +799,8 @@ class AnthropicProvider(BaseLLMProvider):
                 ],
                 extra_headers={
                     "anthropic-beta": "web-fetch-2025-09-10"
-                }
+                },
+                **self._effort_kwargs(),
             ) as stream:
                 self.current_stream = stream
                 tool_calls = defaultdict(lambda: {"name": "", "arguments": ""})

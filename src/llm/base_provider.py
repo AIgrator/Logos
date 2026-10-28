@@ -32,6 +32,7 @@ class BaseLLMProvider(ABC):
         self.provider_config = provider_config
         self.api_key = self.provider_config.get("api_key")
         self.model = self.provider_config.get("model")
+        self.reasoning_effort = self.provider_config.get("reasoning_effort") or ""
         self.require_json_output = self.provider_config.get("require_json_output", False)
         self.last_usage = None
         self._install_auto_logging()

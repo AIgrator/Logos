@@ -240,6 +240,7 @@ class AppController(QObject):
         self.ui.continue_requested.connect(self._handle_continue_request)
         self.ui.job_stop_requested.connect(self._handle_job_stop)
         self.ui.model_selected.connect(self.switch_model)
+        self.ui.reasoning_effort_changed.connect(self.set_reasoning_effort)
         self.ui.cancel_requested.connect(self.handle_cancel_request)
         self.ui.pause_resume_clicked.connect(self._handle_pause_resume)
         self.ui.pause_for_feedback_clicked.connect(self._handle_pause_for_feedback)
@@ -2690,6 +2691,37 @@ class AppController(QObject):
         self.ui.set_title_bar_text(window_title)
         self.ui.refresh_model_button(title_string)
         self.ui.set_assistant_name(self._get_current_model_name())
+
+    def set_reasoning_effort(self, provider_id: str, model_id: str, effort: str):
+        """Stores the per-model effort level and applies it to the active model."""
+        from llm.reasoning_effort import levels
+        if not provider_id or not model_id:
+            return
+        if effort not in levels(provider_id, model_id):
+            logging.warning(
+                "Ignoring unsupported reasoning effort '%s' for %s::%s",
+                effort, provider_id, model_id)
+            return
+        all_settings = self.settings_manager.all()
+        providers = all_settings.get("llm_providers") or {}
+        target = providers.get(provider_id)
+        if not isinstance(target, dict):
+            return
+        saved = dict(target.get("reasoning_efforts") or {})
+        if saved.get(model_id) == effort:
+            return
+        saved[model_id] = effort
+        target["reasoning_efforts"] = saved
+        is_active = (all_settings.get("active_provider") == provider_id
+                     and target.get("model") == model_id)
+        # Persist the preference; only the active model needs a provider reload
+        # (settings_changed does that for us when emit is True).
+        self.settings_manager.set_many(
+            {"llm_providers": providers}, save=True, emit=is_active)
+        self.settings = self.settings_manager.all()
+        logging.info(
+            "Reasoning effort for %s::%s set to '%s' (active=%s)",
+            provider_id, model_id, effort, is_active)
 
     def switch_model(self, provider_id: str, model_id: str, custom_notice: str | None = None):
         """Switches the active provider/model for this session only.

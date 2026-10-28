@@ -98,6 +98,20 @@ class ModelMetadata:
         return bool(cls.get(provider_id, model_id).get("reasoning"))
 
     @classmethod
+    def reasoning_efforts(cls, provider_id: str, model_id: str) -> list:
+        """Effort levels the catalogue reports for the model (may be empty)."""
+        efforts = cls.get(provider_id, model_id).get("reasoning_efforts")
+        if not isinstance(efforts, (list, tuple)):
+            return []
+        return [str(level) for level in efforts if level]
+
+    @classmethod
+    def default_effort(cls, provider_id: str, model_id: str) -> str:
+        """Catalogue default effort level, or an empty string when unknown."""
+        value = cls.get(provider_id, model_id).get("default_effort")
+        return str(value) if isinstance(value, str) else ""
+
+    @classmethod
     def input_modalities(cls, provider_id: str, model_id: str) -> list:
         """Input modalities reported for the model (e.g. ["text", "image"])."""
         mods = cls.get(provider_id, model_id).get("input_modalities")

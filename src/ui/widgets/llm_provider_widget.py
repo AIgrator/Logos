@@ -337,6 +337,14 @@ class LLMProviderWidget(QWidget):
                     if primary_val and secondary_val:
                         current_settings[key] = f"{primary_val}/{secondary_val}"
 
+            # Per-model reasoning effort choices have no field on this page;
+            # carry them over so saving settings never wipes them.
+            stored_efforts = (
+                (self.settings_manager.get("llm_providers", {}) or {})
+                .get(provider_id, {}) or {}).get("reasoning_efforts")
+            if isinstance(stored_efforts, dict) and stored_efforts:
+                current_settings["reasoning_efforts"] = dict(stored_efforts)
+
             all_settings[provider_id] = current_settings
 
         active_provider_id = self.provider_combo.currentData()

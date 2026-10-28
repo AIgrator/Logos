@@ -372,6 +372,9 @@ class GoogleProvider(BaseLLMProvider):
                 }
                 if instructions:
                     create_kwargs["system_instruction"] = instructions
+                if self.reasoning_effort:
+                    create_kwargs["generation_config"] = {
+                        "thinking_level": self.reasoning_effort}
                 interaction = self.client.interactions.create(**create_kwargs)
             else:
                 if not outputs:
@@ -431,6 +434,9 @@ class GoogleProvider(BaseLLMProvider):
                 }
                 if instructions:
                     create_kwargs["system_instruction"] = instructions
+                if self.reasoning_effort:
+                    create_kwargs["generation_config"] = {
+                        "thinking_level": self.reasoning_effort}
                 interaction = self.client.interactions.create(**create_kwargs)
 
             self._record_usage(self._field(interaction, "usage"))
@@ -718,9 +724,14 @@ class GoogleProvider(BaseLLMProvider):
         if system_prompt:
             generation_config_kwargs['system_instruction'] = system_prompt
 
+        thinking_kwargs = {}
         if thinking_summary:
+            thinking_kwargs['include_thoughts'] = True
+        if self.reasoning_effort:
+            thinking_kwargs['thinking_level'] = self.reasoning_effort
+        if thinking_kwargs:
             generation_config_kwargs['thinking_config'] = genai.types.ThinkingConfig(
-                include_thoughts=True)
+                **thinking_kwargs)
 
         if use_tool_calling:
             logging.info("Gemini Provider: Using modern structured output with response_mime_type.")
@@ -834,6 +845,10 @@ class GoogleProvider(BaseLLMProvider):
                 genai_types.Tool(google_search=genai_types.GoogleSearch()),
                 {"url_context": {}},
             ]
+
+        if self.reasoning_effort:
+            generation_config_kwargs['thinking_config'] = genai.types.ThinkingConfig(
+                thinking_level=self.reasoning_effort)
 
         generation_config = genai.types.GenerateContentConfig(**generation_config_kwargs)
         contents = self._prepare_chat_contents(prompt, attachments, history)

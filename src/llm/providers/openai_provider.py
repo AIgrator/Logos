@@ -242,6 +242,8 @@ class OpenAIProvider(BaseLLMProvider):
                 logging.info(
                     f"CUA first turn: instructions attached "
                     f"({len(instructions)} chars).")
+            if self.reasoning_effort:
+                kwargs["reasoning"] = {"effort": self.reasoning_effort}
 
             response = self.client.responses.create(**kwargs)
             self._record_usage(getattr(response, "usage", None))
@@ -510,8 +512,13 @@ class OpenAIProvider(BaseLLMProvider):
             "instructions": instructions or "",
         }
 
+        reasoning_config = {}
         if self._supports_reasoning_summary():
-            request_body["reasoning"] = {"summary": "auto"}
+            reasoning_config["summary"] = "auto"
+        if self.reasoning_effort:
+            reasoning_config["effort"] = self.reasoning_effort
+        if reasoning_config:
+            request_body["reasoning"] = reasoning_config
 
         use_forced_tool = schema_name and self.require_json_output
 
@@ -636,13 +643,16 @@ class OpenAIProvider(BaseLLMProvider):
         raw_llm_logger = logging.getLogger('llm_raw_response')
 
         try:
-            stream = self.client.responses.create(
-                model=self.model,
-                input=payload["input"],
-                instructions=payload["instructions"],
-                tools=payload["tools"],
-                stream=True,
-            )
+            stream_kwargs = {
+                "model": self.model,
+                "input": payload["input"],
+                "instructions": payload["instructions"],
+                "tools": payload["tools"],
+                "stream": True,
+            }
+            if self.reasoning_effort:
+                stream_kwargs["reasoning"] = {"effort": self.reasoning_effort}
+            stream = self.client.responses.create(**stream_kwargs)
             self.current_stream = stream
             for event in stream:
                 # The raw event object has a rich structure. For logging, convert it to a dict.

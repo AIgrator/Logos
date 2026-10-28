@@ -237,6 +237,8 @@ class XAIProvider(BaseLLMProvider):
             "model": self.model,
             "messages": messages,
         }
+        if self.reasoning_effort:
+            request_body["reasoning_effort"] = self.reasoning_effort
 
         # Always provide all tools if JSON output is required, then specify tool_choice
         if self.require_json_output:
@@ -331,7 +333,10 @@ class XAIProvider(BaseLLMProvider):
             xai_client = XAIClient(api_key=self.api_key)
 
             # Build the chat and provide web_search (default for browsing) as an agentic tool.
-            chat = xai_client.chat.create(model=self.model, tools=[xai_web_search()])
+            chat_kwargs = {"model": self.model, "tools": [xai_web_search()]}
+            if self.reasoning_effort:
+                chat_kwargs["reasoning_effort"] = self.reasoning_effort
+            chat = xai_client.chat.create(**chat_kwargs)
 
             # Append a system message if provided
             if system_prompt:

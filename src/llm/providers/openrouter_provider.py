@@ -225,6 +225,13 @@ class OpenRouterProvider(BaseLLMProvider):
             detail.get("text") for detail in details
             if isinstance(detail, dict) and detail.get("text"))
 
+    def _reasoning_payload(self) -> dict:
+        """OpenRouter reasoning block: explicit effort when the user picked a
+        level the model supports, otherwise the previous always-on behaviour."""
+        if self.reasoning_effort:
+            return {"effort": self.reasoning_effort}
+        return {"enabled": True}
+
     def _execute_get_response(self, prompt: str, attachments: list = None, system_prompt: str = None, history: list = None, schema_name: str | None = None):
         from ..llm_parsing import repair_json_string
         headers = {
@@ -233,7 +240,7 @@ class OpenRouterProvider(BaseLLMProvider):
         }
         messages = self._prepare_messages(prompt, attachments, system_prompt, history)
         request_body = {"model": self.model, "messages": messages,
-                        "reasoning": {"enabled": True}}
+                        "reasoning": self._reasoning_payload()}
 
         use_forced_tool = schema_name and self.require_json_output
 
@@ -373,6 +380,8 @@ class OpenRouterProvider(BaseLLMProvider):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self.reasoning_effort:
+            request_body["reasoning"] = {"effort": self.reasoning_effort}
 
         log_body = copy.deepcopy(request_body)
         for message in log_body.get('messages', []):

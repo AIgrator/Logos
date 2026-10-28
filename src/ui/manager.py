@@ -23,6 +23,8 @@ from attachments import resolve_path
 from llm.custom_providers import provider_is_configured
 from llm.model_config_manager import ModelConfigManager
 from llm.mode_capabilities import ModeCapabilities
+from llm.reasoning_effort import effective as effective_effort
+from llm.reasoning_effort import levels as effort_levels
 from states import ControllerState
 
 from . import styles
@@ -267,6 +269,7 @@ class UIManager(QWidget):
     vision_mode_selected = Signal()
     browser_mode_selected = Signal()
     model_selected = Signal(str, str)  # provider_id, model_id (session-only switch)
+    reasoning_effort_changed = Signal(str, str, str)  # provider_id, model_id, level
     continue_requested = Signal()
     retry_requested = Signal()
     job_stop_requested = Signal(int)
@@ -1045,8 +1048,20 @@ class UIManager(QWidget):
         if self.model_switch_popup is None:
             self.model_switch_popup = ModelSwitchPopup(self.main_window)
             self.model_switch_popup.model_selected.connect(self.model_selected.emit)
+            self.model_switch_popup.reasoning_effort_changed.connect(
+                self.reasoning_effort_changed.emit)
         self.model_switch_popup.set_sections(self._build_model_sections())
         self.model_switch_popup.open_near(self.model_button)
+
+    @staticmethod
+    def _effort_fields(provider_id: str, model_id: str, saved: dict) -> dict:
+        """Picker fields for the per-model effort control (no levels = unsupported)."""
+        available = effort_levels(provider_id, model_id)
+        current = ""
+        if available:
+            selected = str(saved.get(model_id) or "") if isinstance(saved, dict) else ""
+            current = effective_effort(provider_id, model_id, selected)
+        return {"effort_levels": available, "effort_current": current}
 
     def _build_model_sections(self) -> list:
         """Builds popup sections: provider headers + models, keyed providers only.
@@ -1065,6 +1080,7 @@ class UIManager(QWidget):
                 continue
             display = info.get("display_name") or pid.replace("_", " ").replace("-", " ").title()
             model_labels = info.get("model_labels") or {}
+            saved_efforts = (user_providers.get(pid) or {}).get("reasoning_efforts") or {}
             if pid == "openrouter":
                 groups = info.get("models_by_provider") or {}
                 group_entries = []
@@ -1085,7 +1101,8 @@ class UIManager(QWidget):
                         items.append({"kind": "model", "label": label,
                                       "provider_id": pid, "model_id": stored_id,
                                       "provider_display": display,
-                                      "is_current": is_current})
+                                      "is_current": is_current,
+                                      **self._effort_fields(pid, stored_id, saved_efforts)})
                     if items:
                         group_entries.append((group, items))
                 if not group_entries:
@@ -1106,7 +1123,8 @@ class UIManager(QWidget):
                     sections.append({"kind": "model", "label": model_labels.get(model_name, model_name),
                                       "provider_id": pid, "model_id": model_name,
                                       "provider_display": display,
-                                      "is_current": (pid == current_pid and model_name == current_model)})
+                                      "is_current": (pid == current_pid and model_name == current_model),
+                                      **self._effort_fields(pid, model_name, saved_efforts)})
         return sections
 
     def set_active_mode(self, mode: str):

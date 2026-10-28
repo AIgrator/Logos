@@ -93,6 +93,17 @@ class LLMWorker(QObject):
         if model_id:
             full_config["model"] = model_id
 
+        # Resolve the reasoning effort for this exact model: the saved choice
+        # when still valid, otherwise the catalogue default. Empty means the
+        # model (or provider) has no effort control and no parameter is sent.
+        from llm.reasoning_effort import effective as effective_effort
+        saved_efforts = user_provider_config.get("reasoning_efforts")
+        selected_effort = ""
+        if isinstance(saved_efforts, dict):
+            selected_effort = str(saved_efforts.get(full_config.get("model")) or "")
+        full_config["reasoning_effort"] = effective_effort(
+            active_provider_name, full_config.get("model"), selected_effort)
+
         logging.info(f"Instantiating provider '{active_provider_name}' with model '{full_config.get('model')}'.")
         inst_start = perf_counter()
         instance = provider_class(full_config)
