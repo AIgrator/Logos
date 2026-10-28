@@ -95,8 +95,10 @@ status under the message that carried each attachment.
 
 Sessions are mode-locked: `chat`, `terminal`, `browser`, or `vision`. Switching
 mode in a non-empty session starts a new session; switching in an empty session
-rewrites only the header. Legacy `session-*.json` files are migrated to JSONL on
-load and the old file is kept as `.json.bak`.
+rewrites only the header. Deleting the open session clears the chat and leaves no
+journal behind; the next message creates a session in the current mode. Legacy
+`session-*.json` files are migrated to JSONL on load and the old file is kept as
+`.json.bak`.
 
 `src/project_manager.py` owns this layout. The project root (not the Logos install
 directory) is the terminal/browser `working_directory` and the root passed to

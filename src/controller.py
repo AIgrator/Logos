@@ -606,8 +606,10 @@ class AppController(QObject):
                 self._create_new_session(mode)
                 return
             if not self._session_has_content():
-                if (self.session_file
-                        and self.project_manager.set_session_mode(self.session_file, mode)):
+                if not self.session_file:
+                    self.session_mode = mode
+                    return
+                if self.project_manager.set_session_mode(self.session_file, mode):
                     self.session_mode = mode
                     return
                 self._create_new_session(mode)
@@ -727,6 +729,8 @@ class AppController(QObject):
         pending_attachments = list(attachments or [])
         try:
             snapshot = self._session_snapshot()
+            if not snapshot:
+                return
             if not self.session_file or not os.path.exists(self.session_file):
                 self._create_new_session(self.session_mode)
             if not self.session_file.endswith(".jsonl"):
@@ -1948,7 +1952,11 @@ class AppController(QObject):
         self.ui.refresh_project_views()
 
     def delete_session(self, path: str):
-        """Deletes a session file; the open one is replaced with an empty one."""
+        """Deletes a session; deleting the open one leaves an empty chat.
+
+        No journal is created until the next message, so opening another
+        session or leaving the empty chat leaves nothing behind.
+        """
         if self.project_manager is None or not path:
             return
         target = os.path.abspath(path)
@@ -1967,9 +1975,16 @@ class AppController(QObject):
             self.session_file = ""
             self.session_id = ""
             self.session_objective = ""
+            self.session_turn_id = ""
             self.session_events = []
             self._session_event_count = 0
             self._persisted_message_count = 0
+            self._handoff_summary = ""
+            self._handoff_meta = {}
+            self._summary_force = False
+            self._manual_compact_pending = False
+            self._compaction_trigger = ""
+            self._manual_compact_focus = ""
             self.conversation_history.clear()
             self.pending_attachments.clear()
             try:
@@ -1980,14 +1995,11 @@ class AppController(QObject):
                 logging.warning(f"Could not clear the UI after deleting the session: {e}")
             if self.project_root:
                 try:
-                    self._create_new_session(self.session_mode)
                     self._reset_agent_histories()
                     self._restore_agent_history()
                 except Exception as e:
-                    logging.warning(f"Could not start a session after deleting another: {e}")
-                self.ui.add_message(
-                    "<i>The session was deleted. A new empty session was started.</i>",
-                    force_scroll=True)
+                    logging.warning(f"Could not reset the agent after deleting the session: {e}")
+            self._schedule_context_indicator_update()
         self.ui.refresh_project_views()
 
     def new_session(self):
