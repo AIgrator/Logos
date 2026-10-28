@@ -3,6 +3,7 @@ import html
 import logging
 import sys
 import uuid
+from urllib.parse import unquote
 
 from PySide6.QtCore import Qt, QPoint, QRect, QSize, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import (
@@ -41,6 +42,7 @@ class ChatWidget(QAbstractScrollArea):
     retry_requested = Signal()
     continue_requested = Signal()
     job_stop_requested = Signal(int)
+    attachment_preview_requested = Signal(str, str)
 
     # Readable, centered text column. On windows wider than this the chat text
     # stops stretching edge-to-edge and is centered with symmetric margins
@@ -229,6 +231,13 @@ class ChatWidget(QAbstractScrollArea):
                     parts = anchor.split(':', 2)
                     if len(parts) == 3:
                         self._run_collapsible_action(parts[1], parts[2])
+                        return
+
+                if anchor and anchor.startswith("attachment-preview:"):
+                    payload = unquote(anchor.split(":", 1)[1])
+                    path, _, name = payload.partition("|")
+                    if path:
+                        self.attachment_preview_requested.emit(path, name)
                         return
 
                 if anchor and anchor.startswith("retry:"):
@@ -1051,12 +1060,23 @@ class ChatWidget(QAbstractScrollArea):
         self.viewport().update()
         self._update_scroll_to_bottom_button()
 
+    @staticmethod
+    def _block_has_image(block) -> bool:
+        it = block.begin()
+        while not it.atEnd():
+            fragment = it.fragment()
+            if fragment.isValid() and fragment.charFormat().isImageFormat():
+                return True
+            it += 1
+        return False
+
     def _user_bubble_rect(self, doc):
         """Rect of the right-aligned bubble cell inside a user message doc.
 
         The message HTML puts the prompt into a right-aligned table cell;
         Qt rich text has no border-radius, so the background is painted by
-        hand under the cell's text blocks.
+        hand under the cell's text blocks. Attachment thumbnails sit above
+        the bubble, so image-only blocks are excluded from the background.
         """
         table = next((frame for frame in doc.rootFrame().childFrames()
                       if isinstance(frame, QTextTable)), None)
@@ -1068,8 +1088,9 @@ class ChatWidget(QAbstractScrollArea):
         block = doc.findBlock(cell.firstCursorPosition().position())
         rect = None
         while block.isValid() and block.position() <= end_pos:
-            block_rect = layout.blockBoundingRect(block)
-            rect = block_rect if rect is None else rect.united(block_rect)
+            if not self._block_has_image(block) and block.text().strip():
+                block_rect = layout.blockBoundingRect(block)
+                rect = block_rect if rect is None else rect.united(block_rect)
             block = block.next()
         if rect is None:
             return None

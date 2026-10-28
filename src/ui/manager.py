@@ -2,11 +2,14 @@
 This module is responsible for managing all visual elements of the assistant.
 It is a "dumb" view, controlled by the AppController.
 """
+import base64
+import io
 import logging
 import os
 import sys
+from urllib.parse import quote
 import qtawesome as qta
-from PIL import Image
+from PIL import Image, ImageChops, ImageDraw, ImageOps
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import (QBuffer, QIODevice, QEasingCurve, QMimeData, QPoint,
                             QPropertyAnimation, QRect, QSize, Qt, Signal, QTimer, Slot)
@@ -16,6 +19,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QListWidget, QListWidg
                                QMessageBox, QMenu, QPushButton, QSizeGrip,
                                QTextEdit, QVBoxLayout, QWidget)
 
+from attachments import resolve_path
 from llm.custom_providers import provider_is_configured
 from llm.model_config_manager import ModelConfigManager
 from llm.mode_capabilities import ModeCapabilities
@@ -24,6 +28,7 @@ from states import ControllerState
 from . import styles
 from .utils import CustomToolTipManager, IconHoverFilter
 from .widgets.attachment_chip import AttachmentChip
+from .widgets.image_preview_dialog import ImagePreviewDialog
 from .text_render import render_reasoning, render_text, render_user_message
 from .widgets.chat_widget import ChatWidget
 from .widgets.model_switch_popup import ModelSwitchPopup
@@ -385,6 +390,8 @@ class UIManager(QWidget):
         self.chat_widget.retry_requested.connect(self.retry_requested.emit)
         self.chat_widget.continue_requested.connect(self.continue_requested.emit)
         self.chat_widget.job_stop_requested.connect(self.job_stop_requested.emit)
+        self.chat_widget.attachment_preview_requested.connect(
+            self._open_attachment_path)
         self.workspace_column_layout.addWidget(self.chat_widget, 1)
 
         self.attachment_scroll_area = NonScrollableScrollArea()
@@ -394,7 +401,6 @@ class UIManager(QWidget):
         self.attachment_widget = QWidget()
         self.attachment_layout = FlowLayout(self.attachment_widget, spacing=6)
         self.attachment_scroll_area.setWidget(self.attachment_widget)
-        self.workspace_column_layout.addWidget(self.attachment_scroll_area)
         self.attachment_scroll_area.setVisible(False)
 
         # --- File Search Popup ---
@@ -565,6 +571,10 @@ class UIManager(QWidget):
         self.bottom_center_layout = QVBoxLayout(self.bottom_center_column)
         self.bottom_center_layout.setContentsMargins(0, 0, 0, 0)
         self.bottom_center_layout.setSpacing(0)
+        # Attachments belong to the composer: keep them inside the same
+        # centered, width-capped column as the input and chat text instead of
+        # stretching across the whole workspace.
+        self.bottom_center_layout.addWidget(self.attachment_scroll_area)
         self.bottom_center_layout.addWidget(self.input_container)
         self.bottom_center_layout.addWidget(self.bottom_toolbar_container)
         self.bottom_center_layout.addWidget(self.mode_model_container)
@@ -741,8 +751,8 @@ class UIManager(QWidget):
 
         ideal_height = self.attachment_layout.heightForWidth(self.attachment_widget.width())
 
-        first_chip = self.attachment_thumbnails[0]
-        single_row_height = first_chip.sizeHint().height()
+        single_row_height = max(
+            chip.sizeHint().height() for chip in self.attachment_thumbnails)
         margins = self.attachment_layout.contentsMargins()
         spacing = self.attachment_layout.spacing()
         max_height = (single_row_height * 3) + (spacing * 2) + margins.top() + margins.bottom()
@@ -1410,10 +1420,29 @@ class UIManager(QWidget):
             is_folder=is_folder
         )
         chip.remove_requested.connect(self._on_remove_thumbnail_requested)
+        chip.preview_requested.connect(self._open_attachment_preview)
         self.attachment_layout.addWidget(chip)
         self.attachment_thumbnails.append(chip)
         QTimer.singleShot(0, self._update_attachment_area_height)
         self._update_send_button_state()
+
+    def _open_attachment_preview(self, chip):
+        self._show_image_preview(
+            chip.preview_pixmap(), chip.attachment_name())
+
+    def _open_attachment_path(self, path: str, name: str = ""):
+        """Open a preview for an image already recorded in a chat message."""
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            return
+        self._show_image_preview(pixmap, name or os.path.basename(path))
+
+    def _show_image_preview(self, pixmap, title: str):
+        if pixmap is None or pixmap.isNull():
+            return
+        dialog = ImagePreviewDialog(pixmap, title, self.main_window)
+        dialog.exec()
+        dialog.deleteLater()
 
     def _on_remove_thumbnail_requested(self, thumbnail_widget):
         if thumbnail_widget in self.attachment_thumbnails:
@@ -1449,22 +1478,72 @@ class UIManager(QWidget):
         self.add_file_action.setEnabled(can_add_files)
         self.add_folder_action.setEnabled(can_add_files)
 
+    def _attachment_thumbnail_html(self, record: dict) -> str:
+        """Small clickable image preview shown above a sent user message."""
+        root = getattr(self.controller, "project_root", "") or ""
+        path = resolve_path(record, root)
+        if not path or not os.path.isfile(path):
+            return ""
+        try:
+            with Image.open(path) as image:
+                image = ImageOps.exif_transpose(image)
+                image.thumbnail((200, 200), Image.Resampling.LANCZOS)
+                image = image.convert("RGBA")
+                width, height = image.size
+                radius = min(10, width // 4, height // 4)
+                if radius > 0:
+                    scale = 4
+                    mask = Image.new(
+                        "L", (width * scale, height * scale), 0)
+                    ImageDraw.Draw(mask).rounded_rectangle(
+                        (0, 0, width * scale - 1, height * scale - 1),
+                        radius=radius * scale, fill=255)
+                    mask = mask.resize(
+                        (width, height), Image.Resampling.LANCZOS)
+                    alpha = ImageChops.multiply(
+                        image.getchannel("A"), mask)
+                    image.putalpha(alpha)
+                buffer = io.BytesIO()
+                image.save(buffer, format="PNG")
+        except Exception as e:
+            logging.warning(f"Could not build attachment preview for {path}: {e}")
+            return ""
+        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        payload = quote(f"{os.path.abspath(path)}|{record.get('name') or 'Image'}", safe="")
+        return (
+            '<p align="right" style="margin: 0 0 10px 0;">'
+            f'<a href="attachment-preview:{payload}">'
+            f'<img src="data:image/png;base64,{encoded}" '
+            f'width="{width}" height="{height}"></a></p>'
+        )
+
     def build_user_message_html(self, content: str, queued: bool = False,
                                 attachments=None) -> str:
         """Build a safe, right-aligned user prompt bubble."""
         theme = self.controller.theme_manager
+        image_parts = []
+        text_records = []
+        for record in attachments or []:
+            if (isinstance(record, dict) and record.get("kind") == "image"
+                    and str(record.get("status") or "ok") == "ok"):
+                preview = self._attachment_thumbnail_html(record)
+                if preview:
+                    image_parts.append(preview)
+                    continue
+            text_records.append(record)
         return render_user_message(
             content,
             background=theme.get_style("USER_MESSAGE_BG"),
             text_color=theme.get_style("USER_MESSAGE_TEXT"),
             meta_color=theme.get_style("COLLAPSIBLE_META"),
             queued=queued,
-            attachments=attachments,
+            attachments=text_records,
             attachment_bg=theme.get_style("COLLAPSIBLE_BG"),
             attachment_border=theme.get_style("COLLAPSIBLE_BORDER"),
             attachment_text=theme.get_style("COLLAPSIBLE_META"),
             warning_color=theme.get_style("WARNING_COLOR"),
             error_color=theme.get_style("ERROR_COLOR"),
+            images_html="".join(image_parts),
         )
 
     def add_user_message(self, content: str, queued: bool = False,

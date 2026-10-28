@@ -115,14 +115,16 @@ def render_user_message(content: str, background: str, text_color: str,
                         attachments=None, attachment_bg: str = "",
                         attachment_border: str = "", attachment_text: str = "",
                         warning_color: str = "#9a6700",
-                        error_color: str = "#cf222e") -> str:
+                        error_color: str = "#cf222e",
+                        images_html: str = "") -> str:
     """Render a user prompt as a right-aligned bubble.
 
     The bubble hugs its content: an empty left spacer column caps it at 75%
     of the text column and keeps short messages narrow instead of stretching
     them across the chat. The background is not painted here — ChatWidget
     draws a rounded rect under the cell, because Qt rich text ignores
-    border-radius.
+    border-radius. ``images_html`` holds attachment thumbnails and is placed
+    above the prompt text.
     """
     import html
 
@@ -145,6 +147,7 @@ def render_user_message(content: str, background: str, text_color: str,
         f'cellpadding="{USER_BUBBLE_PADDING}"><tr>'
         '<td width="25%"></td>'
         '<td>'
+        f'{images_html}'
         f'<p align="left" style="margin: 0; color: {text_color}; '
         f'white-space: pre-wrap; line-height: 1.35;">{escaped}</p>'
         f'{chips}{queued_html}</td>'
