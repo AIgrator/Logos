@@ -47,8 +47,17 @@ this session (clicking one reveals a folder, previews an image or opens the
 file in the detected editor). Money is never computed. The Files tab (read-only
 tree of the active project; repository and cache folders are hidden; files open
 in the detected editor - VS Code, Cursor or Windsurf, else the OS default) is
-available in every mode, while the Git tab (placeholder for read-only status)
-appears only in Terminal mode. The panel's collapsed state is saved as
+available in every mode, while the Git tab appears only in Terminal mode. The
+Git tab is read-only (`src/git_status.py`, stdlib `git rev-parse`/`git status
+--porcelain=v2`/`git log` only): it shows the checked-out branch (or detached
+HEAD), upstream with ahead/behind counts, and staged, changed, conflicted and
+untracked files grouped with status letters. A HISTORY section below lists the
+last 30 commits on the current branch (short hash and subject; author, date
+and refs in the tooltip). Clicking a file row opens it in the detected editor;
+deleted files stay disabled. Logos' own `.logos` data is hidden. The status is
+read in a background thread and refreshes when the tab opens, when the project
+or mode changes, on the refresh button, and after session events while the tab
+is visible. The panel's collapsed state is saved as
 `right_panel_collapsed`.
 Clicking a recent session opens
 its project and that exact session. Per-project data lives in `<project>/.logos/`:
