@@ -317,8 +317,6 @@ class HuggingFaceProvider(BaseLLMProvider):
                 logger.info("Successfully closed HuggingFace response stream.")
             except Exception as e:
                 logger.error(f"Error closing HuggingFace stream: {e}", exc_info=True)
-        else:
-            logger.warning("No active HuggingFace stream to cancel.")
 
     def stream_response(
         self,

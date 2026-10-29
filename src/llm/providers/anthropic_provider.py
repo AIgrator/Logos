@@ -685,8 +685,6 @@ class AnthropicProvider(BaseLLMProvider):
                 logger.info("Successfully closed Anthropic stream.")
             except Exception as e:
                 logger.error(f"Error closing Anthropic stream: {e}", exc_info=True)
-        else:
-            logger.warning("No active Anthropic stream to cancel.")
 
     def web_search(self, query: str) -> str | None:
         """

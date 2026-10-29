@@ -310,8 +310,6 @@ class XAIProvider(BaseLLMProvider):
                 logger.info("Successfully closed XAI stream.")
             except Exception as e:
                 logger.error(f"Error closing XAI stream: {e}", exc_info=True)
-        else:
-            logger.warning("No active XAI stream to cancel.")
 
     def stream_response(self, prompt: str, attachments: list, system_prompt: str = None, history: list = None, callbacks=None):
         # Use xai_sdk's stateful Responses API for streaming interactive tool calls.

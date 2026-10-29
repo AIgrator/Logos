@@ -634,8 +634,6 @@ class OpenAIProvider(BaseLLMProvider):
                 logger.info("Successfully closed OpenAI stream.")
             except Exception as e:
                 logger.error(f"Error closing OpenAI stream: {e}", exc_info=True)
-        else:
-            logger.warning("No active OpenAI stream to cancel.")
 
     def stream_response(self, prompt: str, attachments: list, system_prompt: str = None, history: list = None, callbacks=None):
         payload = self._prepare_stream_input(prompt, attachments, system_prompt, history)
