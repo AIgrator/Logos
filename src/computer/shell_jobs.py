@@ -110,22 +110,53 @@ def resolve_inactivity_timeout(settings_manager,
     return max(0, value)
 
 
+_PS_EXE_RE = re.compile(r"^\s*(powershell(?:\.exe)?|pwsh(?:\.exe)?)\b",
+                        re.IGNORECASE)
+_PS_ARG_RE = re.compile(r"\s+(-\w+(?::\S+)?)(?:\s+((?!-)\S+))?")
+
+
+def _parse_powershell(command: str):
+    """Splits `powershell [flags] -Command <script>` into (exe, flags, script).
+
+    Flags such as -NoProfile or -ExecutionPolicy Bypass may sit between the
+    executable and -Command; exact-prefix matching missed those calls, so
+    they ran without the UTF-8 console wrapper and lost non-ASCII output.
+    """
+    match = _PS_EXE_RE.match(command)
+    if not match:
+        return None
+    exe = match.group(1)
+    flags: list[str] = []
+    pos = match.end()
+    while True:
+        arg = _PS_ARG_RE.match(command, pos)
+        if not arg:
+            return None
+        name, value = arg.group(1), arg.group(2)
+        if name.lower() == "-command":
+            return exe, flags, command[arg.end(1):].strip()
+        flags.append(name)
+        if value:
+            flags.append(value)
+        pos = arg.end()
+
+
 def build_shell_command(command: str):
     """Builds (argv, encoding, extra_popen_kwargs) for a shell command.
 
     `encoding` is 'auto' on Windows cmd: stdout stays binary and every line
     is decoded UTF-8-first, OEM second (see `_decode_output_line`).
     """
-    lowered = command.strip()
-    ps_prefixes = ("powershell -command", "powershell.exe -command",
-                   "pwsh -command", "pwsh.exe -command")
-    inner = None
-    for prefix in ps_prefixes:
-        if lowered.lower().startswith(prefix):
-            inner = command.strip()[len(prefix):].strip()
-            if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in ('"', "'"):
-                inner = inner[1:-1]
-            break
+    parsed = _parse_powershell(command)
+    if parsed is not None:
+        exe, flags, inner = parsed
+        if len(inner) >= 2 and inner[0] == inner[-1] and inner[0] in ('"', "'"):
+            inner = inner[1:-1]
+        known = {flag.split(":")[0].lower() for flag in flags
+                 if flag.startswith("-")}
+        for forced in ("-NoProfile", "-NonInteractive"):
+            if forced.lower() not in known:
+                flags.append(forced)
 
     extra: dict = {"env": {**os.environ, **_NONINTERACTIVE_ENV}}
     if sys.platform == "win32":
@@ -134,7 +165,7 @@ def build_shell_command(command: str):
     else:
         extra["start_new_session"] = True
 
-    if inner is not None:
+    if parsed is not None:
         # Surface cmdlet failures WITHOUT killing bulk work on the first
         # warning: $ErrorActionPreference='Stop' turned any per-file warning
         # (inevitable on a live tree — open logs, loaded binaries) into an
@@ -164,7 +195,7 @@ def build_shell_command(command: str):
                  # non-empty folder was empty. SetShouldExit requests the same exit
                  # code but lets the pipeline drain first.
                  "$host.SetShouldExit($__code)")
-        return (['powershell', '-NoProfile', '-NonInteractive', '-Command', inner],
+        return ([exe, *flags, '-Command', inner],
                 'utf-8', extra)
     if sys.platform == "win32":
         # Pass the raw command line to shell=True. The list form
