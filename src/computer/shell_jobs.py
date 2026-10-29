@@ -160,7 +160,13 @@ def build_shell_command(command: str):
         return (['powershell', '-NoProfile', '-NonInteractive', '-Command', inner],
                 'utf-8', extra)
     if sys.platform == "win32":
-        return (['cmd', '/c', command], 'oem', extra)
+        # Pass the raw command line to shell=True. The list form
+        # ['cmd', '/c', command] is re-quoted by subprocess.list2cmdline with
+        # backslashes that cmd.exe does not understand, so inner quotes reached
+        # the child mangled ("python -c "print(...)" became an unterminated
+        # string).
+        extra["shell"] = True
+        return (command, 'oem', extra)
     extra["shell"] = True
     return (command, 'utf-8', extra)
 
