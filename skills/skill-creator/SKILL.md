@@ -49,6 +49,7 @@ Keep the file under about 100 lines. Put long reference material in `references/
 
 ## Rules
 
+- Stop when the requested skill works: `SKILL.md` plus only the scripts the workflow needs, and one smoke run. Do not add `tests/`, extra references, or improvements the user did not ask for; mention them as suggestions instead.
 - No secrets, tokens, passwords or personal absolute paths; use `<project>` placeholders.
 - Do not encode destructive commands; require confirmation for delete or overwrite steps.
 - Read an existing skill before updating it and keep the parts that work.
