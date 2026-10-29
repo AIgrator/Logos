@@ -47,6 +47,9 @@ _NONINTERACTIVE_ENV = {
     "npm_config_yes": "true",
     "COREPACK_ENABLE_DOWNLOAD_PROMPT": "0",
     "DEBIAN_FRONTEND": "noninteractive",
+    # Piped Python output defaults to the ANSI code page, which the line
+    # decoder cannot distinguish from OEM. UTF-8 is unambiguous.
+    "PYTHONIOENCODING": "utf-8",
 }
 
 
@@ -108,7 +111,11 @@ def resolve_inactivity_timeout(settings_manager,
 
 
 def build_shell_command(command: str):
-    """Builds (argv, encoding, extra_popen_kwargs) for a shell command."""
+    """Builds (argv, encoding, extra_popen_kwargs) for a shell command.
+
+    `encoding` is 'auto' on Windows cmd: stdout stays binary and every line
+    is decoded UTF-8-first, OEM second (see `_decode_output_line`).
+    """
     lowered = command.strip()
     ps_prefixes = ("powershell -command", "powershell.exe -command",
                    "pwsh -command", "pwsh.exe -command")
@@ -166,9 +173,38 @@ def build_shell_command(command: str):
         # the child mangled ("python -c "print(...)" became an unterminated
         # string).
         extra["shell"] = True
-        return (command, 'oem', extra)
+        return (command, 'auto', extra)
     extra["shell"] = True
     return (command, 'utf-8', extra)
+
+
+def _decode_output_line(raw: bytes) -> str:
+    """Decodes one line of captured shell output.
+
+    cmd.exe builtins and native tools write the OEM code page while Python,
+    git and node write UTF-8; decoding everything as OEM turned Russian text
+    into mojibake. UTF-8 is tried first (it never silently accepts OEM
+    Cyrillic), OEM is the fallback for the console's own output.
+    """
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return raw.decode("oem", errors="replace")
+
+
+def _spawn_shell(argv, encoding, working_directory, extra):
+    """Starts the shell; 'auto' keeps stdout binary for per-line decoding."""
+    options = dict(
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        cwd=working_directory,
+        **extra,
+    )
+    if encoding == "auto":
+        return subprocess.Popen(argv, **options)
+    return subprocess.Popen(argv, text=True, encoding=encoding,
+                            errors="ignore", bufsize=1, **options)
 
 
 def _terminate_tree(proc: subprocess.Popen):
@@ -227,7 +263,12 @@ def _terminate_tree(proc: subprocess.Popen):
 
 def _drain_stream(stream, sink, lock=None, activity=None, log_writer=None):
     try:
-        for line in iter(stream.readline, ""):
+        while True:
+            line = stream.readline()
+            if not line:
+                break
+            if isinstance(line, bytes):
+                line = _decode_output_line(line)
             if activity is not None:
                 activity[0] = time.monotonic()
             line = _ANSI_RE.sub("", line)
@@ -667,18 +708,7 @@ def run_shell_command(command: str, working_directory, timeout: float,
         argv, encoding, extra = build_shell_command(command)
         logging.info(f"Executing shell command: {command} (timeout {timeout}s)")
         try:
-            proc = subprocess.Popen(
-                argv,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding=encoding,
-                errors='ignore',
-                bufsize=1,
-                cwd=working_directory,
-                **extra
-            )
+            proc = _spawn_shell(argv, encoding, working_directory, extra)
         except FileNotFoundError:
             logging.error(f"Command '{command.split()[0]}' not found.")
             return {
@@ -844,18 +874,7 @@ class ShellJobManager:
                 argv, encoding, extra = build_shell_command(command)
                 logging.info(f"Background shell job #{job.job_id} started: {command}")
                 try:
-                    proc = subprocess.Popen(
-                        argv,
-                        stdin=subprocess.DEVNULL,
-                        stdout=subprocess.PIPE,
-                        stderr=subprocess.STDOUT,
-                        text=True,
-                        encoding=encoding,
-                        errors='ignore',
-                        bufsize=1,
-                        cwd=working_directory,
-                        **extra
-                    )
+                    proc = _spawn_shell(argv, encoding, working_directory, extra)
                 except FileNotFoundError:
                     job.result = {"stdout": "",
                                   "stderr": f"Error: Command not found: {command.split()[0]}",
