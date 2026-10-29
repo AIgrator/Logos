@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget, Q
                                QMessageBox, QMenu, QPushButton, QSizeGrip,
                                QTextEdit, QVBoxLayout, QWidget)
 
-from attachments import resolve_path
+from attachments import IMAGE_EXTENSIONS, resolve_path
 from llm.custom_providers import provider_is_configured
 from llm.model_config_manager import ModelConfigManager
 from llm.mode_capabilities import ModeCapabilities
@@ -28,7 +28,7 @@ from llm.reasoning_effort import label as effort_label
 from llm.reasoning_effort import levels as effort_levels
 from states import ControllerState
 
-from . import styles
+from . import editor_launcher, styles
 from .utils import CustomToolTipManager, IconHoverFilter
 from .widgets.attachment_chip import AttachmentChip
 from .widgets.image_preview_dialog import ImagePreviewDialog
@@ -365,6 +365,8 @@ class UIManager(QWidget):
         self.workspace_column_layout.setSpacing(0)
         self.workspace_layout.addWidget(self.workspace_column, 1)
         self.right_panel = RightPanel(self.controller.theme_manager)
+        self.right_panel.attachment_open_requested.connect(
+            self._open_session_attachment)
         self.workspace_layout.addWidget(self.right_panel)
         self._restore_right_panel_state()
         self._update_right_panel_visibility()
@@ -1205,6 +1207,9 @@ class UIManager(QWidget):
         # to pause in plain chat, and it hides again when the task ends.
         # (Vision has its own pause controls.)
         self._active_mode_key = mode
+        panel = getattr(self, "right_panel", None)
+        if panel is not None:
+            panel.set_mode(mode)
         self._update_right_panel_visibility()
 
         if mode == 'chat':
@@ -1516,7 +1521,6 @@ class UIManager(QWidget):
             display_name = "Pasted Image"
             file_path = None
         elif isinstance(file_path, str):
-            IMAGE_EXTENSIONS = ['.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp']
             _, ext = os.path.splitext(file_path.lower())
             if ext in IMAGE_EXTENSIONS:
                 pixmap = QPixmap(file_path)
@@ -1545,6 +1549,24 @@ class UIManager(QWidget):
         if pixmap.isNull():
             return
         self._show_image_preview(pixmap, name or os.path.basename(path))
+
+    def _open_session_attachment(self, path: str):
+        """Open an attachment recorded in the session journal."""
+        if not path:
+            return
+        if not os.path.exists(path):
+            QMessageBox.information(
+                self.main_window, "Attachment",
+                "This attachment is no longer on disk.")
+            return
+        if os.path.isdir(path):
+            editor_launcher.reveal_path(path)
+            return
+        _, ext = os.path.splitext(path.lower())
+        if ext in IMAGE_EXTENSIONS:
+            self._open_attachment_path(path)
+            return
+        editor_launcher.open_path(path)
 
     def _show_image_preview(self, pixmap, title: str):
         if pixmap is None or pixmap.isNull():
@@ -1856,7 +1878,7 @@ class UIManager(QWidget):
             self.right_panel.set_collapsed(True)
 
     def _update_right_panel_visibility(self):
-        """The workspace panel belongs to Terminal mode only."""
+        """The workspace panel is available in every mode."""
         panel = getattr(self, "right_panel", None)
         if panel is None:
             return
@@ -1865,9 +1887,14 @@ class UIManager(QWidget):
             not getattr(self, "is_compact", True)
             and workspace is not None
             and not workspace.isHidden()
-            and getattr(self, "_active_mode_key", "chat") == "terminal"
         )
         panel.setVisible(visible)
+
+    def set_session_panel(self, payload: dict):
+        """Session and Activity details shown by the right panel in every mode."""
+        panel = getattr(self, "right_panel", None)
+        if panel is not None:
+            panel.set_session_data(payload or {})
 
     def _sync_right_panel_project(self):
         manager = getattr(self.controller, "project_manager", None)

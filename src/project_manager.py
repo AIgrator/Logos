@@ -688,6 +688,24 @@ class ProjectManager:
             "events": events,
         }
 
+    def read_session_header(self, path: str) -> dict:
+        """Reads the session header without loading the journal."""
+        if not path or not os.path.exists(path):
+            return {}
+        try:
+            with open(path, encoding="utf-8") as fh:
+                if path.endswith(SESSION_EXT):
+                    line = fh.readline()
+                    header = json.loads(line) if line.strip() else {}
+                    if not isinstance(header, dict) or header.get("type") != "session":
+                        return {}
+                else:
+                    header = json.load(fh)
+        except (OSError, json.JSONDecodeError) as exc:
+            logging.warning(f"Could not read the session header of {path}: {exc}")
+            return {}
+        return header if isinstance(header, dict) else {}
+
     def load_session_data(self, path: str) -> dict:
         if not path or not os.path.exists(path):
             return {"path": path, "id": "", "mode": "chat", "created_at": "",

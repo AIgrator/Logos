@@ -34,11 +34,22 @@ workspace, projects and sessions are reached through the collapsible left sideba
 The full-mode window frame (`window_geometry`) and the sidebar's collapsed state
 (`sidebar_collapsed`) are saved to `settings.json` on close and restored on the
 next launch; layout margins are not persisted. The right workspace panel
-(`src/ui/right_panel.py`) appears only in Terminal mode: it shows the active
-project's file tree (read-only; repository and cache folders are hidden) and
-opens files in the detected editor (VS Code, Cursor or Windsurf, else the OS
-default). Its collapsed state is saved as `right_panel_collapsed`; the Git tab
-is a placeholder for read-only status.
+(`src/ui/right_panel.py`) is visible in every mode. Its Session tab leads with
+context statistics (provider, model, context window and usage, token totals,
+message/tool-call counts, created and last-activity timestamps) fed from the
+same data as the composer indicator, followed by a recap derived from this
+session's own journal: the objective plus bullet lines for assistant messages
+and skills loaded through `use_skill` (last six, clipped). The rolling handoff
+summary is not shown in the panel; it stays model/compaction context. The
+Activity tab lists skills loaded through `use_skill`, named tools invoked with
+counts (control tools are hidden), and the files or screenshots attached in
+this session (clicking one reveals a folder, previews an image or opens the
+file in the detected editor). Money is never computed. The Files tab (read-only
+tree of the active project; repository and cache folders are hidden; files open
+in the detected editor - VS Code, Cursor or Windsurf, else the OS default) is
+available in every mode, while the Git tab (placeholder for read-only status)
+appears only in Terminal mode. The panel's collapsed state is saved as
+`right_panel_collapsed`.
 Clicking a recent session opens
 its project and that exact session. Per-project data lives in `<project>/.logos/`:
 

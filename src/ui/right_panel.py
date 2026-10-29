@@ -1,25 +1,32 @@
-"""Right-hand workspace panel: project files now, Git and context to follow."""
+"""Right-hand workspace panel: session statistics and recap, activity, files."""
+import html
 import os
 import sys
+from datetime import datetime
 
 import qtawesome as qta
-from PySide6.QtCore import QDir, QSize, QSortFilterProxyModel, Qt
+from PySide6.QtCore import QDir, QSize, QSortFilterProxyModel, Qt, Signal
 from PySide6.QtGui import QIcon
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
     QButtonGroup,
     QFileSystemModel,
+    QFrame,
+    QGridLayout,
     QHBoxLayout,
     QLabel,
     QMenu,
     QPushButton,
+    QScrollArea,
+    QSizePolicy,
     QStackedWidget,
     QTreeView,
     QVBoxLayout,
     QWidget,
 )
 
+from attachments import format_size
 from . import editor_launcher
 from .navigation import _theme_colors
 
@@ -55,19 +62,33 @@ class _ProjectTreeFilter(QSortFilterProxyModel):
 class RightPanel(QWidget):
     """Fixed-width panel on the right edge of the workspace.
 
-    Files is functional: the tree follows the active project and files open
-    in the detected editor. Git is a placeholder until read-only status is
-    wired in.
+    Session (context/token statistics, then a recap of this session) and
+    Activity (skills, tools and attached files) plus Files (read-only project
+    tree, files open in the detected editor) are available in every mode. Git
+    is a placeholder for read-only status and appears only in Terminal mode.
     """
 
     EXPANDED_WIDTH = 320
     COLLAPSED_WIDTH = 44
 
+    PAGE_SESSION = 0
+    PAGE_ACTIVITY = 1
+    PAGE_FILES = 2
+    PAGE_GIT = 3
+
+    attachment_open_requested = Signal(str)
+
     def __init__(self, theme_manager, parent=None):
         super().__init__(parent)
         self.theme_manager = theme_manager
         self.collapsed = False
+        self._mode = ""
         self._root = ""
+        self._last_title = ""
+        self._last_summary = {}
+        self._last_skills = []
+        self._last_tools = []
+        self._last_attachments = []
         self._build_ui()
         self._apply_style()
         theme_changed = getattr(theme_manager, "theme_changed", None)
@@ -103,27 +124,458 @@ class RightPanel(QWidget):
 
         tabs = QHBoxLayout()
         tabs.setSpacing(4)
+        self.session_tab = QPushButton("Session")
+        self.session_tab.setObjectName("PanelTab")
+        self.session_tab.setCheckable(True)
+        self.session_tab.setChecked(True)
+        self.activity_tab = QPushButton("Activity")
+        self.activity_tab.setObjectName("PanelTab")
+        self.activity_tab.setCheckable(True)
         self.files_tab = QPushButton("Files")
         self.files_tab.setObjectName("PanelTab")
         self.files_tab.setCheckable(True)
-        self.files_tab.setChecked(True)
         self.git_tab = QPushButton("Git")
         self.git_tab.setObjectName("PanelTab")
         self.git_tab.setCheckable(True)
+        tabs.addWidget(self.session_tab)
+        tabs.addWidget(self.activity_tab)
         tabs.addWidget(self.files_tab)
         tabs.addWidget(self.git_tab)
         tabs.addStretch(1)
         self.tab_group = QButtonGroup(self)
         self.tab_group.setExclusive(True)
-        self.tab_group.addButton(self.files_tab, 0)
-        self.tab_group.addButton(self.git_tab, 1)
+        self.tab_group.addButton(self.session_tab, self.PAGE_SESSION)
+        self.tab_group.addButton(self.activity_tab, self.PAGE_ACTIVITY)
+        self.tab_group.addButton(self.files_tab, self.PAGE_FILES)
+        self.tab_group.addButton(self.git_tab, self.PAGE_GIT)
         layout.addLayout(tabs)
 
         self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_session_page())
+        self.stack.addWidget(self._build_activity_page())
         self.stack.addWidget(self._build_files_page())
         self.stack.addWidget(self._build_git_page())
         self.tab_group.idClicked.connect(self.stack.setCurrentIndex)
         layout.addWidget(self.stack, 1)
+        self._apply_tool_tabs()
+
+    _STAT_FIELDS = (
+        ("session", "SESSION"),
+        ("messages", "MESSAGES"),
+        ("provider", "PROVIDER"),
+        ("model", "MODEL"),
+        ("window", "CONTEXT LIMIT"),
+        ("total_tokens", "TOTAL TOKENS"),
+        ("percent", "USAGE"),
+        ("input_tokens", "INPUT TOKENS"),
+        ("output_tokens", "OUTPUT TOKENS"),
+        ("reasoning_tokens", "REASONING TOKENS"),
+        ("cache", "CACHE TOKENS"),
+        ("user_messages", "USER MESSAGES"),
+        ("assistant_messages", "ASSISTANT MESSAGES"),
+        ("tool_calls", "TOOL CALLS"),
+        ("created_at", "SESSION CREATED"),
+        ("last_activity", "LAST ACTIVITY"),
+    )
+
+    _SUMMARY_FIELDS = (
+        ("objective", "OBJECTIVE"),
+        ("done", "DONE"),
+        ("current", "CURRENT"),
+        ("next", "NEXT"),
+    )
+
+    def _build_session_page(self):
+        scroll = QScrollArea()
+        scroll.setObjectName("PanelSessionScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.viewport().setAutoFillBackground(False)
+
+        page = QWidget()
+        page.setObjectName("PanelSessionPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(10)
+        layout.addLayout(self._build_stats_grid(page))
+        self._summary_separator = self._separator(page)
+        self._summary_separator.setVisible(False)
+        layout.addWidget(self._summary_separator)
+        layout.addWidget(self._build_summary_block(page))
+        layout.addStretch(1)
+        scroll.setWidget(page)
+        return scroll
+
+    @staticmethod
+    def _separator(parent) -> QFrame:
+        line = QFrame(parent)
+        line.setObjectName("PanelSeparator")
+        line.setFixedHeight(1)
+        return line
+
+    def _build_summary_block(self, parent):
+        block = QWidget(parent)
+        layout = QVBoxLayout(block)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        header = QHBoxLayout()
+        header.setSpacing(6)
+        caption = QLabel("SUMMARY")
+        caption.setObjectName("PanelSection")
+        header.addWidget(caption)
+        header.addStretch(1)
+        self.summary_updated = QLabel("")
+        self.summary_updated.setObjectName("PanelStatLabel")
+        header.addWidget(self.summary_updated)
+        layout.addLayout(header)
+        self._summary_sections = {}
+        for key, title in self._SUMMARY_FIELDS:
+            section = QWidget(block)
+            section_layout = QVBoxLayout(section)
+            section_layout.setContentsMargins(0, 0, 0, 0)
+            section_layout.setSpacing(2)
+            section_caption = QLabel(title)
+            section_caption.setObjectName("PanelSummaryCaption")
+            body = QLabel("")
+            body.setObjectName("PanelSummaryText")
+            body.setWordWrap(True)
+            body.setTextFormat(Qt.TextFormat.RichText)
+            body.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            section_layout.addWidget(section_caption)
+            section_layout.addWidget(body)
+            layout.addWidget(section)
+            self._summary_sections[key] = (section, body)
+        block.setVisible(False)
+        self._summary_block = block
+        return block
+
+    def _build_stats_grid(self, parent):
+        grid = QGridLayout()
+        grid.setContentsMargins(0, 0, 0, 0)
+        grid.setHorizontalSpacing(12)
+        grid.setVerticalSpacing(12)
+        grid.setColumnStretch(0, 1)
+        grid.setColumnStretch(1, 1)
+        self._stat_values = {}
+        for position, (key, caption) in enumerate(self._STAT_FIELDS):
+            row, column = divmod(position, 2)
+            cell = QWidget(parent)
+            policy = cell.sizePolicy()
+            policy.setHeightForWidth(True)
+            cell.setSizePolicy(policy)
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(0, 0, 0, 0)
+            cell_layout.setSpacing(2)
+            caption_label = QLabel(caption)
+            caption_label.setObjectName("PanelStatLabel")
+            caption_label.setWordWrap(True)
+            value_label = QLabel("—")
+            value_label.setObjectName("PanelStatValue")
+            value_label.setWordWrap(True)
+            value_label.setTextInteractionFlags(
+                Qt.TextInteractionFlag.TextSelectableByMouse)
+            cell_layout.addWidget(caption_label)
+            cell_layout.addWidget(value_label)
+            grid.addWidget(cell, row, column)
+            self._stat_values[key] = value_label
+        self._stat_values["cache"].setToolTip(
+            "Cache read tokens / cache write tokens")
+        return grid
+
+    def _build_activity_page(self):
+        scroll = QScrollArea()
+        scroll.setObjectName("PanelActivityScroll")
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.viewport().setAutoFillBackground(False)
+
+        page = QWidget()
+        page.setObjectName("PanelActivityPage")
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(4, 4, 4, 4)
+        layout.setSpacing(10)
+        self.activity_empty = QLabel(
+            "No tools, skills or files used in this session.")
+        self.activity_empty.setObjectName("PanelEmpty")
+        self.activity_empty.setWordWrap(True)
+        layout.addWidget(self.activity_empty)
+        (self._skills_block,
+         self.skills_caption,
+         self._skills_text) = self._build_activity_text_block(page)
+        layout.addWidget(self._skills_block)
+        (self._tools_block,
+         self.tools_caption,
+         self._tools_text) = self._build_activity_text_block(page)
+        layout.addWidget(self._tools_block)
+        self._attachments_block = self._build_attachments_block(page)
+        layout.addWidget(self._attachments_block)
+        layout.addStretch(1)
+        scroll.setWidget(page)
+        return scroll
+
+    def _build_activity_text_block(self, parent):
+        block = QWidget(parent)
+        layout = QVBoxLayout(block)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        caption = QLabel("")
+        caption.setObjectName("PanelSection")
+        body = QLabel("")
+        body.setObjectName("PanelSummaryText")
+        body.setWordWrap(True)
+        body.setTextFormat(Qt.TextFormat.RichText)
+        body.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(caption)
+        layout.addWidget(body)
+        block.setVisible(False)
+        return block, caption, body
+
+    def _build_attachments_block(self, parent):
+        block = QWidget(parent)
+        layout = QVBoxLayout(block)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self.attachments_caption = QLabel("ATTACHMENTS")
+        self.attachments_caption.setObjectName("PanelSection")
+        layout.addWidget(self.attachments_caption)
+        self._attachments_list = QWidget(block)
+        self._attachments_layout = QVBoxLayout(self._attachments_list)
+        self._attachments_layout.setContentsMargins(0, 0, 0, 0)
+        self._attachments_layout.setSpacing(2)
+        self._attachments_list.setVisible(False)
+        layout.addWidget(self._attachments_list)
+        block.setVisible(False)
+        return block
+
+    def set_session_data(self, data: dict):
+        """Fills the Session and Activity tabs; every value is optional."""
+        data = data or {}
+        title = str(data.get("title") or "").strip()
+        self._set_stat_values(data)
+        summary = data.get("summary")
+        summary = summary if isinstance(summary, dict) else {}
+        if summary != self._last_summary or title != self._last_title:
+            self._render_summary(summary, title)
+            self._last_summary = dict(summary)
+            self._last_title = title
+        skills = [record for record in data.get("skills") or []
+                  if isinstance(record, dict)]
+        tools = [record for record in data.get("tools") or []
+                 if isinstance(record, dict)]
+        records = [record for record in data.get("attachments") or []
+                   if isinstance(record, dict)]
+        if (skills != self._last_skills or tools != self._last_tools
+                or records != self._last_attachments):
+            self._render_activity(skills, tools, records)
+            self._last_skills = skills
+            self._last_tools = tools
+            self._last_attachments = records
+
+    def _set_stat_values(self, data: dict):
+        values = self._stat_values
+
+        def number(key):
+            try:
+                return max(0, int(data.get(key) or 0))
+            except (TypeError, ValueError):
+                return 0
+
+        window = number("window")
+        try:
+            percent = float(data.get("percent") or 0.0)
+        except (TypeError, ValueError):
+            percent = 0.0
+
+        def set_value(key, text):
+            label = values.get(key)
+            if label is None:
+                return
+            label.setText(text)
+            if key != "cache":
+                label.setToolTip(text if len(text) > 28 else "")
+
+        set_value("session", str(data.get("title") or "").strip()
+                  or "New session")
+        set_value("messages", f"{number('messages'):,}")
+        set_value("provider", str(data.get("provider") or "").strip() or "—")
+        set_value("model", str(data.get("model") or "").strip() or "—")
+        set_value("window", f"{window:,}" if window else "—")
+        set_value("total_tokens", f"{number('total_tokens'):,}")
+        set_value("percent", f"{percent:.0f}%" if window else "—")
+        set_value("input_tokens", f"{number('input_tokens'):,}")
+        set_value("output_tokens", f"{number('output_tokens'):,}")
+        set_value("reasoning_tokens", f"{number('reasoning_tokens'):,}")
+        set_value("cache",
+                  f"{number('cache_read'):,} / {number('cache_write'):,}")
+        set_value("user_messages", f"{number('user_messages'):,}")
+        set_value("assistant_messages", f"{number('assistant_messages'):,}")
+        set_value("tool_calls", f"{number('tool_calls'):,}")
+        set_value("created_at", self._format_ts(data.get("created_at")))
+        set_value("last_activity", self._format_ts(data.get("last_activity")))
+
+    def _render_summary(self, summary: dict, title: str):
+        title_norm = " ".join(str(title or "").split())
+        visible = False
+        for key, _ in self._SUMMARY_FIELDS:
+            section, body = self._summary_sections[key]
+            text = str(summary.get(key) or "").strip()
+            if key == "objective" and " ".join(text.split()) == title_norm:
+                text = ""
+            if text.lower() in ("- none.", "none", "(not set)"):
+                text = ""
+            section.setVisible(bool(text))
+            if text:
+                body.setText(self._summary_html(text))
+                visible = True
+        updated = self._format_short_ts(summary.get("updated_at"))
+        self.summary_updated.setText(f"Updated {updated}" if updated else "")
+        self.summary_updated.setToolTip(
+            self._summary_source_tooltip(summary.get("source")))
+        self._summary_block.setVisible(visible)
+        self._summary_separator.setVisible(visible)
+
+    @staticmethod
+    def _summary_html(text: str) -> str:
+        lines = []
+        for raw in str(text or "").splitlines():
+            line = raw.strip()
+            if not line:
+                continue
+            if line.startswith(("- ", "* ")):
+                line = "• " + line[2:]
+            lines.append(html.escape(line.replace("**", "")))
+        return "<br>".join(lines)
+
+    @staticmethod
+    def _summary_source_tooltip(source) -> str:
+        source = str(source or "")
+        if source == "journal":
+            return "Derived from this session's journal."
+        if source == "llm":
+            return "Updated by the model from the session journal."
+        if source == "handoff":
+            return "Copied from the previous session when the mode changed."
+        if source == "fallback":
+            return ("Deterministic fallback; the model summary "
+                    "updates automatically.")
+        return "Rolling summary of this session."
+
+    def _render_activity(self, skills: list, tools: list, records: list):
+        self._render_activity_block(
+            self._skills_block, self.skills_caption, self._skills_text,
+            "SKILLS", skills)
+        self._render_activity_block(
+            self._tools_block, self.tools_caption, self._tools_text,
+            "TOOLS", tools)
+        self._render_attachments(records)
+        self.activity_empty.setVisible(not (skills or tools or records))
+
+    def _render_activity_block(self, block, caption, body, title, records):
+        lines = []
+        for record in records:
+            name = str(record.get("name") or "").strip()
+            if not name:
+                continue
+            try:
+                count = max(1, int(record.get("count") or 1))
+            except (TypeError, ValueError):
+                count = 1
+            lines.append(f"- {name}" + (f" ×{count}" if count > 1 else ""))
+        caption.setText(f"{title} · {len(lines)}" if lines else title)
+        body.setText(self._summary_html("\n".join(lines)))
+        block.setVisible(bool(lines))
+
+    def _render_attachments(self, records: list):
+        while self._attachments_layout.count():
+            item = self._attachments_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        colors = _theme_colors(self.theme_manager)
+        for record in records:
+            self._attachments_layout.addWidget(
+                self._attachment_button(record, colors))
+        self.attachments_caption.setText(
+            f"ATTACHMENTS · {len(records)}" if records else "ATTACHMENTS")
+        self._attachments_block.setVisible(bool(records))
+        self._attachments_list.setVisible(bool(records))
+
+    def _attachment_button(self, record: dict, colors: dict) -> QPushButton:
+        kind = str(record.get("kind") or "file")
+        status = str(record.get("status") or "ok")
+        name = str(record.get("name") or "attachment")
+        path = str(record.get("path") or "")
+        try:
+            size = int(record.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        details = []
+        if kind != "folder" and size:
+            details.append(format_size(size))
+        if status and status != "ok":
+            details.append(status)
+        label = name + ("  ·  " + " · ".join(details) if details else "")
+        button = QPushButton()
+        button.setObjectName("PanelAttachment")
+        button.setCursor(Qt.CursorShape.PointingHandCursor)
+        icon_name = {"image": "fa5s.image",
+                     "folder": "fa5s.folder"}.get(kind, "fa5s.file-alt")
+        button.setIcon(qta.icon(icon_name, color=colors["muted"]))
+        button.setIconSize(QSize(14, 14))
+        button.ensurePolished()
+        button.setText(button.fontMetrics().elidedText(
+            label, Qt.TextElideMode.ElideMiddle, self.EXPANDED_WIDTH - 64))
+        tooltip = path or name
+        if status and status != "ok":
+            tooltip = f"{tooltip}\nStatus: {status}"
+        button.setToolTip(tooltip)
+        button.setEnabled(bool(path))
+        button.setSizePolicy(QSizePolicy.Policy.Ignored,
+                             QSizePolicy.Policy.Fixed)
+        button.clicked.connect(
+            lambda _checked=False, target=path: self._open_attachment(target))
+        return button
+
+    def _open_attachment(self, path: str):
+        if path:
+            self.attachment_open_requested.emit(path)
+
+    @staticmethod
+    def _format_short_ts(value) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        try:
+            stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text[11:16] if "T" in text else text[:16]
+        if stamp.tzinfo is not None:
+            stamp = stamp.astimezone()
+            now = datetime.now(stamp.tzinfo)
+        else:
+            now = datetime.now()
+        if stamp.date() == now.date():
+            return stamp.strftime("%H:%M")
+        return stamp.strftime("%b %d, %H:%M")
+
+    @staticmethod
+    def _format_ts(value) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return "—"
+        try:
+            stamp = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return text[:16].replace("T", " ")
+        if stamp.tzinfo is not None:
+            stamp = stamp.astimezone()
+        return stamp.strftime("%b %d, %Y, %H:%M")
 
     def _build_files_page(self):
         page = QWidget()
@@ -181,6 +633,25 @@ class RightPanel(QWidget):
 
     # -- state ----------------------------------------------------------
 
+    def set_mode(self, mode: str):
+        """Session, Activity and Files stay in every mode; Git is Terminal."""
+        self._mode = str(mode or "chat")
+        if (self._mode != "terminal"
+                and self.stack.currentIndex() == self.PAGE_GIT):
+            self._select_page(self.PAGE_SESSION)
+        self._apply_tool_tabs()
+
+    def _apply_tool_tabs(self):
+        self.activity_tab.setVisible(not self.collapsed)
+        self.files_tab.setVisible(not self.collapsed)
+        self.git_tab.setVisible(not self.collapsed and self._mode == "terminal")
+
+    def _select_page(self, index: int):
+        button = self.tab_group.button(index)
+        if button is not None:
+            button.setChecked(True)
+        self.stack.setCurrentIndex(index)
+
     def set_project_root(self, root: str):
         root = (root or "").strip()
         if root == self._root:
@@ -211,8 +682,12 @@ class RightPanel(QWidget):
         self.setFixedWidth(
             self.COLLAPSED_WIDTH if self.collapsed else self.EXPANDED_WIDTH)
         for widget in (self.title_label, self.project_label,
-                       self.files_tab, self.git_tab, self.stack):
+                       self.session_tab, self.stack):
             widget.setVisible(not self.collapsed)
+        if (not self.collapsed and self._mode != "terminal"
+                and self.stack.currentIndex() == self.PAGE_GIT):
+            self._select_page(self.PAGE_SESSION)
+        self._apply_tool_tabs()
         self.collapse_button.setToolTip(
             "Expand panel" if self.collapsed else "Collapse panel")
         self._apply_style()
@@ -266,10 +741,39 @@ class RightPanel(QWidget):
             "fa5s.file-alt", color=colors["muted"])
         if hasattr(self, "files_tree"):
             self.files_tree.viewport().update()
+        if self._last_attachments:
+            self._render_attachments(self._last_attachments)
         self.setStyleSheet(f"""
             QWidget#RightPanel {{
                 background: {colors['panel']};
                 border-left: 1px solid {colors['border']};
+            }}
+            QScrollArea#PanelSessionScroll {{ background: transparent; border: none; }}
+            QWidget#PanelSessionPage {{ background: transparent; }}
+            QScrollArea#PanelActivityScroll {{ background: transparent; border: none; }}
+            QWidget#PanelActivityPage {{ background: transparent; }}
+            QFrame#PanelSeparator {{ background: {colors['border']}; }}
+            QLabel#PanelSummaryCaption {{
+                color: {colors['muted']};
+                font-size: 10px;
+                font-weight: 600;
+            }}
+            QLabel#PanelSummaryText {{
+                color: {colors['text']};
+                font-size: 12px;
+            }}
+            QPushButton#PanelAttachment {{
+                border: none;
+                background: transparent;
+                color: {colors['text']};
+                text-align: left;
+                padding: 4px 6px;
+                border-radius: 6px;
+            }}
+            QPushButton#PanelAttachment:hover {{ background: {colors['hover']}; }}
+            QPushButton#PanelAttachment:disabled {{
+                background: transparent;
+                color: {colors['muted']};
             }}
             QLabel#PanelSection {{
                 color: {colors['muted']};
@@ -281,6 +785,16 @@ class RightPanel(QWidget):
                 font-weight: 600;
             }}
             QLabel#PanelEmpty {{ color: {colors['muted']}; }}
+            QLabel#PanelStatLabel {{
+                color: {colors['muted']};
+                font-size: 11px;
+                font-weight: 600;
+            }}
+            QLabel#PanelStatValue {{
+                color: {colors['text']};
+                font-size: 13px;
+                font-weight: 600;
+            }}
             QPushButton#PanelIconButton {{
                 border: none;
                 background: transparent;

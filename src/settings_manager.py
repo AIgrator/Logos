@@ -144,7 +144,8 @@ class SettingsManager(QObject):
         "window_geometry": {},
         # Collapsed state of the workspace sidebar at the last close.
         "sidebar_collapsed": False,
-        # Collapsed state of the right workspace panel (files / Git).
+        # Collapsed state of the right workspace panel (session / activity /
+        # files / Git).
         "right_panel_collapsed": False,
         "webp_quality": 80,
         "webp_lossless": True,

@@ -58,6 +58,9 @@ class AppController(QObject):
     CHAT_QUEUE_MAX = 5
     # Minimum pause between automatic compactions of the same session.
     AUTO_COMPACT_COOLDOWN_SECONDS = 120.0
+    # Control tools that are not shown as instruments in the right panel.
+    ACTIVITY_HIDDEN_TOOLS = frozenset({
+        "use_skill", "finish", "communicate_to_user", "display_message"})
 
     def __init__(self, app, settings_manager: SettingsManager, local_server=None, working_directory=None,
                  project_manager=None):
@@ -1104,22 +1107,196 @@ class AppController(QObject):
 
     def _refresh_context_indicator(self):
         setter = getattr(getattr(self, "ui", None), "set_context_indicator", None)
+        stats = None
+        if self.session_events:
+            provider_id, model_id = self._active_model_ids()
+            if provider_id and model_id:
+                try:
+                    stats = self._context_stats_snapshot()
+                except Exception as e:
+                    logging.debug(
+                        "Could not refresh the context indicator: %s", e, exc_info=True)
+                    return
+        if callable(setter):
+            setter(stats)
+        self._update_session_panel(stats or {})
+
+    def _update_session_panel(self, stats: dict):
+        setter = getattr(getattr(self, "ui", None), "set_session_panel", None)
         if not callable(setter):
             return
-        if not self.session_events:
-            setter(None)
-            return
-        provider_id, model_id = self._active_model_ids()
-        if not provider_id or not model_id:
-            setter(None)
-            return
         try:
-            stats = self._context_stats_snapshot()
+            setter(self.session_panel_payload(stats))
         except Exception as e:
             logging.debug(
-                "Could not refresh the context indicator: %s", e, exc_info=True)
-            return
-        setter(stats or None)
+                "Could not refresh the session panel: %s", e, exc_info=True)
+
+    def session_panel_payload(self, stats: dict | None = None) -> dict:
+        """Values for the right panel's Session and Activity tabs."""
+        stats = stats or {}
+        provider_id, model_id = self._active_model_ids()
+        provider_label = ""
+        if provider_id:
+            provider_info = (
+                getattr(self.settings_manager, "PROVIDER_CONFIG", {}) or {}
+            ).get(provider_id) or {}
+            provider_label = (
+                provider_info.get("display_name")
+                or provider_id.replace("_", " ").replace("-", " ").title())
+        header = {}
+        if self.project_manager is not None and self.session_file:
+            header = self.project_manager.read_session_header(self.session_file)
+        counts = stats.get("counts") or {}
+        title = str(header.get("title") or "").strip()
+        objective = str(
+            header.get("objective") or self.session_objective or "").strip()
+        attachments = self._session_attachment_records()
+        return {
+            "title": title or objective,
+            "provider": provider_label,
+            "model": model_id,
+            "window": int(stats.get("window") or 0),
+            "total_tokens": int(stats.get("actual_tokens") or 0),
+            "percent": float(stats.get("percent") or 0.0),
+            "input_tokens": int(stats.get("latest_input_tokens") or 0),
+            "output_tokens": int(stats.get("latest_output") or 0),
+            "reasoning_tokens": int(stats.get("latest_reasoning") or 0),
+            "cache_read": int(stats.get("latest_cache_read") or 0),
+            "cache_write": int(stats.get("latest_cache_write") or 0),
+            "messages": int(counts.get("messages") or 0),
+            "user_messages": int(counts.get("user_messages") or 0),
+            "assistant_messages": int(counts.get("assistant_messages") or 0),
+            "tool_calls": int(counts.get("tool_calls") or 0),
+            "created_at": str(
+                header.get("created_at") or stats.get("first_ts") or ""),
+            "last_activity": str(stats.get("last_ts") or ""),
+            "summary": self._session_outcome_summary(header),
+            "skills": self._session_skill_records(),
+            "tools": self._session_tool_records(),
+            "attachments": attachments,
+        }
+
+    def _session_outcome_summary(self, header: dict) -> dict:
+        """User-facing recap of this session, derived from its own journal."""
+        events = [event for event in getattr(self, "session_events", []) or []
+                  if isinstance(event, dict)]
+        objective = str(header.get("objective")
+                        or getattr(self, "session_objective", "") or "").strip()
+        done = []
+        seen_skills = set()
+        for event in events:
+            event_type = event.get("type")
+            if event_type == "message" and event.get("role") == "assistant":
+                text = " ".join(event_text(event).split())
+                if not text:
+                    continue
+                if len(text) > 300:
+                    text = text[:299].rstrip() + "…"
+                done.append(f"- {text}")
+            elif event_type == "tool_call" and event.get("name") == "use_skill":
+                args = event.get("input")
+                name = str(args.get("name") or "").strip() if isinstance(
+                    args, dict) else ""
+                if name and name.casefold() not in seen_skills:
+                    seen_skills.add(name.casefold())
+                    done.append(f"- Used the {name} skill.")
+        updated_at = ""
+        for event in reversed(events):
+            stamp = str(event.get("ts") or "").strip()
+            if stamp:
+                updated_at = stamp
+                break
+        return {
+            "objective": objective,
+            "done": "\n".join(done[-6:]),
+            "current": "",
+            "next": "",
+            "updated_at": updated_at,
+            "source": "journal",
+        }
+
+    def _session_skill_records(self) -> list:
+        """Skills loaded through use_skill, in first-use order."""
+        records = []
+        positions = {}
+        for event in getattr(self, "session_events", []) or []:
+            if not isinstance(event, dict) or event.get("type") != "tool_call":
+                continue
+            if event.get("name") != "use_skill":
+                continue
+            args = event.get("input")
+            name = str(args.get("name") or "").strip() if isinstance(
+                args, dict) else ""
+            if not name:
+                continue
+            key = name.casefold()
+            if key in positions:
+                records[positions[key]]["count"] += 1
+                continue
+            positions[key] = len(records)
+            records.append({"name": name, "count": 1})
+        return records
+
+    def _session_tool_records(self) -> list:
+        """Named tools invoked in this session, in first-use order."""
+        records = []
+        positions = {}
+        for event in getattr(self, "session_events", []) or []:
+            if not isinstance(event, dict) or event.get("type") != "tool_call":
+                continue
+            name = str(event.get("name") or "").strip()
+            if not name or name in self.ACTIVITY_HIDDEN_TOOLS:
+                continue
+            key = name.casefold()
+            if key in positions:
+                records[positions[key]]["count"] += 1
+                continue
+            positions[key] = len(records)
+            records.append({"name": name, "count": 1})
+        return records
+
+    def _session_attachment_records(self) -> list:
+        """Files and screenshots the user attached in this session."""
+        records = []
+        seen = set()
+        root = getattr(self, "project_root", "") or ""
+        for event in getattr(self, "session_events", []) or []:
+            if not isinstance(event, dict) or event.get("type") != "message":
+                continue
+            for record in event.get("attachments") or []:
+                if not isinstance(record, dict):
+                    continue
+                path = attachment_store.resolve_path(record, root)
+                key = (str(record.get("sha256") or ""),
+                       path or str(record.get("name") or ""))
+                if key in seen:
+                    continue
+                seen.add(key)
+                try:
+                    size = int(record.get("size") or 0)
+                except (TypeError, ValueError):
+                    size = 0
+                kind = str(record.get("kind") or "file")
+                status = str(record.get("status") or "ok")
+                if status == "ok" and path:
+                    if not os.path.exists(path) or (
+                            kind == "folder" and not os.path.isdir(path)):
+                        status = "missing"
+                    elif kind != "folder":
+                        try:
+                            if size and os.path.getsize(path) != size:
+                                status = "changed"
+                        except OSError:
+                            status = "missing"
+                records.append({
+                    "name": str(record.get("name") or (
+                        os.path.basename(path) if path else "attachment")),
+                    "kind": kind,
+                    "path": path,
+                    "size": size,
+                    "status": status,
+                })
+        return records
 
     def handoff_prompt(self, include_same_session: bool = False) -> str:
         """Summary block for a mode that did not produce the current journal.
@@ -1955,6 +2132,7 @@ class AppController(QObject):
             self._report_project_error("The session title could not be saved.")
             return
         self.ui.refresh_project_views()
+        self._schedule_context_indicator_update()
 
     def delete_session(self, path: str):
         """Deletes a session; deleting the open one leaves an empty chat.
