@@ -31,8 +31,8 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPlainTextEdit,
 )
-from PySide6.QtCore import Qt, QSize, QTimer
-from PySide6.QtGui import QIcon, QPalette
+from PySide6.QtCore import Qt, QSize, QTimer, QUrl
+from PySide6.QtGui import QDesktopServices, QIcon, QPalette
 from src.ui.theme_manager import (
     LIGHT_THEME,
     DARK_THEME,
@@ -41,6 +41,7 @@ from src.ui.theme_manager import (
 )
 
 from settings_manager import SettingsManager
+from context import skills as skills_store
 from llm import PROVIDERS, providers_ready, start_provider_warmup
 from build_info import APP_VERSION
 from src.ui.widgets.font_manager.font_combobox import FontComboBox
@@ -174,6 +175,7 @@ class SettingsWindow(QDialog):
             "hotkeys": ("fa5s.keyboard", "Hotkeys"),
             "browser": ("fa5s.globe", "Browser"),
             "terminal": ("fa5s.terminal", "Terminal"),
+            "skills": ("fa5s.puzzle-piece", "Skills"),
             "vision": ("fa5s.robot", "Vision"),
             "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
             "apps": ("fa5s.th-large", "Applications"),
@@ -221,6 +223,7 @@ class SettingsWindow(QDialog):
             "hotkeys": self._create_hotkeys_section(),
             "browser": self._create_browser_section(),
             "terminal": self._create_terminal_section(),
+            "skills": self._create_skills_section(),
             "vision": self._create_vision_section(),
             "compact": self._create_compact_mode_section(),
             "apps": self._create_apps_section(),
@@ -367,6 +370,7 @@ class SettingsWindow(QDialog):
                 break
 
         self.load_apps_from_cache()
+        self._refresh_skills()
 
     def _collect_settings_from_ui(self):
         """Gathers all settings from the UI into a single dictionary."""
@@ -1474,6 +1478,109 @@ class SettingsWindow(QDialog):
         terminal_layout.addWidget(self.shell_detach_spinbox, 1, 3)
 
         return group
+
+    def _create_skills_section(self):
+        """Creates the Agent Skills settings section."""
+        group = QGroupBox("Skills")
+        layout = QVBoxLayout(group)
+
+        intro = QLabel(
+            "Skills are folders with a SKILL.md file that teach the Terminal and "
+            "Browser agents a specific workflow. Folder layouts used by Claude Code, "
+            "Codex, Cursor and Qoder are read as-is; the project scope wins over "
+            "the user scope.")
+        intro.setWordWrap(True)
+        layout.addWidget(intro)
+
+        self.skills_list = QListWidget()
+        self.skills_list.setMinimumHeight(170)
+        self.skills_list.setTextElideMode(Qt.ElideRight)
+        self.skills_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.skills_list.setToolTip(
+            "Skills found in the project and user skill folders. The agent sees "
+            "each name and description and loads the full instructions on demand.")
+        layout.addWidget(self.skills_list)
+
+        buttons = QHBoxLayout()
+        self.skills_project_button = QPushButton("Project Folder")
+        self.skills_project_button.setToolTip(
+            "Creates and opens <project>/.logos/skills in the file manager.")
+        self.skills_project_button.clicked.connect(
+            lambda: self._open_skills_dir("project"))
+        buttons.addWidget(self.skills_project_button)
+
+        self.skills_user_button = QPushButton("User Folder")
+        self.skills_user_button.setToolTip(
+            "Creates and opens ~/.logos/skills in the file manager.")
+        self.skills_user_button.clicked.connect(
+            lambda: self._open_skills_dir("user"))
+        buttons.addWidget(self.skills_user_button)
+
+        self.skills_reload_button = QPushButton("Reload")
+        self.skills_reload_button.setToolTip("Rescan the skill folders.")
+        self.skills_reload_button.clicked.connect(self._refresh_skills)
+        buttons.addWidget(self.skills_reload_button)
+        layout.addLayout(buttons)
+
+        hint = QLabel(
+            "A skill needs a SKILL.md with `name` and `description` in its YAML "
+            "frontmatter. Extra files (scripts, references, assets) stay in the "
+            "skill folder and are read on demand.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #9E9E9E;")
+        layout.addWidget(hint)
+
+        self._refresh_skills()
+        return group
+
+    def _skills_project_root(self) -> str:
+        return str(getattr(self.controller, "project_root", "") or "")
+
+    def _refresh_skills(self):
+        """Re-reads installed skills from the project and user folders."""
+        if not hasattr(self, "skills_list"):
+            return
+        project_root = self._skills_project_root()
+        self.skills_project_button.setEnabled(bool(project_root))
+        self.skills_list.clear()
+        try:
+            items = skills_store.discover(project_root)
+        except Exception as e:  # noqa: BLE001 - settings must still open
+            logging.warning(f"Could not list skills: {e}")
+            items = []
+        if not items:
+            placeholder = QListWidgetItem("No skills installed.")
+            placeholder.setFlags(Qt.NoItemFlags)
+            self.skills_list.addItem(placeholder)
+            return
+        for skill in items:
+            entry = QListWidgetItem(
+                f"{skill['name']} — {skill['description']}")
+            entry.setToolTip(
+                f"{skill['description']}\n\n{skill['path']}\n"
+                f"Scope: {skill['scope']} · Source: {skill['source']}")
+            entry.setData(Qt.UserRole, skill["path"])
+            self.skills_list.addItem(entry)
+
+    def _open_skills_dir(self, scope: str):
+        """Creates and opens a skills root for the project or the user."""
+        if scope == "project":
+            project_root = self._skills_project_root()
+            if not project_root:
+                QMessageBox.information(
+                    self, "No active project",
+                    "Open a project first, then its skills folder becomes available.")
+                return
+            path = os.path.join(project_root, ".logos", "skills")
+        else:
+            path = os.path.join(os.path.expanduser("~"), ".logos", "skills")
+        try:
+            os.makedirs(path, exist_ok=True)
+        except OSError as e:
+            QMessageBox.warning(
+                self, "Could not create the folder", f"{path}\n\n{e}")
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     def _create_position_grid(self):
         """Creates the 3x3 grid of buttons for position selection."""

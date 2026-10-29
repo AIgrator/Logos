@@ -899,6 +899,15 @@ class BaseAgentHandler:
                     "If there is no progress, stop and call communicate_to_user.")
         return None
 
+    def skills_block(self) -> str:
+        """Installed Agent Skills (name + description) for the system prompt."""
+        try:
+            build = getattr(self.controller, "skills_prompt", None)
+            return build() if callable(build) else ""
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} skills lookup failed: {e}")
+            return ""
+
     # -- heir contract -----------------------------------------------------
 
     def build_prompts(self):

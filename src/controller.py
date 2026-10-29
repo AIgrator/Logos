@@ -21,7 +21,7 @@ from llm.llm_worker import LLMWorker
 from llm.mode_capabilities import ModeCapabilities, SUBSECTIONS
 from project_manager import event_text
 import attachments as attachment_store
-from context import context_stats, handoff, model_context, project_rules
+from context import context_stats, handoff, model_context, project_rules, skills
 from context.tokens import ModelMetadata
 from settings_manager import SettingsManager
 from ui.manager import UIManager
@@ -850,6 +850,10 @@ class AppController(QObject):
         if not self.project_root:
             return ""
         return project_rules.injection_block(self.project_root)
+
+    def skills_prompt(self) -> str:
+        """Name+description list of installed Agent Skills for the active project."""
+        return skills.prompt_block(self.project_root)
 
     def consume_handoff_seed(self):
         """Mark a mode-switch seed as sent so later requests do not repeat it."""

@@ -114,6 +114,9 @@ def _action_summary(action_name: str, action_args: dict) -> str:
         job_id = args.get('job_id', '?')
         verb = "Check" if name == 'poll_shell_job' else "Stop"
         return f"{verb} shell job · #{job_id}"
+    if name == 'use_skill':
+        skill = _shorten_text(args.get('name'))
+        return f"Loading skill · {skill}" if skill else "Loading skill"
     return f"Running {name.replace('_', ' ')}"
 
 
@@ -268,7 +271,8 @@ class TerminalHandler(BaseAgentHandler):
         return self.brain.get_terminal_prompts(
             user_request=self.original_user_request,
             os_info=self.os_info,
-            history=history
+            history=history,
+            available_skills=self.skills_block(),
         )
 
     def _dedent_lines(self, lines: list[str]) -> list[str]:
@@ -400,7 +404,8 @@ class TerminalHandler(BaseAgentHandler):
             self.ui.add_message(self._action_summary_html(label))
             if args and name not in {
                     'execute_shell', 'poll_shell_job', 'stop_shell_job',
-                    'read_files', 'list_directory', 'search_file_content'}:
+                    'read_files', 'list_directory', 'search_file_content',
+                    'use_skill'}:
                 self.ui.add_message(self._details_block(name, args))
             return True
         return super().replay_event(event)
@@ -486,7 +491,8 @@ class TerminalHandler(BaseAgentHandler):
             # block only duplicated the command/path/pattern.
             if action_args and action_name not in {
                     'execute_shell', 'poll_shell_job', 'stop_shell_job',
-                    'read_files', 'list_directory', 'search_file_content'}:
+                    'read_files', 'list_directory', 'search_file_content',
+                    'use_skill'}:
                 self.ui.add_message(self._details_block(action_name, action_args))
         # ---------------------------------------------
 

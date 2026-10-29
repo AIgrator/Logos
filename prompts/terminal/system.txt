@@ -36,6 +36,11 @@ Your primary mission is to achieve the user's goal by selecting and executing th
 You have access to a set of tools. You must respond with a JSON object that uses one of the available tools.
 {available_tools}
 
+### Available Skills ###
+Skills are optional instruction packages installed by the user or the project. When a task matches one of the skill descriptions below, call the `use_skill` tool with its name to load the full instructions, then follow them. Auxiliary files are inside the skill directory reported by `use_skill`; read them with `read_files`.
+
+{available_skills}
+
 ### Response Format ###
 {response_format_instructions}
 

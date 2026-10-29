@@ -122,6 +122,10 @@ In all modes, you can add file content to the context by simply typing `@` and s
 
 As a session grows, Logos keeps the full history on disk and sends the model a trimmed view plus a rolling summary. See the [**Context settings guide**](./docs/context_settings.md) for what each option in Settings → Context does, its default, and when to change it.
 
+### Skills
+
+Terminal and Browser can follow Agent Skills — instruction packages in the open `SKILL.md` format shared with Claude Code, Codex, Cursor and Qoder. Project and user skills are discovered automatically and listed in Settings → Skills; no conversion or installation is needed. See the [**skills guide**](./docs/skills.md) for the folder layout, precedence rules and limits.
+
 ## Features (Tools)
 
 The assistant comes with a set of built-in tools, grouped by their mode of operation:

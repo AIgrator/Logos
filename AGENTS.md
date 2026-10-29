@@ -93,6 +93,18 @@ files are inlined once in the current request and only referenced afterwards.
 The Session journal shows the recorded path, size, SHA-256, stored flag and live
 status under the message that carried each attachment.
 
+Agent Skills use the open `SKILL.md` format: a folder with a `SKILL.md` file
+whose YAML frontmatter carries `name` and `description` (optional `scripts/`,
+`references/`, `assets/`). `src/context/skills.py` scans, for the active project
+and then the user home: `.logos/skills`, `.agents/skills`, `.cursor/skills`,
+`.claude/skills`, `.codex/skills`, `.qoder/skills`. The first root wins on a name
+clash, so project skills override user skills. Terminal and Browser list only
+name + description in the system prompt (`### Available Skills ###`); the model
+calls the `use_skill` tool to load the body, the skill directory and auxiliary
+file paths, then reads extras with `read_files`. Chat and Vision have no skills.
+The Skills settings page lists installed skills and opens the project
+(`<project>/.logos/skills`) and user (`~/.logos/skills`) roots.
+
 Sessions are mode-locked: `chat`, `terminal`, `browser`, or `vision`. Switching
 mode in a non-empty session starts a new session; switching in an empty session
 rewrites only the header. Deleting the open session clears the chat and leaves no
