@@ -7,7 +7,7 @@ import zlib
 from datetime import date, datetime, timedelta
 
 import qtawesome as qta
-from PySide6.QtCore import QPoint, QSize, Qt, QUrl, Signal
+from PySide6.QtCore import QPoint, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import (QActionGroup, QColor, QDesktopServices, QFont, QIcon,
                            QPainter, QPixmap)
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QHBoxLayout,
@@ -129,6 +129,23 @@ def _confirm_session_deletion(parent, title: str) -> bool:
     return box.exec() == QMessageBox.Yes
 
 
+class _SessionFlyoutMenu(QMenu):
+    """Collapsed-rail session chooser that also opens the session menu."""
+
+    session_context_requested = Signal(object, QPoint)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.RightButton:
+            action = self.actionAt(event.position().toPoint())
+            path = action.data() if action is not None else ""
+            if isinstance(path, str) and path:
+                self.session_context_requested.emit(
+                    action, event.globalPosition().toPoint())
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+
 class _ProjectMenuMixin:
     """Right-click menu shared by the home screen and the sidebar list."""
 
@@ -172,14 +189,15 @@ class _ProjectMenuMixin:
             if confirmed:
                 self.project_removed.emit(path, delete_data)
 
-    def _show_session_menu(self, path: str, title: str, pos, view):
+    def _show_session_menu(self, path: str, title: str, pos, view=None):
         """Rename/reveal/delete menu shared by the home screen and sidebar."""
+        global_pos = view.viewport().mapToGlobal(pos) if view is not None else pos
         menu = QMenu(self)
         rename_action = menu.addAction("Rename...")
         reveal_action = menu.addAction("Show in Explorer")
         menu.addSeparator()
         delete_action = menu.addAction("Delete Session...")
-        chosen = menu.exec(view.viewport().mapToGlobal(pos))
+        chosen = menu.exec(global_pos)
         if chosen is rename_action:
             new_title = _ask_session_title(self, title or "Empty session")
             if new_title:
@@ -772,7 +790,7 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
 
     def _show_session_flyout(self, item, path, sessions):
         """Session chooser anchored to a project tile in the collapsed rail."""
-        menu = QMenu(self)
+        menu = _SessionFlyoutMenu(self)
         menu.setToolTipsVisible(True)
         menu.addSection(self._project_name(path))
         group = QActionGroup(menu)
@@ -793,12 +811,25 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
                 tooltip += f"\n{objective}"
             tooltip += f"\n{session_path}"
             action.setToolTip(tooltip)
+        menu.session_context_requested.connect(
+            self._show_flyout_session_menu)
         viewport = self.project_list.viewport()
         top = viewport.mapTo(self, QPoint(0, self.project_list.visualItemRect(item).top())).y()
         chosen = menu.exec(self.mapToGlobal(QPoint(self.width(), top - 6)))
         chosen_path = chosen.data() if chosen is not None else ""
         if chosen_path and chosen_path != self._active_session:
             self.session_selected.emit(chosen_path)
+
+    def _show_flyout_session_menu(self, action, global_pos):
+        path = action.data()
+        if not isinstance(path, str) or not path:
+            return
+        title = action.text()
+        menu = self.sender()
+        if isinstance(menu, QMenu):
+            menu.close()
+        QTimer.singleShot(
+            0, lambda: self._show_session_menu(path, title, global_pos))
 
     def _on_tree_item_expanded(self, item):
         if item.data(0, _ITEM_KIND_ROLE) != "project":
