@@ -13,6 +13,8 @@ from PySide6.QtCore import QObject, Slot, QThread, QTimer, Signal
 from states import VisionState
 from ui.terminal_html_formatter import TerminalHtmlFormatter
 from src.computer.computer import Computer
+from src.computer.terminal_policy import evaluate as evaluate_terminal_access
+from src.computer.terminal_policy import normalize_mode as normalize_access_mode
 
 from .base_agent import BaseAgentHandler
 from .tool_exec_worker import ToolExecRelay, ToolExecWorker
@@ -410,6 +412,35 @@ class TerminalHandler(BaseAgentHandler):
             return True
         return super().replay_event(event)
 
+    def _access_mode(self) -> str:
+        settings = getattr(self.controller, "settings", None) or {}
+        terminal = settings.get("terminal") or {}
+        return normalize_access_mode(terminal.get("access_mode"))
+
+    def _authorize_action(self, action_name, action_args) -> bool:
+        """Ask the user before a tool call the access mode does not allow."""
+        project_root = getattr(self.computer, "working_directory", "") or ""
+        request = evaluate_terminal_access(
+            action_name, action_args, project_root, self._access_mode())
+        if request is None:
+            return True
+        asker = getattr(self.controller, "ask_terminal_approval", None)
+        if not callable(asker):
+            return False
+        try:
+            return bool(asker(request))
+        except Exception as error:
+            logging.error(f"Terminal approval failed: {error}")
+            return False
+
+    def _report_denied(self, action_name, action_args):
+        label = _action_summary(action_name, action_args)
+        text = (f"**Tool Result:** Denied: the user rejected '{label}'. "
+                "Do not retry this action; ask the user how to proceed or stop.")
+        self._add_result_card(text, f"{action_name} · denied", "denied")
+        self.record_tool_result(text, status="denied", name=action_name)
+        self._continue_loop(text)
+
     def execute_action(self, action: dict) -> str | None:
         """
         Executes the action (tool call) requested by the LLM.
@@ -421,6 +452,10 @@ class TerminalHandler(BaseAgentHandler):
         action_args = action.get('arguments', {})
         if not isinstance(action_args, dict):
             action_args = {}
+
+        if not self._authorize_action(action_name, action_args):
+            self._report_denied(action_name, action_args)
+            return None
 
         # --- Hybrid Web Request Interception ---
         if action_name in ['web_fetchs', 'web_search']:

@@ -200,6 +200,7 @@ class SettingsManager(QObject):
             "approval_timeout_seconds": 300
         },
         "terminal": {
+            "access_mode": "ask",
             "shell_timeout_seconds": 60,
             "shell_detach_seconds": 25,
             "output_cap_chars": 20000,

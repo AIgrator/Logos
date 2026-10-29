@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QDoubleSpinBox,
     QCheckBox,
+    QComboBox,
     QListWidget,
     QLineEdit,
     QListWidgetItem,
@@ -315,6 +316,9 @@ class SettingsWindow(QDialog):
 
         # Terminal (long tasks need a generous shell timeout)
         terminal_settings = self.settings_manager.get("terminal", {})
+        access_index = self.terminal_access_combo.findData(
+            terminal_settings.get("access_mode", "ask"))
+        self.terminal_access_combo.setCurrentIndex(max(0, access_index))
         self.shell_timeout_spinbox.setValue(int(terminal_settings.get("shell_timeout_seconds", 60) or 60))
         self.shell_detach_spinbox.setValue(int(terminal_settings.get("shell_detach_seconds", 25) or 25))
 
@@ -426,6 +430,7 @@ class SettingsWindow(QDialog):
             pass
 
         terminal_settings = {
+            "access_mode": self.terminal_access_combo.currentData() or "ask",
             "shell_timeout_seconds": self.shell_timeout_spinbox.value(),
             "shell_detach_seconds": self.shell_detach_spinbox.value(),
         }
@@ -1460,9 +1465,29 @@ class SettingsWindow(QDialog):
             "need a generous value; progress streams live into the chat and "
             "Stop kills the process. Applies to the next command."
         )
-        terminal_layout.addWidget(QLabel("Shell timeout:"), 0, 0)
-        terminal_layout.addWidget(self._create_help_label(shell_timeout_tooltip), 0, 1, Qt.AlignLeft)
-        terminal_layout.addWidget(self.shell_timeout_spinbox, 0, 3)
+
+        from src.computer.terminal_policy import ACCESS_MODE_LABELS
+        self.terminal_access_combo = QComboBox()
+        self.terminal_access_combo.setFixedWidth(170)
+        for mode in ("ask", "auto", "full"):
+            self.terminal_access_combo.addItem(ACCESS_MODE_LABELS[mode], mode)
+        access_tooltip = (
+            "Ask every time (default): read-only shell commands and edits "
+            "inside the project run freely; commands that change state, "
+            "network access, sensitive files (.env, keys, .ssh) and paths "
+            "outside the project ask first.\n"
+            "Auto approve: only risky commands (destructive, privileged, "
+            "system-level), sensitive files and paths outside the project ask.\n"
+            "Full access: never ask.\n"
+            "Applies to the next action; no restart."
+        )
+        terminal_layout.addWidget(QLabel("Access permissions:"), 0, 0)
+        terminal_layout.addWidget(self._create_help_label(access_tooltip), 0, 1, Qt.AlignLeft)
+        terminal_layout.addWidget(self.terminal_access_combo, 0, 3)
+
+        terminal_layout.addWidget(QLabel("Shell timeout:"), 1, 0)
+        terminal_layout.addWidget(self._create_help_label(shell_timeout_tooltip), 1, 1, Qt.AlignLeft)
+        terminal_layout.addWidget(self.shell_timeout_spinbox, 1, 3)
 
         self.shell_detach_spinbox = QSpinBox()
         self.shell_detach_spinbox.setRange(5, 600)
@@ -1474,9 +1499,9 @@ class SettingsWindow(QDialog):
             "a background job (same timeout still applies). Lower = more responsive, "
             "higher = fewer poll turns for medium commands."
         )
-        terminal_layout.addWidget(QLabel("Detach to background:"), 1, 0)
-        terminal_layout.addWidget(self._create_help_label(shell_detach_tooltip), 1, 1, Qt.AlignLeft)
-        terminal_layout.addWidget(self.shell_detach_spinbox, 1, 3)
+        terminal_layout.addWidget(QLabel("Detach to background:"), 2, 0)
+        terminal_layout.addWidget(self._create_help_label(shell_detach_tooltip), 2, 1, Qt.AlignLeft)
+        terminal_layout.addWidget(self.shell_detach_spinbox, 2, 3)
 
         return group
 

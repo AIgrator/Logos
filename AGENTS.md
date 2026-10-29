@@ -150,3 +150,31 @@ journal behind; the next message creates a session in the current mode. Legacy
 directory) is the terminal/browser `working_directory` and the root passed to
 `Indexer`; `.logos` is ignored by the indexer. Do not hardcode `Indexer('.')` or
 `os.getcwd()` for project-scoped paths.
+
+## Terminal access permissions
+
+Every Terminal tool call passes `src/computer/terminal_policy.py` before it
+runs (`TerminalHandler.execute_action` calls `AppController.ask_terminal_approval`
+first, including for `web_fetchs` / `web_search`). `terminal.access_mode`
+(Settings → Terminal, "Access permissions") has three values:
+
+- `ask` (default) - read-only shell commands and edits inside the project run
+  without a prompt; state-changing commands, network tools, file deletes,
+  sensitive paths and paths outside the project ask.
+- `auto` - only risk asks: destructive commands (recursive/forced deletion,
+  disk/registry/service/power changes, privilege escalation, destructive git,
+  downloaded-code execution), file deletes, sensitive paths and paths outside
+  the project.
+- `full` - never asks.
+
+Read-only detection is deliberately conservative: every pipe segment must be
+an allowlisted command head (`ls`, `git status`, package-manager list/show
+commands, `--version` flags, PowerShell `Get-*`/`Format-*` output cmdlets, ...);
+redirection, substitution, `rm`/`del`, scripts and unknown executables make a
+command state-changing. Sensitive paths include `.env` files (templates such
+as `.env.example` excluded), private keys and `.ssh`/`.aws`/`.gnupg`/`.kube`
+folders. A denied action is journaled as a `tool_result` with status `denied`,
+rendered as an expanded warning card and reported to the model as `Denied: ...`
+so it must not retry silently; the dialog defaults to Deny and fails closed.
+The mode applies to Terminal only; Browser and Vision keep their own approval
+flows.

@@ -2652,6 +2652,91 @@ class AppController(QObject):
             logging.error(f"Safety approval dialog failed: {e}")
             return False
 
+    def ask_terminal_approval(self, request: dict) -> bool:
+        """Modal permission prompt for a Terminal tool call.
+
+        Runs on the GUI thread before the action executes. Deny is the safe
+        default: closing the dialog or a dialog failure rejects the action.
+        """
+        from PySide6.QtWidgets import (QDialog, QHBoxLayout, QLabel,
+                                       QPlainTextEdit, QPushButton, QVBoxLayout)
+        from PySide6.QtGui import QFontDatabase, QIcon
+        from src.computer.terminal_policy import ACCESS_MODE_LABELS
+        try:
+            request = request if isinstance(request, dict) else {}
+            try:
+                width = int(self.ui.main_window.width())
+            except Exception:
+                width = 700
+            width = max(540, min(width, 900))
+            dialog = QDialog(self.ui)
+            dialog.setWindowTitle("Logos — permission required")
+            try:
+                dialog.setWindowIcon(QIcon("assets/ico.ico"))
+            except Exception:
+                pass
+            dialog.setFixedWidth(width)
+            layout = QVBoxLayout(dialog)
+            layout.setSpacing(10)
+
+            summary = str(request.get("summary") or "run an action").strip()
+            title = QLabel(f"Logos wants to {summary[:1].lower()}{summary[1:]}.")
+            title.setWordWrap(True)
+            title_font = title.font()
+            title_font.setPointSizeF(title_font.pointSizeF() + 1)
+            title_font.setBold(True)
+            title.setFont(title_font)
+            layout.addWidget(title)
+
+            detail = str(request.get("detail") or "").strip()
+            if detail:
+                shown = detail if len(detail) <= 4000 else (
+                    detail[:4000] + "\n… (truncated)")
+                detail_box = QPlainTextEdit(shown)
+                detail_box.setReadOnly(True)
+                detail_box.setLineWrapMode(QPlainTextEdit.NoWrap)
+                detail_box.setFont(
+                    QFontDatabase.systemFont(QFontDatabase.FixedFont))
+                lines = min(9, shown.count("\n") + 1)
+                line_height = detail_box.fontMetrics().lineSpacing()
+                detail_box.setFixedHeight(min(240, line_height * lines + 24))
+                layout.addWidget(detail_box)
+
+            reasons = [str(reason).strip()
+                       for reason in (request.get("reasons") or [])
+                       if str(reason).strip()]
+            if reasons:
+                why = QLabel("Why this needs your approval:\n" + "\n".join(
+                    f"• {reason}" for reason in reasons))
+                why.setWordWrap(True)
+                layout.addWidget(why)
+
+            mode_label = ACCESS_MODE_LABELS.get(
+                str(request.get("mode") or ""), "")
+            if mode_label:
+                hint = QLabel(
+                    f"Access permissions: {mode_label}. "
+                    "Change this in Settings → Terminal.")
+                hint.setStyleSheet("color: #9E9E9E;")
+                layout.addWidget(hint)
+
+            buttons = QHBoxLayout()
+            buttons.addStretch()
+            deny_button = QPushButton("Deny")
+            deny_button.setDefault(True)
+            allow_button = QPushButton("Allow")
+            allow_button.setAutoDefault(False)
+            deny_button.clicked.connect(dialog.reject)
+            allow_button.clicked.connect(dialog.accept)
+            buttons.addWidget(deny_button)
+            buttons.addWidget(allow_button)
+            layout.addLayout(buttons)
+            deny_button.setFocus()
+            return dialog.exec() == QDialog.Accepted
+        except Exception as e:
+            logging.error(f"Terminal approval dialog failed: {e}")
+            return False
+
     def ask_user_text(self, question: str, sensitive: bool = False):
         """Modal question with optional free text (Vision ask_user tool).
 

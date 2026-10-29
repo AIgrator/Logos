@@ -785,13 +785,14 @@ class BaseAgentHandler:
             "title": title,
             "content": shown,
             "plain_content": text,
-            # Failures open by default so the error is not hidden behind a click.
-            "state": "expanded" if status == "error" else "collapsed",
+            # Failures and denials open by default so the outcome is visible.
+            "state": "expanded" if status in ("error", "denied") else "collapsed",
         }
-        if status == "error":
+        if status in ("error", "denied"):
             theme = getattr(self.controller, "theme_manager", None)
             if theme is not None:
-                block["title_color"] = theme.get_style("ERROR_COLOR")
+                block["title_color"] = theme.get_style(
+                    "ERROR_COLOR" if status == "error" else "WARNING_COLOR")
         self.ui.add_message(block)
 
     def replay_event(self, event: dict) -> bool:
