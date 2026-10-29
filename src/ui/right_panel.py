@@ -47,13 +47,6 @@ _HIDDEN_NAMES = frozenset({
     ".mypy_cache", ".pytest_cache", "cache",
 })
 
-_GIT_GROUPS = (
-    ("staged", "STAGED"),
-    ("changes", "CHANGES"),
-    ("conflicts", "CONFLICTS"),
-    ("untracked", "UNTRACKED"),
-)
-
 _GIT_STATUS_COLORS = {
     "dark": {
         "A": "#3fb950", "M": "#d29922", "D": "#f85149", "R": "#58a6ff",
@@ -706,6 +699,12 @@ class RightPanel(QWidget):
             Qt.TextInteractionFlag.TextSelectableByMouse)
         page_layout.addWidget(self.git_meta_label)
 
+        self.git_summary_label = QLabel("")
+        self.git_summary_label.setObjectName("PanelGitSummary")
+        self.git_summary_label.setTextFormat(Qt.TextFormat.RichText)
+        self.git_summary_label.setWordWrap(True)
+        page_layout.addWidget(self.git_summary_label)
+
         scroll = QScrollArea()
         scroll.setObjectName("PanelGitScroll")
         scroll.setWidgetResizable(True)
@@ -725,16 +724,11 @@ class RightPanel(QWidget):
         self.git_empty.setAlignment(
             Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignTop)
         content_layout.addWidget(self.git_empty)
-        self._git_groups_widget = QWidget(content)
-        self._git_groups_layout = QVBoxLayout(self._git_groups_widget)
-        self._git_groups_layout.setContentsMargins(0, 0, 0, 0)
-        self._git_groups_layout.setSpacing(10)
-        content_layout.addWidget(self._git_groups_widget)
-        self._git_history_widget = QWidget(content)
-        self._git_history_layout = QVBoxLayout(self._git_history_widget)
-        self._git_history_layout.setContentsMargins(0, 0, 0, 0)
-        self._git_history_layout.setSpacing(2)
-        content_layout.addWidget(self._git_history_widget)
+        self._git_list_widget = QWidget(content)
+        self._git_list_layout = QVBoxLayout(self._git_list_widget)
+        self._git_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._git_list_layout.setSpacing(2)
+        content_layout.addWidget(self._git_list_widget)
         content_layout.addStretch(1)
         scroll.setWidget(content)
         page_layout.addWidget(scroll, 1)
@@ -784,7 +778,6 @@ class RightPanel(QWidget):
     def _render_git(self, status: dict):
         self._last_git_status = dict(status or {})
         status = self._last_git_status
-        colors = _theme_colors(self.theme_manager)
         available = bool(status.get("available"))
         branch = str(status.get("branch") or "").strip()
         commit = str(status.get("commit") or "")
@@ -806,20 +799,14 @@ class RightPanel(QWidget):
         self.git_meta_label.setText(self._git_meta_text(status))
         self.git_meta_label.setVisible(self.git_meta_label.text() != "")
 
-        self._clear_git_groups()
-        has_entries = False
-        if available:
-            for key, title in _GIT_GROUPS:
-                entries = [entry for entry in status.get(key) or []
-                           if isinstance(entry, dict)]
-                if not entries:
-                    continue
-                self._add_git_group(title, entries, colors)
-                has_entries = True
-        commits = [commit for commit in status.get("commits") or []
-                   if isinstance(commit, dict)]
-        self._render_git_history(commits if available else [])
-        self._git_groups_widget.setVisible(has_entries)
+        entries = [entry for entry in status.get("entries") or []
+                   if isinstance(entry, dict)] if available else []
+        self._clear_git_list()
+        for entry in entries:
+            self._git_list_layout.addWidget(self._git_file_row(entry))
+        self._render_git_summary(status, entries)
+        has_entries = bool(entries)
+        self._git_list_widget.setVisible(has_entries)
         self.git_empty.setVisible(not has_entries)
         if has_entries:
             self.git_empty.setText("")
@@ -831,6 +818,27 @@ class RightPanel(QWidget):
         if not available:
             self.git_branch_label.setText("—")
             self.git_branch_label.setToolTip("")
+
+    def _render_git_summary(self, status: dict, entries: list):
+        if not entries:
+            self.git_summary_label.setText("")
+            self.git_summary_label.setVisible(False)
+            return
+        colors = _theme_colors(self.theme_manager)
+        palette = self._git_status_palette()
+        count = len(entries)
+        files = "1 file changed" if count == 1 else f"{count} files changed"
+        parts = [f'<span style="color:{colors["muted"]}">{files}</span>']
+        added = int(status.get("added") or 0)
+        deleted = int(status.get("deleted") or 0)
+        if added:
+            parts.append(
+                f'<span style="color:{palette["A"]}">+{added}</span>')
+        if deleted:
+            parts.append(
+                f'<span style="color:{palette["D"]}">-{deleted}</span>')
+        self.git_summary_label.setText("&nbsp;&nbsp;".join(parts))
+        self.git_summary_label.setVisible(True)
 
     def _git_meta_text(self, status: dict) -> str:
         if not status.get("available"):
@@ -852,9 +860,9 @@ class RightPanel(QWidget):
             return f"at {commit[:7]}" if commit else "No branch checked out"
         return "No upstream branch"
 
-    def _clear_git_groups(self):
-        while self._git_groups_layout.count():
-            item = self._git_groups_layout.takeAt(0)
+    def _clear_git_list(self):
+        while self._git_list_layout.count():
+            item = self._git_list_layout.takeAt(0)
             widget = item.widget()
             if widget is not None:
                 # Hide first: deleteLater leaves the old rows painted for a
@@ -862,20 +870,8 @@ class RightPanel(QWidget):
                 widget.hide()
                 widget.deleteLater()
 
-    def _add_git_group(self, title: str, entries: list, colors: dict):
-        block = QWidget(self._git_groups_widget)
-        layout = QVBoxLayout(block)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        caption = QLabel(f"{title} · {len(entries)}")
-        caption.setObjectName("PanelSection")
-        layout.addWidget(caption)
-        for entry in entries:
-            layout.addWidget(self._git_file_row(entry, colors))
-        self._git_groups_layout.addWidget(block)
-
-    def _git_file_row(self, entry: dict, colors: dict) -> QWidget:
-        row = QWidget(self._git_groups_widget)
+    def _git_file_row(self, entry: dict) -> QWidget:
+        row = QWidget(self._git_list_widget)
         layout = QHBoxLayout(row)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(6)
@@ -889,16 +885,23 @@ class RightPanel(QWidget):
             f"color: {self._git_status_color(code)}; font-weight: 700;")
         layout.addWidget(badge)
 
+        stats_text = self._git_stats_text(entry)
         display = str(entry.get("display") or entry.get("path") or "")
         button = QPushButton()
         button.setObjectName("PanelGitFile")
         button.setCursor(Qt.CursorShape.PointingHandCursor)
         button.ensurePolished()
+        budget = self.EXPANDED_WIDTH - (124 if stats_text else 92)
         button.setText(button.fontMetrics().elidedText(
-            display, Qt.TextElideMode.ElideMiddle, self.EXPANDED_WIDTH - 92))
+            display, Qt.TextElideMode.ElideMiddle, budget))
         absolute = str(entry.get("absolute") or "")
         exists = bool(absolute) and os.path.exists(absolute)
-        tooltip = [absolute or display, f"Status: {entry.get('label') or code}"]
+        status_note = str(entry.get("label") or code)
+        if entry.get("staged") and entry.get("unstaged"):
+            status_note += ", staged with unstaged edits"
+        elif entry.get("staged"):
+            status_note += ", staged"
+        tooltip = [absolute or display, f"Status: {status_note}"]
         if entry.get("original"):
             tooltip.append(f"Renamed from: {entry['original']}")
         if not exists:
@@ -912,74 +915,37 @@ class RightPanel(QWidget):
                 lambda _checked=False, target=absolute:
                 editor_launcher.open_path(target))
         layout.addWidget(button, 1)
+
+        if stats_text:
+            stats = QLabel(stats_text)
+            stats.setObjectName("PanelGitStats")
+            stats.setTextFormat(Qt.TextFormat.RichText)
+            stats.setAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            layout.addWidget(stats)
         return row
 
-    def _render_git_history(self, commits: list):
-        self._clear_git_history()
-        if not commits:
-            self._git_history_widget.setVisible(False)
-            return
-        caption = QLabel(f"HISTORY · {len(commits)}")
-        caption.setObjectName("PanelSection")
-        self._git_history_layout.addWidget(caption)
-        for commit in commits:
-            self._git_history_layout.addWidget(self._git_commit_row(commit))
-        self._git_history_widget.setVisible(True)
+    def _git_stats_text(self, entry: dict) -> str:
+        palette = self._git_status_palette()
+        parts = []
+        added = entry.get("added")
+        deleted = entry.get("deleted")
+        if isinstance(added, int) and added > 0:
+            parts.append(
+                f'<span style="color:{palette["A"]}">+{added}</span>')
+        if isinstance(deleted, int) and deleted > 0:
+            parts.append(
+                f'<span style="color:{palette["D"]}">-{deleted}</span>')
+        return " ".join(parts)
 
-    def _clear_git_history(self):
-        while self._git_history_layout.count():
-            item = self._git_history_layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.hide()
-                widget.deleteLater()
-
-    def _git_commit_row(self, commit: dict) -> QWidget:
-        row = QWidget(self._git_history_widget)
-        layout = QHBoxLayout(row)
-        layout.setContentsMargins(2, 0, 2, 0)
-        layout.setSpacing(8)
-
-        short = str(commit.get("short") or "")[:7]
-        hash_label = QLabel(html.escape(short))
-        hash_label.setObjectName("PanelGitHash")
-        hash_label.setFixedWidth(52)
-        hash_label.setAlignment(
-            Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
-        hash_label.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(hash_label)
-
-        subject_text = str(commit.get("subject") or "")
-        subject = QLabel()
-        subject.setObjectName("PanelGitSubject")
-        subject.ensurePolished()
-        subject.setText(subject.fontMetrics().elidedText(
-            subject_text, Qt.TextElideMode.ElideRight,
-            self.EXPANDED_WIDTH - 118))
-        subject.setTextInteractionFlags(
-            Qt.TextInteractionFlag.TextSelectableByMouse)
-        layout.addWidget(subject, 1)
-
-        author = str(commit.get("author") or "")
-        relative = str(commit.get("relative") or "")
-        date = str(commit.get("date") or "")
-        full = str(commit.get("hash") or "")
-        meta = " · ".join(part for part in (author, relative, date) if part)
-        tooltip = [subject_text, meta, full or short]
-        refs = str(commit.get("refs") or "").strip()
-        if refs:
-            tooltip.append(refs)
-        text = "\n".join(part for part in tooltip if part)
-        row.setToolTip(text)
-        hash_label.setToolTip(text)
-        subject.setToolTip(text)
-        return row
-
-    def _git_status_color(self, code: str) -> str:
+    def _git_status_palette(self) -> dict:
         theme = "dark" if getattr(
             self.theme_manager, "current_theme", "dark") == "dark" else "light"
-        return _GIT_STATUS_COLORS[theme].get(code, _GIT_STATUS_COLORS[theme]["?"])
+        return _GIT_STATUS_COLORS[theme]
+
+    def _git_status_color(self, code: str) -> str:
+        palette = self._git_status_palette()
+        return palette.get(code, palette["?"])
 
     def _on_tab_clicked(self, index: int):
         self.stack.setCurrentIndex(index)
@@ -1158,14 +1124,14 @@ class RightPanel(QWidget):
             QLabel#PanelGitBadge {{
                 font-size: 11px;
             }}
-            QLabel#PanelGitHash {{
+            QLabel#PanelGitSummary {{
                 color: {colors['muted']};
                 font-size: 11px;
-                font-family: Consolas, "Courier New", monospace;
+                font-weight: 600;
             }}
-            QLabel#PanelGitSubject {{
-                color: {colors['text']};
-                font-size: 12px;
+            QLabel#PanelGitStats {{
+                font-size: 11px;
+                font-weight: 600;
             }}
             QLabel#PanelSection {{
                 color: {colors['muted']};

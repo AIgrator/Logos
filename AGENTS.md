@@ -49,13 +49,15 @@ tree of the active project; repository and cache folders are hidden; files open
 in the detected editor - VS Code, Cursor or Windsurf, else the OS default) is
 available in every mode, while the Git tab appears only in Terminal mode. The
 Git tab is read-only (`src/git_status.py`, stdlib `git rev-parse`/`git status
---porcelain=v2`/`git log` only): it shows the checked-out branch (or detached
-HEAD), upstream with ahead/behind counts, and staged, changed, conflicted and
-untracked files grouped with status letters. A HISTORY section below lists the
-last 30 commits on the current branch (short hash and subject; author, date
-and refs in the tooltip). Clicking a file row opens it in the detected editor;
-deleted files stay disabled. Logos' own `.logos` data is hidden. The status is
-read in a background thread and refreshes when the tab opens, when the project
+--porcelain=v2`/`git diff --numstat` only): it shows the checked-out branch
+(or detached HEAD), upstream with ahead/behind counts, and one flat list of
+uncommitted files with status letters plus added/deleted line counts
+(untracked files are counted; binaries and untracked folders show none). The
+tab follows agent-panel conventions (Cursor, Claude Code, OpenCode): working
+tree only, no commit history, staging or commit action. Clicking a file row
+opens it in the detected editor; deleted files stay disabled. Logos' own
+`.logos` data is hidden. The status is read in a background thread and
+refreshes when the tab opens, when the project
 or mode changes, on the refresh button, and after session events while the tab
 is visible. The panel's collapsed state is saved as
 `right_panel_collapsed`.

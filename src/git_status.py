@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 GIT_TIMEOUT = 15
-HISTORY_LIMIT = 30
+LINE_COUNT_LIMIT = 1024 * 1024
 
 STATUS_LABELS = {
     "M": "modified",
@@ -20,13 +20,13 @@ STATUS_LABELS = {
     "?": "untracked",
 }
 
-_GROUPS = ("staged", "changes", "conflicts", "untracked")
-
 
 def read_status(root: str) -> dict:
-    """Collects branch, working-tree state and recent commits for a project.
+    """Collects the branch and uncommitted changes for a project.
 
-    Never writes to the repository: only `rev-parse`, `status` and `log` run.
+    Never writes to the repository: only `rev-parse`, `status` and `diff`
+    run. Entries mirror agent-app change lists: one row per uncommitted file
+    with its status and added/deleted line counts.
     """
     root = os.path.abspath(root) if (root or "").strip() else ""
     result = {
@@ -41,8 +41,10 @@ def read_status(root: str) -> dict:
         "behind": 0,
         "error": "",
         "error_code": "",
-        "commits": [],
-        **{group: [] for group in _GROUPS},
+        "files_changed": 0,
+        "added": 0,
+        "deleted": 0,
+        "entries": [],
     }
     if not root or not os.path.isdir(root):
         result["error"] = "Open a project to see Git status."
@@ -71,36 +73,18 @@ def read_status(root: str) -> dict:
 
     result["available"] = True
     result["toplevel"] = toplevel.strip()
-    _parse_status(output, result)
-    result["commits"] = _read_history(root)
+    entries = _parse_status(output, result)
+    _attach_stats(entries, root)
+    entries.sort(key=_entry_sort_key)
+    result["entries"] = entries
+    result["files_changed"] = len(entries)
+    result["added"] = sum(
+        entry["added"] for entry in entries
+        if isinstance(entry.get("added"), int))
+    result["deleted"] = sum(
+        entry["deleted"] for entry in entries
+        if isinstance(entry.get("deleted"), int))
     return result
-
-
-def _read_history(root: str) -> list:
-    ok, output, _stderr, _code = _run_git(
-        root, "log", f"-n{HISTORY_LIMIT}", "--date=format:%Y-%m-%d %H:%M",
-        "--format=%H%x1f%h%x1f%an%x1f%ad%x1f%ar%x1f%s%x1f%D%x1e")
-    if not ok:
-        return []
-    commits = []
-    for record in output.split("\x1e"):
-        record = record.strip("\r\n")
-        if not record:
-            continue
-        fields = record.split("\x1f")
-        if len(fields) < 6:
-            continue
-        full, short, author, date, relative, subject = fields[:6]
-        commits.append({
-            "hash": full,
-            "short": short,
-            "author": author,
-            "date": date,
-            "relative": relative,
-            "subject": subject or "(no subject)",
-            "refs": fields[6] if len(fields) > 6 else "",
-        })
-    return commits
 
 
 def _repository_error(stderr: str, code: str) -> tuple[str, str]:
@@ -145,8 +129,9 @@ def _run_git(root: str, *args: str):
     return True, completed.stdout or "", completed.stderr or "", ""
 
 
-def _parse_status(output: str, result: dict):
+def _parse_status(output: str, result: dict) -> list:
     tokens = output.split("\0")
+    entries = []
     index = 0
     while index < len(tokens):
         token = tokens[index]
@@ -158,19 +143,55 @@ def _parse_status(output: str, result: dict):
         elif token.startswith("1 "):
             fields = token.split(" ", 8)
             if len(fields) == 9:
-                _add_entry(fields[1], fields[8], "", result)
+                _append_entry(entries, fields[1], fields[8], "", result)
         elif token.startswith("2 "):
             fields = token.split(" ", 9)
             if len(fields) == 10:
                 original = tokens[index] if index < len(tokens) else ""
                 index += 1
-                _add_entry(fields[1], fields[9], original, result)
+                _append_entry(entries, fields[1], fields[9], original, result)
         elif token.startswith("u "):
             fields = token.split(" ", 10)
             if len(fields) == 11:
-                _add_entry(fields[1], fields[10], "", result, conflict=True)
+                _append_entry(
+                    entries, "UU", fields[10], "", result, conflict=True)
         elif token.startswith("? "):
-            _add_untracked(token[2:], result)
+            _append_entry(entries, "??", token[2:], "", result)
+    return entries
+
+
+def _append_entry(entries: list, xy: str, path: str, original: str,
+                  result: dict, conflict: bool = False):
+    base = _base_entry(path, original, result)
+    if base is None:
+        return
+    if conflict:
+        entry = _entry(base, "U")
+        entry["conflict"] = True
+    elif xy == "??":
+        entry = _entry(base, "?")
+        entry["unstaged"] = True
+    else:
+        staged, unstaged = (xy or "..")[:2].ljust(2, ".")
+        entry = _entry(base, _combined_code(staged, unstaged))
+        entry["staged"] = staged not in ".?"
+        entry["unstaged"] = unstaged not in ".?"
+    entries.append(entry)
+
+
+def _combined_code(staged: str, unstaged: str) -> str:
+    """Net index+worktree status shown as one letter per file."""
+    if unstaged == "D":
+        return "D"
+    if staged in ("R", "C"):
+        return staged
+    if staged == "A":
+        return "A"
+    if unstaged not in ".?":
+        return unstaged
+    if staged not in ".?":
+        return staged
+    return "M"
 
 
 def _parse_branch_header(header: str, result: dict):
@@ -198,25 +219,93 @@ def _parse_branch_header(header: str, result: dict):
                 continue
 
 
-def _add_entry(xy: str, path: str, original: str, result: dict,
-               conflict: bool = False):
-    base = _base_entry(path, original, result)
-    if base is None:
-        return
-    if conflict:
-        result["conflicts"].append(_entry(base, "U"))
-        return
-    staged, changes = (xy or "..")[:2].ljust(2, ".")
-    if staged not in ".?":
-        result["staged"].append(_entry(base, staged))
-    if changes not in ".?":
-        result["changes"].append(_entry(base, changes))
+def _attach_stats(entries: list, root: str):
+    tracked = [entry for entry in entries if entry.get("code") != "?"]
+    stats = {}
+    if tracked:
+        _accumulate_numstat(
+            stats, _read_numstat(root, "diff", "--numstat", "-z"))
+        _accumulate_numstat(
+            stats, _read_numstat(root, "diff", "--cached", "--numstat", "-z"))
+    for entry in entries:
+        if entry.get("code") == "?":
+            lines = _count_lines(str(entry.get("absolute") or ""))
+            if lines is not None:
+                entry["added"], entry["deleted"] = lines, 0
+            continue
+        values = stats.get(entry.get("path") or "")
+        if values is not None:
+            entry["added"], entry["deleted"] = values
 
 
-def _add_untracked(path: str, result: dict):
-    base = _base_entry(path, "", result)
-    if base is not None:
-        result["untracked"].append(_entry(base, "?"))
+def _read_numstat(root: str, *args: str) -> dict:
+    ok, output, _stderr, _code = _run_git(root, *args)
+    if not ok:
+        return {}
+    stats = {}
+    tokens = output.split("\0")
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        index += 1
+        if not token:
+            continue
+        parts = token.split("\t", 2)
+        if len(parts) < 3:
+            continue
+        added, deleted, path = parts
+        if not path:
+            # Rename/copy records carry the old and new paths as NUL tokens.
+            if index + 1 >= len(tokens):
+                break
+            path = tokens[index + 1]
+            index += 2
+        if not path:
+            continue
+        if added == "-" or deleted == "-":
+            stats[path] = (None, None)
+            continue
+        try:
+            stats[path] = (int(added), int(deleted))
+        except ValueError:
+            stats[path] = (None, None)
+    return stats
+
+
+def _accumulate_numstat(target: dict, values: dict):
+    """Adds staged and unstaged counts for the same file together."""
+    for path, (added, deleted) in values.items():
+        if path not in target:
+            target[path] = (added, deleted)
+            continue
+        current_added, current_deleted = target[path]
+        if current_added is None or added is None:
+            target[path] = (None, None)
+        else:
+            target[path] = (current_added + added, current_deleted + deleted)
+
+
+def _count_lines(path: str):
+    """Counts added lines for an untracked file; None means no stat."""
+    try:
+        if not path or not os.path.isfile(path):
+            return None
+        if os.path.getsize(path) > LINE_COUNT_LIMIT:
+            return None
+        with open(path, "rb") as handle:
+            data = handle.read(LINE_COUNT_LIMIT)
+    except OSError:
+        return None
+    if b"\0" in data:
+        return None
+    if not data:
+        return 0
+    return data.count(b"\n") + (0 if data.endswith(b"\n") else 1)
+
+
+def _entry_sort_key(entry: dict):
+    return (0 if entry.get("conflict") else 1,
+            str(entry.get("display") or "").casefold())
 
 
 def _base_entry(path: str, original: str, result: dict):
@@ -239,6 +328,11 @@ def _entry(base: dict, code: str) -> dict:
         **base,
         "code": code,
         "label": STATUS_LABELS.get(code, "changed"),
+        "conflict": False,
+        "staged": False,
+        "unstaged": False,
+        "added": None,
+        "deleted": None,
     }
 
 
