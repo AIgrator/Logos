@@ -18,6 +18,7 @@ block_cipher = None
 datas = [
     ("assets", "assets"),
     ("prompts", "prompts"),
+    ("skills", "skills"),
     ("cache/models.json", "cache"),
 ]
 

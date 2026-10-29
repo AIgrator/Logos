@@ -124,7 +124,7 @@ As a session grows, Logos keeps the full history on disk and sends the model a t
 
 ### Skills
 
-Terminal and Browser can follow Agent Skills — instruction packages in the open `SKILL.md` format shared with Claude Code, Codex, Cursor and Qoder. Project and user skills are discovered automatically and listed in Settings → Skills; no conversion or installation is needed. See the [**skills guide**](./docs/skills.md) for the folder layout, precedence rules and limits.
+Terminal and Browser can follow Agent Skills — instruction packages in the open `SKILL.md` format shared with Claude Code, Codex, Cursor and Qoder. A small built-in set works out of the box; project and user skills are discovered automatically too. Settings → Skills can install more from the public ClawHub catalogue. See the [**skills guide**](./docs/skills.md) for the folder layout, precedence rules and limits.
 
 ## Features (Tools)
 

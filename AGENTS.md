@@ -97,13 +97,19 @@ Agent Skills use the open `SKILL.md` format: a folder with a `SKILL.md` file
 whose YAML frontmatter carries `name` and `description` (optional `scripts/`,
 `references/`, `assets/`). `src/context/skills.py` scans, for the active project
 and then the user home: `.logos/skills`, `.agents/skills`, `.cursor/skills`,
-`.claude/skills`, `.codex/skills`, `.qoder/skills`. The first root wins on a name
-clash, so project skills override user skills. Terminal and Browser list only
+`.claude/skills`, `.codex/skills`, `.qoder/skills`, and finally the
+application's bundled `skills/` folder (packaged through `logos.spec`). The
+first root wins on a name clash, so project skills override user skills and
+both override a built-in with the same name. Terminal and Browser list only
 name + description in the system prompt (`### Available Skills ###`); the model
 calls the `use_skill` tool to load the body, the skill directory and auxiliary
 file paths, then reads extras with `read_files`. Chat and Vision have no skills.
-The Skills settings page lists installed skills and opens the project
-(`<project>/.logos/skills`) and user (`~/.logos/skills`) roots.
+The Skills settings page lists installed skills, opens the project
+(`<project>/.logos/skills`) and user (`~/.logos/skills`) roots, and opens the
+ClawHub catalogue dialog. `src/context/skill_catalog.py` is a stdlib-only,
+keyless client (search, popular list, ZIP install); the dialog
+`src/ui/skill_catalog_dialog.py` installs into `~/.logos/skills` after showing
+the author, license and source URL.
 
 Sessions are mode-locked: `chat`, `terminal`, `browser`, or `vision`. Switching
 mode in a non-empty session starts a new session; switching in an empty session

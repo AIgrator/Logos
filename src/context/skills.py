@@ -6,16 +6,19 @@ the body loads on demand when the model calls the ``use_skill`` tool, and
 auxiliary files are read with the normal filesystem tools.
 
 Roots are scanned in priority order: the active project first, then the
-user's home directory. Inside a scope the native Logos folder wins over the
-shared ``.agents`` folder and the per-product folders installed by other
-agents (Cursor, Claude Code, Codex, Qoder), so an existing skill library
-works without copying anything.
+user's home directory, then the skills bundled with the application. Inside
+a scope the native Logos folder wins over the shared ``.agents`` folder and
+the per-product folders installed by other agents (Cursor, Claude Code,
+Codex, Qoder), so an existing skill library works without copying anything.
+Built-in skills need no setup and are overridden by a project or user skill
+with the same name.
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
+import sys
 
 from .secrets import redact_text
 
@@ -42,6 +45,15 @@ _PROJECT_ROOTS = (
 _cache: dict[str, tuple[int, int, dict | None]] = {}
 
 
+def _bundled_root() -> str:
+    """Skills shipped with the application (read-only, lowest priority)."""
+    base = getattr(sys, "_MEIPASS", None)
+    if not base:
+        base = os.path.dirname(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))))
+    return os.path.join(base, "skills")
+
+
 def roots(project_root: str, user_home: str | None = None) -> list:
     """Skill directories in priority order as ``(path, scope, source)``."""
     home = user_home if user_home is not None else os.path.expanduser("~")
@@ -53,6 +65,7 @@ def roots(project_root: str, user_home: str | None = None) -> list:
     if home:
         for parts, source in _PROJECT_ROOTS:
             found.append((os.path.join(home, *parts), "user", source))
+    found.append((_bundled_root(), "built-in", "Logos"))
     return found
 
 

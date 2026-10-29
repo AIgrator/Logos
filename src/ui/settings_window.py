@@ -50,6 +50,7 @@ from src.apps.installed_apps import AppScanner
 from src.ui.widgets.llm_provider_widget import LLMProviderWidget
 from src.ui.widgets.mode_model_widget import ModeModelWidget
 from src.ui.widgets.custom_provider_dialog import CustomProviderDialog
+from src.ui.skill_catalog_dialog import SkillCatalogDialog
 from src.ui.utils import CustomToolTipManager, NavButtonHoverFilter
 
 from src.ui.widgets.busy_spinner import BusySpinner
@@ -1486,9 +1487,10 @@ class SettingsWindow(QDialog):
 
         intro = QLabel(
             "Skills are folders with a SKILL.md file that teach the Terminal and "
-            "Browser agents a specific workflow. Folder layouts used by Claude Code, "
-            "Codex, Cursor and Qoder are read as-is; the project scope wins over "
-            "the user scope.")
+            "Browser agents a specific workflow. Logos ships a built-in set that "
+            "works out of the box; a project or user skill with the same name "
+            "overrides it. Folder layouts used by Claude Code, Codex, Cursor and "
+            "Qoder are read as-is; the project scope wins over the user scope.")
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
@@ -1497,9 +1499,21 @@ class SettingsWindow(QDialog):
         self.skills_list.setTextElideMode(Qt.ElideRight)
         self.skills_list.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.skills_list.setToolTip(
-            "Skills found in the project and user skill folders. The agent sees "
-            "each name and description and loads the full instructions on demand.")
+            "Skills found in the project, user and built-in folders. The agent "
+            "sees each name and description and loads the full instructions on "
+            "demand.")
         layout.addWidget(self.skills_list)
+
+        catalogue_row = QHBoxLayout()
+        self.skills_catalogue_button = QPushButton("Browse Catalogue...")
+        self.skills_catalogue_button.setToolTip(
+            "Search ClawHub and install community skills into "
+            "~/.logos/skills.")
+        self.skills_catalogue_button.clicked.connect(
+            self._open_skill_catalogue)
+        catalogue_row.addWidget(self.skills_catalogue_button)
+        catalogue_row.addStretch()
+        layout.addLayout(catalogue_row)
 
         buttons = QHBoxLayout()
         self.skills_project_button = QPushButton("Project Folder")
@@ -1536,8 +1550,14 @@ class SettingsWindow(QDialog):
     def _skills_project_root(self) -> str:
         return str(getattr(self.controller, "project_root", "") or "")
 
+    def _open_skill_catalogue(self):
+        """Opens the ClawHub browser; refreshes the list after an install."""
+        dialog = SkillCatalogDialog(self)
+        dialog.installed.connect(self._refresh_skills)
+        dialog.exec()
+
     def _refresh_skills(self):
-        """Re-reads installed skills from the project and user folders."""
+        """Re-reads installed skills from the project, user and built-in folders."""
         if not hasattr(self, "skills_list"):
             return
         project_root = self._skills_project_root()
