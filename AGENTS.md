@@ -33,7 +33,13 @@ full-screen `HomePage` (`src/ui/navigation.py`) instead of a modal picker. In th
 workspace, projects and sessions are reached through the collapsible left sidebar.
 The full-mode window frame (`window_geometry`) and the sidebar's collapsed state
 (`sidebar_collapsed`) are saved to `settings.json` on close and restored on the
-next launch; layout margins are not persisted. Clicking a recent session opens
+next launch; layout margins are not persisted. The right workspace panel
+(`src/ui/right_panel.py`) appears only in Terminal mode: it shows the active
+project's file tree (read-only; repository and cache folders are hidden) and
+opens files in the detected editor (VS Code, Cursor or Windsurf, else the OS
+default). Its collapsed state is saved as `right_panel_collapsed`; the Git tab
+is a placeholder for read-only status.
+Clicking a recent session opens
 its project and that exact session. Per-project data lives in `<project>/.logos/`:
 
 - `project.json` - id, name, timestamps. `name` may be a custom display name set

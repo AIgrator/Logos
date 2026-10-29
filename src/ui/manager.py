@@ -39,6 +39,7 @@ from .widgets.custom_title_bar import CustomTitleBar
 from .widgets.flow_layout import FlowLayout
 from .widgets.non_scrollable_scroll_area import NonScrollableScrollArea
 from .navigation import HomePage, ProjectSidebar
+from .right_panel import RightPanel
 
 class MainWindow(QMainWindow):
     """Custom MainWindow to ensure the application quits on close."""
@@ -363,6 +364,10 @@ class UIManager(QWidget):
         self.workspace_column_layout.setContentsMargins(0, 0, 0, 0)
         self.workspace_column_layout.setSpacing(0)
         self.workspace_layout.addWidget(self.workspace_column, 1)
+        self.right_panel = RightPanel(self.controller.theme_manager)
+        self.workspace_layout.addWidget(self.right_panel)
+        self._restore_right_panel_state()
+        self._update_right_panel_visibility()
         self.layout.addWidget(self.workspace_container, 1)
 
         self.home_page.project_selected.connect(self.project_switch_requested.emit)
@@ -1200,6 +1205,7 @@ class UIManager(QWidget):
         # to pause in plain chat, and it hides again when the task ends.
         # (Vision has its own pause controls.)
         self._active_mode_key = mode
+        self._update_right_panel_visibility()
 
         if mode == 'chat':
             self.chat_mode_action.setChecked(True)
@@ -1437,6 +1443,8 @@ class UIManager(QWidget):
         self.home_page.setVisible(False)
         self.workspace_container.setVisible(True)
         self.sidebar.setVisible(not self.is_compact)
+        self._update_right_panel_visibility()
+        self._sync_right_panel_project()
         self.custom_title_bar.setVisible(self.is_compact)
         if not self.is_compact:
             # The sidebar rail is flush with the window's left edge; its own
@@ -1454,6 +1462,7 @@ class UIManager(QWidget):
                     getattr(self.controller, "session_file", ""))
         except Exception as e:
             logging.warning(f"Could not refresh sidebar: {e}")
+        self._sync_right_panel_project()
 
     def refresh_project_views(self):
         """Reloads project/session lists in the sidebar and home screen."""
@@ -1812,7 +1821,11 @@ class UIManager(QWidget):
 
     def save_window_state(self):
         """Persists the full-mode frame and sidebar state for the next launch."""
-        payload = {"sidebar_collapsed": bool(getattr(self.sidebar, "collapsed", False))}
+        payload = {
+            "sidebar_collapsed": bool(getattr(self.sidebar, "collapsed", False)),
+            "right_panel_collapsed": bool(
+                getattr(self.right_panel, "collapsed", False)),
+        }
         try:
             if self.is_compact:
                 rect, maximized = self._last_full_frame or (self.full_mode_geometry, False)
@@ -1837,6 +1850,29 @@ class UIManager(QWidget):
     def _restore_sidebar_state(self):
         if self.settings_manager.get("sidebar_collapsed", False):
             self.sidebar.set_collapsed(True)
+
+    def _restore_right_panel_state(self):
+        if self.settings_manager.get("right_panel_collapsed", False):
+            self.right_panel.set_collapsed(True)
+
+    def _update_right_panel_visibility(self):
+        """The workspace panel belongs to Terminal mode only."""
+        panel = getattr(self, "right_panel", None)
+        if panel is None:
+            return
+        workspace = getattr(self, "workspace_container", None)
+        visible = (
+            not getattr(self, "is_compact", True)
+            and workspace is not None
+            and not workspace.isHidden()
+            and getattr(self, "_active_mode_key", "chat") == "terminal"
+        )
+        panel.setVisible(visible)
+
+    def _sync_right_panel_project(self):
+        manager = getattr(self.controller, "project_manager", None)
+        root = manager.get_active_root() if manager is not None else ""
+        self.right_panel.set_project_root(root)
 
     def _remember_full_geometry(self):
         if not self.is_compact and self.main_window.isMaximized():
@@ -1870,6 +1906,7 @@ class UIManager(QWidget):
         self._toolbar_single_row = None  # re-evaluate when returning to full mode
         self.custom_title_bar.setVisible(True)
         self.sidebar.setVisible(False)
+        self._update_right_panel_visibility()
         self.main_window.size_grip.setVisible(True)
         self.layout.setContentsMargins(5, 0, 5, 5)
         self.main_window.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Tool | Qt.FramelessWindowHint)
@@ -1928,6 +1965,7 @@ class UIManager(QWidget):
         self.is_compact = False
         self.custom_title_bar.setVisible(False)
         self.sidebar.setVisible(True)
+        self._update_right_panel_visibility()
         self.main_window.size_grip.setVisible(False)
         if self.attachment_thumbnails:
             self.attachment_scroll_area.setVisible(True)
