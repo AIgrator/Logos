@@ -35,3 +35,6 @@ httpx
 # --- Clipboard & Browser (direct imports) ---
 pyperclip
 playwright
+
+# --- MCP ---
+mcp>=2.3.0

@@ -38,6 +38,7 @@ dependencies = [
     "rapidfuzz",
     "pathspec",
     "ruff",
+    "mcp>=2.3.0",
 ]
 
 [tool.uv]
