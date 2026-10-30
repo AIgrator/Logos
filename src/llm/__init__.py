@@ -29,10 +29,23 @@ from .base_provider import BaseLLMProvider
 logger = logging.getLogger(__name__)
 
 
+def _literal_string_return(func):
+    """The literal string a function body returns, or None."""
+    for sub in getattr(func, "body", ()):
+        if (isinstance(sub, ast.Return)
+                and isinstance(sub.value, ast.Constant)
+                and isinstance(sub.value.value, str)):
+            return sub.value.value
+    return None
+
+
 def _extract_provider_metadata_from_source(path: str):
     """Parse a provider module source and try to extract values returned from
     get_provider_id() and get_display_name() if they return string literals.
     This avoids importing the module and executing heavy top-level imports.
+
+    Provider methods are class-level staticmethods, so the walk descends into
+    class bodies instead of only reading module-level functions.
     """
     provider_id = None
     display_name = None
@@ -40,15 +53,18 @@ def _extract_provider_metadata_from_source(path: str):
         with open(path, encoding='utf-8') as f:
             src = f.read()
         tree = ast.parse(src, filename=path)
-        for node in tree.body:
-            if isinstance(node, ast.FunctionDef) and node.name in ('get_provider_id', 'get_display_name'):
-                for sub in node.body:
-                    if isinstance(sub, ast.Return):
-                        if isinstance(sub.value, ast.Constant) and isinstance(sub.value.value, str):
-                            if node.name == 'get_provider_id':
-                                provider_id = sub.value.value
-                            else:
-                                display_name = sub.value.value
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if node.name not in ('get_provider_id', 'get_display_name'):
+                continue
+            value = _literal_string_return(node)
+            if value is None:
+                continue
+            if node.name == 'get_provider_id' and provider_id is None:
+                provider_id = value
+            elif node.name == 'get_display_name' and display_name is None:
+                display_name = value
     except Exception:
         pass
     return provider_id, display_name

@@ -45,19 +45,14 @@ from settings_manager import SettingsManager
 from context import skills as skills_store
 from context import context_stats as context_stats_store
 from context import handoff as handoff_store
-from llm import PROVIDERS, providers_ready, start_provider_warmup
 from build_info import APP_VERSION
 from src.ui.widgets.font_manager.font_combobox import FontComboBox
 from src.ui.widgets.hotkey.hotkey_edit import HotkeyEdit
 from src.apps.installed_apps import AppScanner
-from src.ui.widgets.llm_provider_widget import LLMProviderWidget
-from src.ui.widgets.mode_model_widget import ModeModelWidget
-from src.ui.widgets.custom_provider_dialog import CustomProviderDialog
+from src.ui.widgets.providers_page import ProvidersPage
 from src.ui.skill_catalog_dialog import SkillCatalogDialog
 from src.ui.mcp_settings_page import MCPSettingsPage
 from src.ui.utils import CustomToolTipManager, NavButtonHoverFilter
-
-from src.ui.widgets.busy_spinner import BusySpinner
 
 CONTEXT_SETTINGS_DOC_URL = (
     "https://github.com/AIgrator/Logos/blob/main/docs/context_settings.md")
@@ -90,11 +85,6 @@ class SettingsWindow(QDialog):
 
         self.tooltip_manager = CustomToolTipManager(self)
         self._context_doc_links = []
-        # Custom providers are applied to the live settings as the user edits
-        # them (so provider pages and model pickers stay in sync). The snapshot
-        # lets Cancel roll all of it back.
-        self._custom_snapshot = None
-        self._deleted_custom_ids = set()
         # QDialog turns a window close into reject(); MCP edits are already
         # saved when made, so only an explicit Cancel reverts them.
         self._closing_settings = False
@@ -177,8 +167,7 @@ class SettingsWindow(QDialog):
 
         # Define sections: icon, tooltip, and a placeholder for the widget
         self.nav_sections = {
-            "general": ("fa5s.cog", "General"),
-            "custom": ("fa5s.plug", "Custom Providers"),
+            "providers": ("fa5s.brain", "Providers"),
             "common": ("fa5s.cogs", "Common"),
             "hotkeys": ("fa5s.keyboard", "Hotkeys"),
             "browser": ("fa5s.globe", "Browser"),
@@ -226,8 +215,7 @@ class SettingsWindow(QDialog):
         scrollbar anymore.
         """
         sections = {
-            "general": self._create_general_section(),
-            "custom": self._create_custom_providers_section(),
+            "providers": self._create_providers_section(),
             "common": self._create_common_section(),
             "hotkeys": self._create_hotkeys_section(),
             "browser": self._create_browser_section(),
@@ -285,7 +273,7 @@ class SettingsWindow(QDialog):
         super().showEvent(event)
 
     def closeEvent(self, event):
-        self._discard_custom_changes()
+        self.providers_page.rollback()
         page = getattr(self, "mcp_page", None)
         if page is not None:
             page.commit()
@@ -296,7 +284,7 @@ class SettingsWindow(QDialog):
             self._closing_settings = False
 
     def reject(self):
-        self._discard_custom_changes()
+        self.providers_page.rollback()
         if not self._closing_settings:
             self._discard_mcp_changes()
         super().reject()
@@ -308,13 +296,8 @@ class SettingsWindow(QDialog):
 
     def load_settings(self):
         """Loads settings from the manager and updates the UI."""
-        # General
-        active_provider = self.settings_manager.get("active_provider", "google_gemini")
-        providers = self.settings_manager.get("llm_providers", {})
-        if self.llm_provider_widget is not None:
-            self.llm_provider_widget.load_settings(active_provider, providers)
-        self.mode_model_widget.load_settings(self.settings_manager.get("mode_models", {}) or {})
-        self._populate_custom_providers()
+        # Providers (the page stages its own edits in the settings manager)
+        self.providers_page.load_settings()
 
         # Common
         self.max_retries_spinbox.setValue(self.settings_manager.get("max_retries", 3))
@@ -407,16 +390,12 @@ class SettingsWindow(QDialog):
 
     def _collect_settings_from_ui(self):
         """Gathers all settings from the UI into a single dictionary."""
-        if self.llm_provider_widget is not None:
-            active_provider_to_save, providers_to_save = (
-                self.llm_provider_widget.get_all_settings())
-        else:
-            # Provider UI is still loading: keep stored values instead of
-            # wiping them with defaults from the placeholder.
-            active_provider_to_save = self.settings_manager.get(
-                "active_provider", "google_gemini")
-            providers_to_save = dict(
-                self.settings_manager.get("llm_providers", {}) or {})
+        # The Providers page writes its staged edits straight into the settings
+        # manager, so the live values are already the final ones.
+        active_provider_to_save = self.settings_manager.get(
+            "active_provider", "")
+        providers_to_save = copy.deepcopy(
+            self.settings_manager.get("llm_providers", {}) or {})
 
         omniparser_settings = self.settings_manager.get("omniparser", {}).copy()
 
@@ -533,8 +512,10 @@ class SettingsWindow(QDialog):
         return {
             "active_provider": active_provider_to_save,
             "llm_providers": providers_to_save,
-            "custom_providers": self._custom_definitions(),
-            "mode_models": self.mode_model_widget.get_settings(),
+            "custom_providers": copy.deepcopy(
+                self.settings_manager.get("custom_providers", []) or []),
+            "mode_models": copy.deepcopy(
+                self.settings_manager.get("mode_models", {}) or {}),
             "omniparser": omniparser_settings,
             "allowed_apps": new_allowed_apps,
             "hotkeys": hotkeys_to_save,
@@ -556,291 +537,20 @@ class SettingsWindow(QDialog):
         """Saves settings."""
         self.all_settings_to_save = self._collect_settings_from_ui()
         self.settings_manager.set_many(self.all_settings_to_save)
-        for provider_id in self._deleted_custom_ids:
-            self.settings_manager.delete_provider_key(provider_id)
-        self._deleted_custom_ids.clear()
-        self._custom_snapshot = None
+        self.providers_page.commit()
         page = getattr(self, "mcp_page", None)
         if page is not None:
             page.commit()
         self.hide()
 
-    def _create_general_section(self):
-        """Creates the General settings section.
-
-        Building the provider UI needs every provider SDK imported (seconds of
-        work), so unless the background warm-up already finished, the page
-        shows a busy placeholder and the widget is inserted once imports end.
-        """
-        group = QGroupBox("General")
-        layout = QVBoxLayout(group)
-        self.general_provider_layout = layout
-        self.llm_provider_widget = None
-        self.provider_placeholder = None
-        self.provider_spinner = None
-
-        if providers_ready():
-            self.llm_provider_widget = LLMProviderWidget(self.settings_manager)
-            layout.addWidget(self.llm_provider_widget)
-        else:
-            self.provider_placeholder = QWidget()
-            placeholder_layout = QVBoxLayout(self.provider_placeholder)
-            placeholder_layout.setContentsMargins(0, 0, 0, 0)
-            placeholder_layout.addStretch(1)
-            self.provider_spinner = BusySpinner()
-            self.provider_spinner.start()
-            placeholder_layout.addWidget(
-                self.provider_spinner, 0, Qt.AlignHCenter)
-            label = QLabel("Loading provider settings…")
-            label.setAlignment(Qt.AlignCenter)
-            label.setStyleSheet(
-                "color: #9E9E9E; font-style: italic; padding-top: 10px;")
-            placeholder_layout.addWidget(label)
-            placeholder_layout.addStretch(1)
-            layout.addWidget(self.provider_placeholder)
-
-            start_provider_warmup()
-            self._provider_poll_timer = QTimer(self)
-            self._provider_poll_timer.setInterval(150)
-            self._provider_poll_timer.timeout.connect(
-                self._try_build_provider_widget)
-            self._provider_poll_timer.start()
-
-        self.mode_model_widget = ModeModelWidget(self.settings_manager)
-        layout.addWidget(self.mode_model_widget)
-        if self.llm_provider_widget is None:
-            # The Vision model selector lists models of configured providers,
-            # so it has nothing to show until the provider UI exists.
-            self.mode_model_widget.setVisible(False)
-
-        return group
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._update_busy_layout()
-
-    def _update_busy_layout(self):
-        """Sizes the loading state relative to the window (spinner ≈ 15% h)."""
-        spinner = getattr(self, "provider_spinner", None)
-        if spinner is None:
-            return
-        side = max(32, int(self.height() * 0.15))
-        spinner.setFixedSize(side, side)
-        placeholder = getattr(self, "provider_placeholder", None)
-        if placeholder is not None:
-            placeholder.setMinimumHeight(max(160, int(self.height() * 0.6)))
-
-    def _try_build_provider_widget(self):
-        """Swaps the busy placeholder for the real provider widget once ready."""
-        if self.llm_provider_widget is not None or not providers_ready():
-            return
-        self._provider_poll_timer.stop()
-        widget = LLMProviderWidget(self.settings_manager)
-        layout = self.general_provider_layout
-        index = layout.indexOf(self.provider_placeholder)
-        layout.insertWidget(index, widget)
-        layout.removeWidget(self.provider_placeholder)
-        self.provider_spinner.stop()
-        self.provider_spinner = None
-        self.provider_placeholder.deleteLater()
-        self.provider_placeholder = None
-        self.llm_provider_widget = widget
-        self.mode_model_widget.setVisible(True)
-
-    def _create_custom_providers_section(self):
-        """User-defined OpenAI-compatible providers."""
-        group = QGroupBox("Custom Providers")
-        layout = QVBoxLayout(group)
-
-        description = QLabel(
-            "Add any OpenAI-compatible endpoint: local models served by "
-            "LM Studio, Ollama or llama.cpp, or a company gateway. "
-            "Custom providers work in Chat, Terminal and Browser. Vision "
-            "requires a native computer-use provider (OpenAI, Anthropic or "
-            "Google), so custom providers are not offered there."
-        )
-        description.setWordWrap(True)
-        layout.addWidget(description)
-
-        self.custom_providers_list = QListWidget()
-        self.custom_providers_list.setMinimumHeight(220)
-        self.custom_providers_list.itemSelectionChanged.connect(
-            self._update_custom_provider_buttons)
-        self.custom_providers_list.itemDoubleClicked.connect(
-            lambda _item: self._edit_custom_provider())
-        layout.addWidget(self.custom_providers_list)
-
-        self.custom_providers_empty_label = QLabel(
-            "No custom providers yet. Use \"Add Provider\" to connect one.")
-        self.custom_providers_empty_label.setStyleSheet(
-            "color: #9E9E9E; font-style: italic;")
-        self.custom_providers_empty_label.setWordWrap(True)
-        layout.addWidget(self.custom_providers_empty_label)
-
-        buttons = QHBoxLayout()
-        self.add_custom_provider_button = QPushButton("Add Provider...")
-        self.add_custom_provider_button.clicked.connect(
-            self._add_custom_provider)
-        self.edit_custom_provider_button = QPushButton("Edit...")
-        self.edit_custom_provider_button.clicked.connect(
-            self._edit_custom_provider)
-        self.delete_custom_provider_button = QPushButton("Delete")
-        self.delete_custom_provider_button.clicked.connect(
-            self._delete_custom_provider)
-        buttons.addWidget(self.add_custom_provider_button)
-        buttons.addWidget(self.edit_custom_provider_button)
-        buttons.addWidget(self.delete_custom_provider_button)
-        buttons.addStretch()
-        layout.addLayout(buttons)
-
-        return group
-
-    # --- Custom provider definitions -----------------------------------
-
-    def _custom_definitions(self):
-        definitions = self.settings_manager.get("custom_providers", []) or []
-        return [copy.deepcopy(d) for d in definitions if isinstance(d, dict)]
-
-    def _selected_custom_provider_id(self):
-        item = self.custom_providers_list.currentItem()
-        return item.data(Qt.UserRole) if item else ""
-
-    def _populate_custom_providers(self):
-        selected = self._selected_custom_provider_id()
-        self.custom_providers_list.clear()
-        definitions = self._custom_definitions()
-        for definition in definitions:
-            pid = definition.get("id", "")
-            name = definition.get("name") or pid
-            item = QListWidgetItem(f"{name}  ({pid})")
-            item.setData(Qt.UserRole, pid)
-            models = ", ".join(m.get("id", "")
-                               for m in definition.get("models") or [])
-            item.setToolTip(f"{definition.get('base_url', '')}\n{models}")
-            self.custom_providers_list.addItem(item)
-            if pid == selected:
-                self.custom_providers_list.setCurrentItem(item)
-        self.custom_providers_empty_label.setVisible(not definitions)
-        self._update_custom_provider_buttons()
-
-    def _update_custom_provider_buttons(self):
-        has_selection = bool(self._selected_custom_provider_id())
-        self.edit_custom_provider_button.setEnabled(has_selection)
-        self.delete_custom_provider_button.setEnabled(has_selection)
-
-    def _remember_custom_state(self):
-        if self._custom_snapshot is not None:
-            return
-        self._custom_snapshot = {
-            "custom_providers": self._custom_definitions(),
-            "llm_providers": copy.deepcopy(
-                self.settings_manager.get("llm_providers", {}) or {}),
-            "active_provider": self.settings_manager.get("active_provider"),
-        }
-
-    def _apply_custom_definitions(self, definitions, api_key_updates=None):
-        """Stages definitions in memory and refreshes the provider widgets."""
-        self._remember_custom_state()
-        providers = self.settings_manager.get("llm_providers", {}) or {}
-        for pid, key in (api_key_updates or {}).items():
-            entry = providers.get(pid)
-            if not isinstance(entry, dict):
-                entry = {}
-                providers[pid] = entry
-            entry["api_key"] = key
-        self.settings_manager.set_many({
-            "custom_providers": copy.deepcopy(definitions),
-            "llm_providers": providers,
-        }, save=False, emit=False)
-        try:
-            self.settings_manager.sync_custom_providers(
-                save=False, delete_keys=False)
-        except Exception as e:
-            logging.error(f"Failed to apply custom providers: {e}",
-                          exc_info=True)
-            return
-        self._refresh_after_custom_change()
-
-    def _refresh_after_custom_change(self):
-        if self.llm_provider_widget is not None:
-            self.llm_provider_widget.rebuild_provider_pages()
-        self.mode_model_widget.load_settings(
-            self.settings_manager.get("mode_models", {}) or {})
-        self._populate_custom_providers()
-
-    def _select_custom_provider(self, provider_id):
-        for row in range(self.custom_providers_list.count()):
-            item = self.custom_providers_list.item(row)
-            if item.data(Qt.UserRole) == provider_id:
-                self.custom_providers_list.setCurrentItem(item)
-                break
-
-    def _add_custom_provider(self):
-        dialog = CustomProviderDialog(self, reserved_ids=set(PROVIDERS))
-        if dialog.exec() != QDialog.Accepted or not dialog.definition:
-            return
-        definition = dialog.definition
-        definitions = self._custom_definitions()
-        definitions.append(definition)
-        self._deleted_custom_ids.discard(definition["id"])
-        self._apply_custom_definitions(
-            definitions, {definition["id"]: dialog.api_key})
-        self._select_custom_provider(definition["id"])
-
-    def _edit_custom_provider(self):
-        pid = self._selected_custom_provider_id()
-        definition = next(
-            (d for d in self._custom_definitions() if d.get("id") == pid), None)
-        if definition is None:
-            return
-        providers = self.settings_manager.get("llm_providers", {}) or {}
-        api_key = (providers.get(pid) or {}).get("api_key", "")
-        dialog = CustomProviderDialog(
-            self, definition=definition, api_key=api_key,
-            reserved_ids=set(PROVIDERS))
-        if dialog.exec() != QDialog.Accepted or not dialog.definition:
-            return
-        definitions = [
-            dialog.definition if d.get("id") == pid else d
-            for d in self._custom_definitions()
-        ]
-        self._apply_custom_definitions(definitions, {pid: dialog.api_key})
-        self._select_custom_provider(pid)
-
-    def _delete_custom_provider(self):
-        pid = self._selected_custom_provider_id()
-        definition = next(
-            (d for d in self._custom_definitions() if d.get("id") == pid), None)
-        if definition is None:
-            return
-        name = definition.get("name") or pid
-        answer = QMessageBox.question(
-            self, "Delete provider",
-            f"Delete the custom provider \"{name}\" ({pid})?\n\n"
-            "Its API key and settings will be removed.",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
-        if answer != QMessageBox.Yes:
-            return
-        self._deleted_custom_ids.add(pid)
-        definitions = [
-            d for d in self._custom_definitions() if d.get("id") != pid]
-        self._apply_custom_definitions(definitions)
-
-    def _discard_custom_changes(self):
-        snapshot = self._custom_snapshot
-        self._custom_snapshot = None
-        self._deleted_custom_ids.clear()
-        if snapshot is None:
-            return
-        self.settings_manager.set_many(snapshot, save=False, emit=False)
-        try:
-            self.settings_manager.sync_custom_providers(
-                save=False, delete_keys=False)
-        except Exception as e:
-            logging.error(f"Failed to roll back custom providers: {e}",
-                          exc_info=True)
-            return
-        self._refresh_after_custom_change()
+    def _create_providers_section(self):
+        """Provider connection and activation page."""
+        self.providers_page = ProvidersPage(self.settings_manager)
+        # The page's sheet resolves palette() roles at polish time; theme
+        # switching in Common must repolish it while this window is open.
+        self.controller.theme_manager.theme_changed.connect(
+            self.providers_page.repolish)
+        return self.providers_page
 
     def _create_hotkeys_section(self):
         """Creates the Hotkeys settings section."""
@@ -1157,7 +867,23 @@ class SettingsWindow(QDialog):
         return group
 
     def _create_vision_section(self):
-        """Creates the Vision Mode settings section (agent loop tunables)."""
+        """Vision page: agent-loop tunables; the model lives on Providers."""
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(12)
+        model_note = QLabel(
+            "The model used in Vision mode is chosen on the Providers page "
+            "(Vision model).")
+        model_note.setStyleSheet("color: #9E9E9E;")
+        model_note.setWordWrap(True)
+        page_layout.addWidget(model_note)
+        page_layout.addWidget(self._create_vision_agent_loop_group())
+        page_layout.addStretch(1)
+        return page
+
+    def _create_vision_agent_loop_group(self):
+        """Creates the Vision Mode settings group (agent loop tunables)."""
         group = QGroupBox("Vision Mode (agent loop)")
         vision_layout = QGridLayout(group)
         vision_layout.setColumnStretch(2, 1)

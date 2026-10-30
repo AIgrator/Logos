@@ -51,9 +51,11 @@ time any module imports the `llm` package.
 2. Reads each file's source and parses it with `ast` — **the module is not
    imported**, so no SDK, client library, or network-capable code runs.
 3. Tries to extract literal return values of `get_provider_id()` and
-   `get_display_name()` from the parsed source. The scan only visits
-   module-level functions; provider methods are class members, so in practice
-   the loader falls back to the filename:
+   `get_display_name()` from the parsed source. The scan walks every function
+   definition, including class-level `@staticmethod`s, so real names are read
+   without importing the SDK: `OpenAI`, `Anthropic`, `Google`, `OpenRouter`,
+   `Hugging Face`, `xAI`. Only when a method does not return a plain string
+   literal does the loader fall back to the filename:
    - provider id = filename without `_provider` (`x-ai_provider.py` → `x-ai`);
    - display name = id with underscores replaced and title-cased
      (`huggingface` → `Huggingface`).
@@ -66,11 +68,9 @@ other attribute) to the real class. The first such call imports that single
 module and caches the class in the proxy. `get_provider_id()` is answered from
 metadata without an import.
 
-**Result:** the UI can list providers immediately, and no vendor SDK is loaded
-during a normal startup unless it belongs to the active provider.
-
-> The module docstring in `src/llm/__init__.py` still describes the old
-> two-phase design. The executable behavior above is authoritative.
+**Result:** the UI can list providers immediately with their real names, and no
+vendor SDK is loaded during a normal startup unless it belongs to the active
+provider.
 
 ---
 
@@ -92,7 +92,12 @@ configuration (`api_url`, cancellation flags, streaming flags) is merged later,
 at the points where it is actually needed:
 
 - `LLMWorker._create_llm_provider()` — when instantiating the active provider;
-- `LLMProviderWidget` — when the Settings page is built.
+- `LLMProviderWidget` — in the installer's initial setup, where every provider
+  page is built up front;
+- `ProviderDialog` — only for the provider being connected or edited.
+
+The in-app Providers page itself reads only `PROVIDER_METADATA` and
+`ModelConfigManager.PROVIDER_CONFIG`, so opening Settings imports no vendor SDK.
 
 Provider defaults are also lazy. `SettingsManager.__init__` calls
 `_ensure_provider_defaults(active_provider)`: the proxy imports that one module
@@ -125,41 +130,56 @@ The Settings UI and the model-switch popup read model lists from
 `ModelConfigManager.PROVIDER_CONFIG`. `SettingsManager.PROVIDER_CONFIG` remains
 the lightweight startup copy.
 
-"Update Models" re-downloads `models.json`, rejects junk payloads (fewer than
+"Update model lists" (the link at the bottom of the Providers page) re-downloads
+`models.json`, rejects junk payloads (fewer than
 two usable providers), rewrites the cache, and re-runs the merge. Provider
 modules are not involved.
 
 ---
 
-## Custom OpenAI-compatible providers
+## Custom providers (OpenAI or Anthropic protocol)
 
 Besides the built-in modules, users can define providers at runtime from
-Settings → **Custom Providers**. Definitions are stored in
-`settings.json["custom_providers"]` (id, display name, base URL, model list,
-optional headers); per-provider runtime settings (`model`, `api_key`,
-`max_tokens`, `require_json_output`) live in `llm_providers[id]` like any other
-provider.
+Settings → **Providers** → **Add custom provider…**. Definitions are stored in
+`settings.json["custom_providers"]` (id, display name, `protocol`, base URL,
+model list, optional headers); per-provider runtime settings (`model`,
+`api_key`, `max_tokens`, `require_json_output`) live in `llm_providers[id]` like
+any other provider.
+
+`protocol` selects the wire format:
+
+- `openai` (default, also used for legacy definitions without the field) —
+  `CustomOpenAIProvider` speaks OpenAI **Chat Completions**: `POST
+  {base}/chat/completions`, Bearer auth when a key is set, user headers applied
+  last, images as `image_url` data URLs, forced function tools from
+  `response_formats.json` in structured modes, and SSE streaming for Chat.
+- `anthropic` — `CustomAnthropicProvider` speaks Anthropic **Messages**: `POST
+  {base}/v1/messages` (a base already ending in `/messages` or `/v1` is used
+  as-is), `anthropic-version: 2023-06-01`, `x-api-key` plus Bearer auth when a
+  key is set, `system` at the top level, content blocks (`text`, `thinking` →
+  reasoning, `tool_use`), forced `tool_choice` for structured modes, and SSE
+  `message_start` / `content_block_delta` / `message_delta` events. This covers
+  DeepSeek, Kimi, GLM, LiteLLM and similar Anthropic-compatible gateways.
+  Native Anthropic extras (Computer Use, built-in web search, strict tool
+  schemas, adaptive thinking) are not offered on these endpoints.
 
 `SettingsManager.sync_custom_providers()` runs during `SettingsManager.__init__`
 (before `_ensure_provider_defaults`) and after every Settings apply:
 
 1. Normalizes definitions with `src/llm/custom_providers.py`
-   (`normalize_definition`); invalid entries are dropped, and ids must match
-   `[a-z0-9_-]{1,32}` and not collide with a built-in provider.
+   (`normalize_definition`); invalid entries are dropped, unknown protocols fall
+   back to `openai`, and ids must match `[a-z0-9_-]{1,32}` and not collide with
+   a built-in provider.
 2. Calls `register_custom_providers()`, which builds a
-   `CustomOpenAIProvider` subclass per definition and registers it in
-   `PROVIDERS` / `SettingsManager.PROVIDER_CONFIG`. Stale custom ids are
-   removed from both registries.
+   `CustomOpenAIProvider` or `CustomAnthropicProvider` subclass per definition
+   and registers it in `PROVIDERS` / `SettingsManager.PROVIDER_CONFIG`. Stale
+   custom ids are removed from both registries.
 3. Re-runs `ModelConfigManager._load_and_merge_configs()` so the custom
    provider's display name, models and label map appear in the Settings page
    and the model-switch popup without a restart.
 
-`CustomOpenAIProvider` speaks the OpenAI **Chat Completions** protocol through
-`requests`: Bearer auth only when a key is set, user headers applied last,
-images sent as `image_url` data URLs, forced function tools from
-`response_formats.json` in structured modes, and SSE streaming for Chat. Custom
-ids never pass through the lazy discovery and are not touched by the background
-warm-up, which only imports built-in modules.
+Custom ids never pass through the lazy discovery and are not touched by the
+background warm-up, which only imports built-in modules.
 
 Custom providers are general-purpose only. `ModeCapabilities` rejects them for
 Vision (no native Computer Use), even though they bypass the explicit `general`
@@ -206,22 +226,30 @@ only that module. The previous provider instance is discarded.
 Opening Settings used to be the other lazy-import trigger: `LLMProviderWidget`
 iterates all `PROVIDERS` and calls `get_provider_config()`, `get_ui_schema()`,
 and `get_default_settings()` to build every provider page, which imported all
-provider modules on the GUI thread (several seconds). Now Settings never pays
-that cost on open: the window is created immediately, and if the warm-up has
-not finished yet, the General page shows a centered `BusySpinner` (a rotating
-theme-accent arc, ~15% of the window height) with a "Loading provider
-settings…" caption below it, and the Vision model selector is hidden because it
-has no configured providers to list. A 150 ms timer waits for
-`providers_ready()` and then builds `LLMProviderWidget` on the GUI thread
-(imports are already done, so this takes well under a second) and reveals the
-Vision selector. Saving while the spinner is still shown keeps the stored
-`active_provider` and `llm_providers` values instead of overwriting them.
+provider modules on the GUI thread (several seconds). The in-app page no longer
+does that: Settings → **Providers** is built from `PROVIDER_METADATA` and
+`ModelConfigManager.PROVIDER_CONFIG`, so opening Settings imports nothing and
+shows immediately. A provider form exists only inside the Connect/Edit dialog.
+`ProvidersPage._ensure_providers_ready()` waits for the background warm-up and,
+while it is still running, shows a small modal `_ProviderLoadingDialog`
+("Loading provider settings…", with Cancel) driven by a 150 ms timer; the warm-up
+is started if it has not been scheduled. The page also owns the **Vision
+(Computer Use)** row: a provider combo listing the configured providers that
+have at least one model for which `ModeCapabilities.supports(pid, model,
+"vision")` is true, and an editable model combo for their Vision models. A
+stored choice whose provider is disconnected or no longer capable stays visible
+as "(unavailable)" instead of being dropped. The Settings → Vision page now only
+holds the agent-loop tunables and points here.
 
-The Custom Providers page applies additions, edits and deletions in memory
-immediately (registration, provider pages, model lists), while keeping a
-snapshot of the affected settings. Cancel and window close restore that
-snapshot; Save persists `custom_providers` and only then removes keyring keys
-belonging to deleted providers.
+The Providers page stages its edits in the settings manager
+(`set_many(..., save=False, emit=False)`). Connect, Use, custom-provider
+add/edit/delete, the active-provider switch and the Vision-model choice apply
+immediately in memory so the page stays in sync, while a snapshot
+(`active_provider`, `llm_providers`, `custom_providers`, `mode_models`) taken
+before the first change is kept. Cancel and window close restore that snapshot;
+OK writes the batch and only then removes keyring keys belonging to deleted
+custom providers. The installer's initial setup still uses
+`LLMProviderWidget`, which builds every provider page up front.
 
 ---
 
@@ -233,8 +261,9 @@ The vendor SDKs (OpenAI, Anthropic, Google GenAI, xAI, Hugging Face, plus
 them in the worker delayed the first request by seconds for providers the user
 may never select. Source-only discovery keeps startup and model switching fast;
 the eager import now runs on a background thread after the window is up instead
-of blocking any user action. If Settings is opened before that background pass
-finishes, only then does the General page wait — behind a busy indicator.
+of blocking any user action. If a provider is connected before that background
+pass finishes, only then does the provider dialog wait — behind a small busy
+indicator.
 
 The trade-off: any code that needs static provider configuration must trigger a
 single-module import through the proxy. That is why `SettingsManager` stores

@@ -103,15 +103,15 @@ Logos supports a wide range of models from leading AI providers. You can easily 
 *   **OpenAI**
 *   **xAI (Grok)**
 *   **Hugging Face** (via [Inference Providers](https://huggingface.co/docs/inference-providers) router)
-*   **Custom OpenAI-compatible endpoints** (local servers or self-hosted gateways)
+*   **Custom OpenAI- or Anthropic-compatible endpoints** (local servers or self-hosted gateways)
 
 > [!NOTE]
-> **Custom providers.** Settings → **Custom Providers** lets you add any server that speaks the OpenAI Chat Completions API — LM Studio, Ollama, llama.cpp, vLLM, or a gateway. Enter a provider ID, display name, base URL (for example `http://127.0.0.1:1234/v1`) and the model IDs to expose; the API key and extra headers are optional. Custom providers work in Chat, Terminal and Browser modes. They are not offered in Vision mode, which requires a model with native Computer Use support (OpenAI, Anthropic or Google).
+> **Custom providers.** Settings → **Providers** → **Add custom provider…** lets you add any server that speaks the OpenAI Chat Completions API or the Anthropic Messages API — LM Studio, Ollama, llama.cpp, vLLM, DeepSeek, Kimi, GLM, LiteLLM, or a gateway. Pick the API format in the dialog, then enter a provider ID, display name, base URL and the model IDs to expose; the API key and extra headers are optional. Custom providers work in Chat, Terminal and Browser modes. They are not offered in Vision mode, which requires a model with native Computer Use support (OpenAI, Anthropic or Google). The same page's **Vision (Computer Use)** row chooses the model Vision mode switches to when the active model cannot drive the screen.
 
 > [!NOTE]
 > **Hugging Face billing.** The HF provider routes requests through `router.huggingface.co` to third-party inference partners. Model names use the format `Org/Model` (auto-routing) or `Org/Model:provider` (e.g. `Qwen/Qwen3.8-27B:novita`, `mistralai/Mistral-7B-Instruct-v0.2:featherless-ai`). Routed requests are billed to your Hugging Face account: free accounts receive no monthly credits, so a paid credit balance or PRO subscription is required — otherwise the router answers `402 Payment Required`. The provider is fully wired into the app (streaming, retries, error cards), but free server-side chat is not available.
 
-> **Stay updated!** We constantly monitor for new model releases. You can get the latest supported models by simply clicking the **"Update models"** button in the settings window. This ensures you always have access to the most modern and powerful LLMs.
+> **Stay updated!** We constantly monitor for new model releases. You can get the latest supported models by clicking **Update model lists** at the bottom of Settings → Providers. This ensures you always have access to the most modern and powerful LLMs.
 
 
 ### Adding Files to Context

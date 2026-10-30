@@ -509,7 +509,7 @@ class AppController(QObject):
 
             if not provider_is_configured(self.settings, active_provider_name):
                 self.ui.add_message(
-                    "<i>Welcome to Logos AI Assistant! To get started, please go to <b>Settings</b>, select an AI provider, and enter your API key.</i>",
+                    "<i>Welcome to Logos AI Assistant! To get started, open <b>Settings → Providers</b> and connect any provider with its API key, or add your own OpenAI- or Anthropic-compatible endpoint.</i>",
                     force_scroll=True
                 )
         except Exception as e:
@@ -3344,7 +3344,7 @@ class AppController(QObject):
                 if cur_pid and cur_model:
                     self.ui.add_message(
                         "<i>Current model does not support computer use. Pick one under "
-                        "Settings → General → Vision (Computer Use).</i>",
+                        "Settings → Providers → Vision (Computer Use).</i>",
                         force_scroll=True,
                     )
                 return
@@ -3450,13 +3450,13 @@ class AppController(QObject):
             if not provider_is_configured(all_settings, pid):
                 return (
                     f"The Vision model ({pid}) is not configured. Re-select it "
-                    "in Settings → General → Vision (Computer Use)."
+                    "in Settings → Providers → Vision (Computer Use)."
                 )
             if all(ModeCapabilities.supports(pid, mid, m) for m in modes):
                 return None
         return (
             "Vision mode needs a model with Computer Use support. Choose one "
-            "in Settings → General → Vision (Computer Use) — OpenAI, Anthropic "
+            "in Settings → Providers → Vision (Computer Use) — OpenAI, Anthropic "
             "or Google — or switch to such a model from the model button."
         )
 

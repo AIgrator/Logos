@@ -49,7 +49,7 @@ class XAIProvider(BaseLLMProvider):
 
     @staticmethod
     def get_display_name() -> str:
-        return "x=AI"
+        return "xAI"
 
     @staticmethod
     def get_default_settings() -> dict:

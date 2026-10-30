@@ -1,7 +1,8 @@
-"""Dialog for adding or editing a user-defined OpenAI-compatible provider."""
+"""Dialog for adding or editing a user-defined model provider."""
 import re
 
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
@@ -15,7 +16,11 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
 )
 
-from llm.custom_providers import provider_id_error
+from llm.custom_providers import (
+    PROTOCOL_ANTHROPIC,
+    PROTOCOL_OPENAI,
+    provider_id_error,
+)
 
 _HEADER_NAME_RE = re.compile(r"^[^\s:]+$")
 
@@ -37,13 +42,9 @@ class CustomProviderDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        intro = QLabel(
-            "Connect any OpenAI-compatible Chat Completions endpoint "
-            "(LM Studio, Ollama, llama.cpp, vLLM, a gateway). "
-            "The base URL usually ends with /v1."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
+        self.intro = QLabel()
+        self.intro.setWordWrap(True)
+        layout.addWidget(self.intro)
 
         form = QFormLayout()
         form.setFieldGrowthPolicy(
@@ -63,8 +64,17 @@ class CustomProviderDialog(QDialog):
         self.name_edit.setPlaceholderText("Local Llama")
         form.addRow("Display name:", self.name_edit)
 
+        self.protocol_combo = QComboBox()
+        self.protocol_combo.addItem("OpenAI Chat Completions", PROTOCOL_OPENAI)
+        self.protocol_combo.addItem("Anthropic Messages", PROTOCOL_ANTHROPIC)
+        self.protocol_combo.setToolTip(
+            "The wire format the endpoint speaks. Anthropic Messages is "
+            "offered by DeepSeek, Kimi, GLM, LiteLLM and similar gateways.")
+        self.protocol_combo.currentIndexChanged.connect(
+            self._on_protocol_changed)
+        form.addRow("API format:", self.protocol_combo)
+
         self.url_edit = QLineEdit()
-        self.url_edit.setPlaceholderText("http://127.0.0.1:1234/v1")
         form.addRow("Base URL:", self.url_edit)
 
         self.key_edit = QLineEdit()
@@ -119,9 +129,10 @@ class CustomProviderDialog(QDialog):
         layout.addLayout(headers_buttons)
 
         vision_note = QLabel(
-            "Custom providers work in Chat, Terminal and Browser. Vision "
-            "requires a native computer-use provider (OpenAI, Anthropic or "
-            "Google), so custom providers are not offered there.")
+            "Custom providers work in Chat, Terminal and Browser with either "
+            "API format. Vision requires a native computer-use provider "
+            "(OpenAI, Anthropic or Google), so custom providers are not "
+            "offered there.")
         vision_note.setWordWrap(True)
         vision_note.setStyleSheet(
             "QLabel { padding: 8px 10px; border: none; "
@@ -152,9 +163,28 @@ class CustomProviderDialog(QDialog):
         table.setMinimumHeight(110)
         return table
 
+    def _on_protocol_changed(self, *_args):
+        if self.protocol_combo.currentData() == PROTOCOL_ANTHROPIC:
+            self.intro.setText(
+                "Connect any Anthropic-compatible Messages endpoint "
+                "(DeepSeek, Kimi, GLM, LiteLLM and similar gateways). Use "
+                "the base URL the provider documents for the Anthropic SDK.")
+            self.url_edit.setPlaceholderText(
+                "https://api.deepseek.com/anthropic")
+        else:
+            self.intro.setText(
+                "Connect any OpenAI-compatible Chat Completions endpoint "
+                "(LM Studio, Ollama, llama.cpp, vLLM, a gateway). "
+                "The base URL usually ends with /v1.")
+            self.url_edit.setPlaceholderText("http://127.0.0.1:1234/v1")
+
     def _load(self, definition, api_key):
         self.id_edit.setText(definition.get("id", ""))
         self.name_edit.setText(definition.get("name", ""))
+        protocol = definition.get("protocol") or PROTOCOL_OPENAI
+        index = self.protocol_combo.findData(protocol)
+        self.protocol_combo.setCurrentIndex(index if index != -1 else 0)
+        self._on_protocol_changed()
         self.url_edit.setText(definition.get("base_url", ""))
         self.key_edit.setText(api_key or "")
 
@@ -238,6 +268,7 @@ class CustomProviderDialog(QDialog):
             "id": provider_id,
             "name": display_name,
             "base_url": base_url,
+            "protocol": self.protocol_combo.currentData() or PROTOCOL_OPENAI,
             "models": models,
             "headers": headers,
         }

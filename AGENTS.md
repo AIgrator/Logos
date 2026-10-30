@@ -196,6 +196,32 @@ directory) is the terminal/browser `working_directory` and the root passed to
 `Indexer`; `.logos` is ignored by the indexer. Do not hardcode `Indexer('.')` or
 `os.getcwd()` for project-scoped paths.
 
+## Providers and the Vision model
+
+Settings → Providers (`src/ui/widgets/providers_page.py`) is the single place
+where providers are connected, activated and configured. Built-in rows open the
+schema-driven `ProviderDialog` (API key + model); custom OpenAI- or
+Anthropic-compatible endpoints open `custom_provider_dialog.py`. That dialog's
+**API format** selector writes `custom_providers[i]["protocol"]` (`openai`
+default, or `anthropic`); `src/llm/custom_providers.py` builds a
+`CustomOpenAIProvider` or `CustomAnthropicProvider` subclass accordingly. The
+Anthropic variant speaks Messages (`{base}/v1/messages`, `anthropic-version`,
+content blocks, forced `tool_choice`) but deliberately omits native Anthropic
+extras (Computer Use, web search, strict schemas, adaptive thinking). Custom
+providers stay out of Vision either way.
+
+The page's **VISION (COMPUTER USE)** row chooses the default Vision model: a
+provider combo (configured OpenAI/Anthropic/Google providers with models where
+`ModeCapabilities.supports(pid, model, "vision")`) plus an editable model combo.
+The choice is stored as `mode_models.vision` and staged with the page's other
+edits, so Cancel restores it. Settings → Vision only holds agent-loop tunables
+and points to this row. Provider tiles use bundled brand SVGs from
+`assets/providers/` (MIT, LobeHub icons; `logos.spec` packages `assets/`),
+tinted per provider, with initials as the fallback for custom providers.
+Lazy discovery (`src/llm/__init__.py`) reads real `get_display_name()` literals
+from class staticmethods via `ast.walk`, so names like "OpenAI", "Hugging Face"
+and "xAI" appear without importing any SDK.
+
 ## Suggested next actions
 
 Terminal and Browser answers can carry up to three clickable next-step

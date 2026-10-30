@@ -1,10 +1,12 @@
-"""User-defined OpenAI-compatible providers.
+"""User-defined OpenAI- or Anthropic-compatible providers.
 
 People may run models behind an OpenAI-compatible Chat Completions endpoint
-(LM Studio, Ollama, llama.cpp, a gateway, a company proxy). Definitions live
-in settings.json under "custom_providers"; each definition becomes a real
-provider class in llm.PROVIDERS, so the settings pages, model picker, agent
-loops and usage accounting work without special cases.
+(LM Studio, Ollama, llama.cpp, a gateway, a company proxy) or an
+Anthropic-compatible Messages endpoint (DeepSeek, Kimi, GLM, a LiteLLM
+gateway). Definitions live in settings.json under "custom_providers"; each
+definition becomes a real provider class in llm.PROVIDERS, so the settings
+pages, model picker, agent loops and usage accounting work without special
+cases.
 
 Custom providers are general-purpose (Chat/Terminal/Browser). They are not
 native Computer Use providers, so Vision never offers them.
@@ -38,6 +40,13 @@ _SCHEMA_FILES = (
     'cache/vision/response_formats.json',
     'cache/browser/response_formats.json',
 )
+
+# Wire format spoken by a custom endpoint.
+PROTOCOL_OPENAI = "openai"
+PROTOCOL_ANTHROPIC = "anthropic"
+PROTOCOLS = (PROTOCOL_OPENAI, PROTOCOL_ANTHROPIC)
+
+_ANTHROPIC_VERSION = "2023-06-01"
 
 _registered_ids: set[str] = set()
 
@@ -101,10 +110,17 @@ def normalize_definition(raw) -> dict | None:
         if header_name:
             headers[header_name] = str(value or "")
 
+    protocol = str(raw.get("protocol") or "").strip().lower()
+    if protocol not in PROTOCOLS:
+        # Definitions written before the protocol selector existed are
+        # OpenAI-compatible by construction.
+        protocol = PROTOCOL_OPENAI
+
     return {
         "id": pid,
         "name": name,
         "base_url": base_url,
+        "protocol": protocol,
         "models": models,
         "headers": headers,
     }
@@ -147,6 +163,7 @@ def _build_provider_class(definition: dict):
     """Creates a concrete provider class bound to one user definition."""
     pid = definition["id"]
     display_name = definition["name"]
+    protocol = definition.get("protocol") or PROTOCOL_OPENAI
     model_ids = [m["id"] for m in definition["models"]]
     model_labels = {m["id"]: m["name"] for m in definition["models"]}
 
@@ -154,6 +171,7 @@ def _build_provider_class(definition: dict):
         return {
             "api_url": definition["base_url"],
             "display_name": display_name,
+            "protocol": protocol,
             "models": list(model_ids),
             "model_labels": dict(model_labels),
             "custom_headers": dict(definition["headers"]),
@@ -190,8 +208,11 @@ def _build_provider_class(definition: dict):
         }),
         "get_provider_config": staticmethod(provider_config),
     }
-    return type(f"CustomOpenAIProvider_{pid}",
-                (CustomOpenAIProvider,), namespace)
+    base_class = (CustomAnthropicProvider
+                  if protocol == PROTOCOL_ANTHROPIC else CustomOpenAIProvider)
+    prefix = "CustomAnthropicProvider" if protocol == PROTOCOL_ANTHROPIC \
+        else "CustomOpenAIProvider"
+    return type(f"{prefix}_{pid}", (base_class,), namespace)
 
 
 def register_custom_providers(definitions: list):
@@ -225,9 +246,50 @@ def register_custom_providers(definitions: list):
     return normalized, classes, sorted(removed)
 
 
+def _load_response_schemas() -> dict:
+    """Response-format definitions written by the schema generator."""
+    schemas = {}
+    for path in _SCHEMA_FILES:
+        try:
+            with open(path, encoding='utf-8') as f:
+                schemas.update(json.load(f))
+        except FileNotFoundError:
+            logger.warning("Custom provider: schema file '%s' missing.", path)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.error("Custom provider: cannot read '%s': %s", path, e)
+    return schemas
+
+
 # --------------------------------------------------------------------------
 # Provider implementation
 # --------------------------------------------------------------------------
+
+def _unwrap_tool_payload(raw, fn_name: str):
+    """Unwraps nested/double-encoded JSON some local and proxy models produce."""
+    payload = raw
+    if isinstance(payload, str):
+        try:
+            payload = json.loads(payload or "{}")
+        except (json.JSONDecodeError, TypeError):
+            payload = repair_json_string(payload)
+    for _ in range(10):
+        if isinstance(payload, dict) and 'payload' in payload and (
+            len(payload) == 1 or payload.get('type') == fn_name
+        ):
+            payload = payload.get('payload')
+            continue
+        if isinstance(payload, str):
+            try:
+                decoded = json.loads(payload)
+            except (json.JSONDecodeError, TypeError):
+                decoded = repair_json_string(payload)
+            if decoded is None:
+                break
+            payload = decoded
+            continue
+        break
+    return payload
+
 
 class CustomOpenAIProvider(BaseLLMProvider):
     """Chat Completions client for a user-provided base URL."""
@@ -266,17 +328,8 @@ class CustomOpenAIProvider(BaseLLMProvider):
     def _tools_from_cache(self) -> list:
         if self._tools_cache is not None:
             return self._tools_cache
-        schemas = {}
-        for path in _SCHEMA_FILES:
-            try:
-                with open(path, encoding='utf-8') as f:
-                    schemas.update(json.load(f))
-            except FileNotFoundError:
-                logger.warning("Custom provider: schema file '%s' missing.", path)
-            except (OSError, json.JSONDecodeError) as e:
-                logger.error("Custom provider: cannot read '%s': %s", path, e)
         tools = []
-        for name, info in schemas.items():
+        for name, info in _load_response_schemas().items():
             params = info.get("schema")
             if params:
                 tools.append({
@@ -420,7 +473,7 @@ class CustomOpenAIProvider(BaseLLMProvider):
                     call = tool_calls[0]
                     function = call.get("function") or {}
                     fn_name = function.get("name") or schema_name
-                    payload = self._decode_tool_payload(
+                    payload = _unwrap_tool_payload(
                         function.get("arguments", "{}"), fn_name)
                     return {
                         "text": text,
@@ -445,27 +498,7 @@ class CustomOpenAIProvider(BaseLLMProvider):
 
     def _decode_tool_payload(self, raw_arguments, fn_name: str):
         """Unwraps nested/double-encoded JSON some local models produce."""
-        try:
-            payload = json.loads(raw_arguments or "{}")
-        except (json.JSONDecodeError, TypeError):
-            payload = {}
-        for _ in range(10):
-            if isinstance(payload, dict) and 'payload' in payload and (
-                len(payload) == 1 or payload.get('type') == fn_name
-            ):
-                payload = payload.get('payload')
-                continue
-            if isinstance(payload, str):
-                try:
-                    decoded = json.loads(payload)
-                except (json.JSONDecodeError, TypeError):
-                    decoded = repair_json_string(payload)
-                if decoded is None:
-                    break
-                payload = decoded
-                continue
-            break
-        return payload
+        return _unwrap_tool_payload(raw_arguments, fn_name)
 
     def cancel_stream(self, generation_id: str = None):
         if self.current_response:
@@ -535,6 +568,332 @@ class CustomOpenAIProvider(BaseLLMProvider):
                                         if isinstance(part, dict) else None)
                                 if text:
                                     yield text
+        except requests.exceptions.HTTPError as e:
+            if self.is_cancelling:
+                logger.info("Custom provider: stream cancelled.")
+            else:
+                self._raise_http_error(e)
+        except requests.exceptions.RequestException as e:
+            if not self.is_cancelling:
+                raise RetryableError(
+                    f"{self._display} network error: {e}") from e
+        except (FatalError, RetryableError):
+            raise
+        except Exception as e:
+            if self.is_cancelling:
+                logger.info("Custom provider: stream cancelled.")
+            else:
+                logger.error("Custom provider stream failed: %s", e,
+                             exc_info=True)
+                raise FatalError(f"{self._display} stream failed: {e}") from e
+        finally:
+            self.current_response = None
+            self.is_cancelling = False
+
+    def get_generation_id(self, response_chunk) -> str | None:
+        return None
+
+
+class CustomAnthropicProvider(BaseLLMProvider):
+    """Messages API client for a user-provided Anthropic-compatible endpoint.
+
+    Only the portable core of the Messages API is sent: system prompt,
+    messages, images and (for structured calls) one forced tool. Native
+    Anthropic extras — computer use, server-side web search/fetch, strict
+    tool grammars, adaptive thinking — are deliberately omitted because
+    third-party endpoints generally reject them.
+    """
+
+    def __init__(self, provider_config: dict):
+        super().__init__(provider_config)
+        self.base_url = (self.provider_config.get("api_url") or "").rstrip("/")
+        self.custom_headers = dict(
+            self.provider_config.get("custom_headers") or {})
+        self._tools_cache = None
+        self.current_response = None
+        self.is_cancelling = False
+        self.session = requests.Session()
+
+    @property
+    def _display(self) -> str:
+        return type(self).get_display_name()
+
+    def _headers(self) -> dict:
+        headers = {
+            "Content-Type": "application/json",
+            "anthropic-version": _ANTHROPIC_VERSION,
+        }
+        if self.api_key:
+            # Anthropic-compatible gateways differ: DeepSeek/Kimi/GLM style
+            # endpoints read ANTHROPIC_AUTH_TOKEN (Bearer) while classic
+            # gateways read x-api-key. Sending both makes one key field work
+            # everywhere; Anthropic itself ignores the extra header.
+            headers["x-api-key"] = self.api_key
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        # User headers win, so a gateway can replace auth or add routing.
+        headers.update({str(k): str(v)
+                        for k, v in self.custom_headers.items()})
+        return headers
+
+    def _endpoint(self) -> str:
+        if not self.base_url:
+            raise FatalError(
+                f"{self._display}: base URL is not configured.")
+        if self.base_url.endswith("/messages"):
+            return self.base_url
+        if self.base_url.endswith("/v1"):
+            return f"{self.base_url}/messages"
+        return f"{self.base_url}/v1/messages"
+
+    def _tools_from_cache(self) -> list:
+        if self._tools_cache is not None:
+            return self._tools_cache
+        tools = []
+        for name, info in _load_response_schemas().items():
+            params = info.get("schema")
+            if params:
+                tools.append({
+                    "name": name,
+                    "description": info.get("description", ""),
+                    "input_schema": params,
+                })
+        self._tools_cache = tools
+        return tools
+
+    @staticmethod
+    def _image_part(attachment):
+        """File path/bytes -> Anthropic-style base64 image block."""
+        try:
+            if isinstance(attachment, str):
+                media_type, _ = mimetypes.guess_type(attachment)
+                media_type = media_type or "image/png"
+                with open(attachment, "rb") as f:
+                    data = base64.b64encode(f.read()).decode('utf-8')
+            elif isinstance(attachment, bytes):
+                image = Image.open(io.BytesIO(attachment))
+                buffer = io.BytesIO()
+                image_format = image.format or 'PNG'
+                image.save(buffer, format=image_format)
+                data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                media_type = f"image/{image_format.lower()}"
+            else:
+                return None
+            return {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": media_type,
+                    "data": data,
+                },
+            }
+        except Exception as e:
+            logger.error("Custom provider: image attachment failed: %s", e)
+            return None
+
+    def _prepare_messages(self, prompt: str, attachments: list,
+                          history: list = None):
+        messages = []
+        if history:
+            if history[-1].get("content") == prompt:
+                history = history[:-1]
+            for message in history:
+                role = message.get("role")
+                if role == "model":
+                    role = "assistant"
+                if role in ("user", "assistant"):
+                    content = message.get("content", "")
+                    if isinstance(content, str):
+                        content = [{"type": "text", "text": content}]
+                    messages.append({"role": role, "content": content})
+        user_content = [part for part in
+                        (self._image_part(a) for a in (attachments or []))
+                        if part]
+        user_content.append({"type": "text", "text": prompt})
+        messages.append({"role": "user", "content": user_content})
+        return messages
+
+    def _max_tokens(self) -> int:
+        try:
+            return int(self.provider_config.get("max_tokens", 4096))
+        except (ValueError, TypeError):
+            return 4096
+
+    def _request_body(self, prompt, attachments, system_prompt, history,
+                      schema_name, stream: bool):
+        body = {
+            "model": self.model,
+            "messages": self._prepare_messages(
+                prompt, attachments, history),
+            "max_tokens": self._max_tokens(),
+        }
+        if system_prompt:
+            body["system"] = system_prompt
+        if stream:
+            body["stream"] = True
+        if schema_name and self.require_json_output:
+            target = next(
+                (t for t in self._tools_from_cache()
+                 if t.get("name") == schema_name), None)
+            if target:
+                body["tools"] = [target]
+                body["tool_choice"] = {"type": "tool", "name": schema_name}
+            else:
+                logger.warning("Custom provider: schema '%s' not found.",
+                               schema_name)
+        return body
+
+    def _raise_http_error(self, error: requests.exceptions.HTTPError):
+        response = error.response
+        status = response.status_code if response is not None else 0
+        detail = response.text if response is not None else str(error)
+        name = self._display
+        if status == 429:
+            raise FatalError(f"{name} quota/rate limit ({status}): {detail}") from error
+        if 400 <= status < 500:
+            raise FatalError(f"{name} client error ({status}): {detail}") from error
+        if 500 <= status < 600:
+            raise RetryableError(f"{name} server error ({status}): {detail}") from error
+        raise FatalError(f"{name} HTTP error ({status}): {detail}") from error
+
+    @staticmethod
+    def _parse_blocks(data: dict, schema_name: str | None):
+        """Text, reasoning and (when expected) the first tool call."""
+        text_parts = []
+        reasoning_parts = []
+        for block in data.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            btype = block.get("type")
+            if btype == "text":
+                text_parts.append(str(block.get("text") or ""))
+            elif btype == "thinking":
+                reasoning_parts.append(str(block.get("thinking") or ""))
+            elif btype in ("tool_use", "server_tool_use") and schema_name:
+                name = block.get("name") or schema_name
+                return (
+                    "".join(text_parts),
+                    "".join(reasoning_parts),
+                    {"type": name,
+                     "payload": _unwrap_tool_payload(block.get("input"), name)},
+                )
+        return "".join(text_parts), "".join(reasoning_parts), []
+
+    def _execute_get_response(
+        self,
+        prompt: str,
+        attachments: list[Any] | None = None,
+        system_prompt: str | None = None,
+        history: list[dict[str, Any]] | None = None,
+        schema_name: str | None = None,
+    ) -> dict[str, Any]:
+        body = self._request_body(prompt, attachments, system_prompt, history,
+                                  schema_name, stream=False)
+        try:
+            response = self.session.post(
+                self._endpoint(),
+                headers=self._headers(),
+                json=body,
+                timeout=120,
+            )
+            response.raise_for_status()
+            data = response.json()
+            self._record_usage(data.get("usage"))
+            text, reasoning, tool_calls = self._parse_blocks(
+                data, schema_name)
+            return {
+                "text": text,
+                "tool_calls": tool_calls,
+                "reasoning": reasoning,
+            }
+        except requests.exceptions.HTTPError as e:
+            self._raise_http_error(e)
+        except requests.exceptions.RequestException as e:
+            raise RetryableError(
+                f"{self._display} network error: {e}") from e
+        except (FatalError, RetryableError):
+            raise
+        except ValueError as e:
+            # Non-JSON body from a misconfigured gateway.
+            raise RetryableError(
+                f"{self._display} returned an invalid response: {e}") from e
+        except Exception as e:
+            logger.error("Custom provider request failed: %s", e, exc_info=True)
+            if is_transient_error(e):
+                raise RetryableError(
+                    f"{self._display} transient error: {e}",
+                    retry_after=extract_retry_after(message=str(e))) from e
+            raise FatalError(f"{self._display} request failed: {e}") from e
+
+    def cancel_stream(self, generation_id: str = None):
+        if self.current_response:
+            try:
+                self.is_cancelling = True
+                self.current_response.close()
+            except Exception as e:
+                logger.error("Custom provider: cancel failed: %s", e)
+
+    def stream_response(
+        self,
+        prompt: str,
+        attachments: list[Any] | None = None,
+        system_prompt: str | None = None,
+        history: list[dict[str, Any]] | None = None,
+        callbacks=None,
+    ):
+        body = self._request_body(prompt, attachments, system_prompt, history,
+                                  None, stream=True)
+        self.is_cancelling = False
+        raw_logger = logging.getLogger('llm_raw_response')
+        try:
+            with self.session.post(
+                self._endpoint(),
+                headers=self._headers(),
+                json=body,
+                timeout=120,
+                stream=True,
+            ) as response:
+                self.current_response = response
+                response.raise_for_status()
+                for line in response.iter_lines():
+                    if self.is_cancelling:
+                        break
+                    if not line:
+                        continue
+                    decoded = (line.decode('utf-8')
+                               if isinstance(line, bytes) else line)
+                    raw_logger.info(decoded)
+                    if not decoded.startswith("data:"):
+                        continue
+                    payload = decoded[len("data:"):].strip()
+                    if not payload or payload == "[DONE]":
+                        continue
+                    try:
+                        event = json.loads(payload)
+                    except json.JSONDecodeError:
+                        logger.warning(
+                            "Custom provider: bad stream chunk: %s", payload)
+                        continue
+                    event_type = event.get("type")
+                    if event_type == "message_start":
+                        usage = (event.get("message") or {}).get("usage")
+                        if usage:
+                            self._record_usage(usage, merge=True)
+                    elif event_type == "content_block_delta":
+                        delta = event.get("delta") or {}
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text")
+                            if text:
+                                yield text
+                    elif event_type == "message_delta":
+                        usage = event.get("usage")
+                        if usage:
+                            self._record_usage(usage, merge=True)
+                    elif event_type == "error":
+                        detail = event.get("error") or {}
+                        message = (detail.get("message")
+                                   or detail.get("type") or detail)
+                        raise FatalError(
+                            f"{self._display} streaming error: {message}")
         except requests.exceptions.HTTPError as e:
             if self.is_cancelling:
                 logger.info("Custom provider: stream cancelled.")

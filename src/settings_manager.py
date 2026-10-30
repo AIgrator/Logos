@@ -120,8 +120,9 @@ class SettingsManager(QObject):
         "recent_projects": [],
         "active_provider": "google_gemini", # A sensible default
         "llm_providers": _llm_providers_defaults,
-        # User-defined OpenAI-compatible endpoints (see llm/custom_providers.py).
-        # Shape: [{id, name, base_url, models: [{id, name}], headers: {name: value}}]
+        # User-defined OpenAI- or Anthropic-compatible providers
+        # (see llm/custom_providers.py).
+        # Shape: [{id, name, protocol, base_url, models: [{id, name}], headers: {}}]
         "custom_providers": [],
         # Dedicated Vision (computer-use) model. Applied session-only when
         # switching to Vision mode IF the active model cannot do computer use.
