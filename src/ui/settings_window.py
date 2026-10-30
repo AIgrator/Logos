@@ -52,6 +52,7 @@ from src.ui.widgets.llm_provider_widget import LLMProviderWidget
 from src.ui.widgets.mode_model_widget import ModeModelWidget
 from src.ui.widgets.custom_provider_dialog import CustomProviderDialog
 from src.ui.skill_catalog_dialog import SkillCatalogDialog
+from src.ui.mcp_settings_page import MCPSettingsPage
 from src.ui.utils import CustomToolTipManager, NavButtonHoverFilter
 
 from src.ui.widgets.busy_spinner import BusySpinner
@@ -177,6 +178,7 @@ class SettingsWindow(QDialog):
             "hotkeys": ("fa5s.keyboard", "Hotkeys"),
             "browser": ("fa5s.globe", "Browser"),
             "terminal": ("fa5s.terminal", "Terminal"),
+            "mcp": ("fa5s.server", "MCP Servers"),
             "skills": ("fa5s.puzzle-piece", "Skills"),
             "vision": ("fa5s.robot", "Vision"),
             "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
@@ -225,6 +227,7 @@ class SettingsWindow(QDialog):
             "hotkeys": self._create_hotkeys_section(),
             "browser": self._create_browser_section(),
             "terminal": self._create_terminal_section(),
+            "mcp": self._create_mcp_section(),
             "skills": self._create_skills_section(),
             "vision": self._create_vision_section(),
             "compact": self._create_compact_mode_section(),
@@ -278,11 +281,18 @@ class SettingsWindow(QDialog):
 
     def closeEvent(self, event):
         self._discard_custom_changes()
+        self._discard_mcp_changes()
         super().closeEvent(event)
 
     def reject(self):
         self._discard_custom_changes()
+        self._discard_mcp_changes()
         super().reject()
+
+    def _discard_mcp_changes(self):
+        page = getattr(self, "mcp_page", None)
+        if page is not None:
+            page.rollback()
 
     def load_settings(self):
         """Loads settings from the manager and updates the UI."""
@@ -376,6 +386,8 @@ class SettingsWindow(QDialog):
 
         self.load_apps_from_cache()
         self._refresh_skills()
+        if getattr(self, "mcp_page", None) is not None:
+            self.mcp_page.load_settings()
 
     def _collect_settings_from_ui(self):
         """Gathers all settings from the UI into a single dictionary."""
@@ -493,6 +505,13 @@ class SettingsWindow(QDialog):
 
         search_settings = {}
 
+        # The MCP page stages its edits directly in the settings manager; the
+        # value here is the final (hydrated) state, sanitized when written.
+        mcp_settings = self.settings_manager.get("mcp", {}) or {}
+        if not isinstance(mcp_settings, dict):
+            mcp_settings = {}
+        mcp_settings = copy.deepcopy(mcp_settings)
+
         return {
             "active_provider": active_provider_to_save,
             "llm_providers": providers_to_save,
@@ -508,6 +527,7 @@ class SettingsWindow(QDialog):
             "vision": vision_settings,
             "browser": browser_settings,
             "terminal": terminal_settings,
+            "mcp": mcp_settings,
             "compact_mode": compact_mode_settings,
             "context": context_settings,
             "theme": theme,
@@ -522,6 +542,9 @@ class SettingsWindow(QDialog):
             self.settings_manager.delete_provider_key(provider_id)
         self._deleted_custom_ids.clear()
         self._custom_snapshot = None
+        page = getattr(self, "mcp_page", None)
+        if page is not None:
+            page.commit()
         self.hide()
 
     def _create_general_section(self):
@@ -1504,6 +1527,11 @@ class SettingsWindow(QDialog):
         terminal_layout.addWidget(self.shell_detach_spinbox, 2, 3)
 
         return group
+
+    def _create_mcp_section(self):
+        """Creates the MCP Servers settings section."""
+        self.mcp_page = MCPSettingsPage(self.settings_manager, self.controller)
+        return self.mcp_page
 
     def _create_skills_section(self):
         """Creates the Agent Skills settings section."""

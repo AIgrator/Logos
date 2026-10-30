@@ -1978,6 +1978,14 @@ class AppController(QObject):
         if computer is not None:
             computer.mcp_manager = manager
 
+    @property
+    def mcp_manager(self):
+        return self._mcp_manager
+
+    def mcp_config(self):
+        """Current merged MCP configuration (user settings + project file)."""
+        return self._mcp_config()
+
     def ensure_mcp_manager(self):
         """Creates and starts the MCP manager once, then applies config changes."""
         try:
@@ -3027,6 +3035,12 @@ class AppController(QObject):
                 mgr.set_block_ads(bool(browser_settings.get("block_ads", True)))
         except Exception as e:
             logging.warning(f"Could not propagate ad-blocking setting: {e}")
+
+        # MCP servers follow edits saved from the settings page.
+        try:
+            self.refresh_mcp_servers()
+        except Exception as e:
+            logging.warning(f"Could not apply MCP settings: {e}")
 
         title_string = self._get_llm_title_string()
         window_title = self._get_llm_window_title()

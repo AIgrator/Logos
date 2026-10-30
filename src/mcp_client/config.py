@@ -247,6 +247,31 @@ def _positive_number(raw: Any, default: float, field_name: str) -> float:
     return value
 
 
+class _PassthroughEnv(dict):
+    """Resolves every ${...} reference to itself for structural validation."""
+
+    def __contains__(self, key) -> bool:
+        return True
+
+    def __getitem__(self, key):
+        return f"${{{key}}}"
+
+
+def server_name_error(name: str) -> str:
+    if not _NAME_RE.match(str(name or "")):
+        return "Use letters, digits, '.', '_' or '-' (1-64 characters)."
+    return ""
+
+
+def definition_error(name: str, raw: Any) -> str:
+    """Checks a server definition without resolving environment references."""
+    try:
+        _parse_server(str(name or "server"), raw, "user", _build_context(""), _PassthroughEnv(), True)
+    except ConfigError as error:
+        return str(error)
+    return ""
+
+
 def _build_context(project_root: str) -> dict[str, str]:
     context: dict[str, str] = {}
     if project_root:

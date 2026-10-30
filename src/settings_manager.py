@@ -12,6 +12,7 @@ from PySide6.QtCore import QObject, Signal as pyqtSignal
 
 # This import will trigger the dynamic discovery in src/llm/__init__.py
 from llm import PROVIDERS, PROVIDER_METADATA
+from context.secrets import hydrate_mcp_servers, sanitize_mcp_servers
 
 logger = logging.getLogger(__name__)
 
@@ -400,6 +401,15 @@ class SettingsManager(QObject):
                     logger.error(f"Could not retrieve API key for '{provider_id}' from keyring: {e}")
         # --- End keyring integration ---
 
+        # MCP server env/header secrets live in the keychain as well.
+        mcp_settings = data.get("mcp")
+        if isinstance(mcp_settings, dict) and isinstance(mcp_settings.get("servers"), dict):
+            try:
+                mcp_settings["servers"] = hydrate_mcp_servers(
+                    mcp_settings["servers"], KEYRING_SERVICE_NAME)
+            except Exception as e:
+                logger.error(f"Could not load MCP secrets from keyring: {e}")
+
         return data
 
     def _ensure_provider_defaults(self, provider_id: str):
@@ -442,6 +452,16 @@ class SettingsManager(QObject):
                 if "api_key" in config:
                     del config["api_key"]
         # --- End keyring integration ---
+
+        # MCP server env/header secrets are written to the keychain, with a
+        # placeholder left in settings.json. The live settings stay hydrated.
+        mcp_settings = settings_to_write.get("mcp")
+        if isinstance(mcp_settings, dict) and isinstance(mcp_settings.get("servers"), dict):
+            try:
+                mcp_settings["servers"] = sanitize_mcp_servers(
+                    mcp_settings["servers"], KEYRING_SERVICE_NAME)
+            except Exception as e:
+                logger.error(f"Could not store MCP secrets in keyring: {e}")
 
         try:
             with open(self.SETTINGS_FILE, 'w', encoding='utf-8') as f:

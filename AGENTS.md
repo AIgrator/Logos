@@ -198,3 +198,37 @@ a tool the server marks read-only on a trusted server and otherwise asks in both
 `ask` and `auto` (`full` never asks). `mcp_call` output is capped at 20k
 characters, and a tool-reported error is raised as a tool error so it gets the
 error card and `error` status in the journal.
+
+Settings → MCP Servers (`src/ui/mcp_settings_page.py`) manages those servers.
+The page lists user servers from `settings.json` and project servers from the
+active `.mcp.json` in two groups, with transport, live state (stopped,
+starting, connected with tool count, error, disabled, needs trust), tooltips
+and a 700 ms status poll while visible. User rows carry an enable checkbox
+(`enabled` in the definition). A project server with the same name overrides
+the user server, marked "Overridden by project". Buttons: Add Server and Edit
+open `src/ui/mcp_server_dialog.py` (stdio command/args/cwd/env or HTTP
+url/headers, timeouts, validated without expanding `${...}` references);
+Remove, Import (a `.mcp.json` or Claude Desktop `mcpServers` document),
+Restart, Test (restart plus connected/failed feedback), Logs (server stderr and
+failures from `MCPManager.logs`), Trust Server / Revoke Trust for project rows
+behind a warning that trusted servers start with Terminal mode and run code,
+Open `.mcp.json`, and Reload (controller refresh plus repopulate). Edits are
+staged in the live settings manager (`save=False, emit=False`, like custom
+providers), so Restart/Test/Logs act on them before OK; the manager is
+refreshed after each staged change and again from
+`AppController._on_settings_changed` after a save. OK commits; Cancel, the
+window's close event and `reject` restore the pre-page snapshot. The page is
+imported by the settings window directly; the dialog module is imported on
+first Add/Edit/Import.
+
+MCP env and header values whose names look like credentials (`TOKEN`, `KEY`,
+`SECRET`, `PASSWORD`, `AUTH`, `COOKIE`, ...) are kept in the OS keychain
+instead of `settings.json`. `src/context/secrets.py` owns the helpers
+(`sanitize_mcp_servers`, `hydrate_mcp_servers`, `prune_mcp_secrets`,
+placeholders `${keyring:mcp:<server>:<kind>:<name>}` with kind `env` or
+`header`, service `Logos-ai-assistant`); `SettingsManager` hydrates placeholders
+on load and writes sanitized copies, so the in-memory settings stay usable and
+the plaintext never reaches `settings.json`, even when the keychain is
+unavailable (the placeholder is written and the failure logged). Accepting the
+page's `commit()` prunes keychain entries for removed servers or fields. The helpers live in `context.secrets` (already imported at startup)
+instead of `src.mcp_client`, whose import costs over a second.
