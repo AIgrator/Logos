@@ -27,12 +27,12 @@ Rules that the loader relies on:
   Keep it equal to `get_provider_id()`.
 - The module must define exactly one concrete subclass of `BaseLLMProvider`.
 - `get_provider_id()` and `get_display_name()` must return string literals.
-  Discovery parses the source without importing it, but its AST scan only sees
-  module-level functions; class-based methods are not extracted, so the
-  Settings dropdown currently uses the filename-derived id and name
-  (`openai_provider.py` → id `openai`, caption `Openai`). The static methods
-  are still required by the provider contract and are used whenever the class
-  is loaded.
+  Discovery parses the source without importing it: the scan walks every
+  function definition, including class-level `@staticmethod`s, so the real
+  names (`OpenAI`, `Anthropic`, `Hugging Face`, `xAI`) appear in the settings
+  list and the model switcher. When a method does not return a plain string
+  literal, the loader falls back to the filename: `openai_provider.py` becomes
+  id `openai` with caption `Openai`.
 
 The provider id is a stable key used in `settings.json` (`llm_providers.<id>`),
 in `models.json` (`"<provider_id>::<model_id>"` capability keys), and in the
@@ -113,8 +113,7 @@ class ExampleProvider(BaseLLMProvider):
 | `stream_response(...)` | Streaming request used by Chat. Yields text chunks or typed dict chunks. |
 
 `_execute_get_response` receives `schema_name` when the caller expects a
-structured object (terminal/browser tool envelopes, vision plans on legacy
-paths). Return:
+structured object (terminal/browser tool envelopes). Return:
 
 ```python
 {"text": "...", "tool_calls": {"type": "<schema_name>", "payload": {...}},
@@ -189,7 +188,7 @@ instantiated and when the settings page is built. Recognized keys:
 | `api_url` | Base endpoint used by SDK/HTTP clients. |
 | `supports_cancellation` | Allows the worker to call `cancel_stream()` on Cancel. |
 | `supports_streaming_tools` | Enables typed `tool_code` streaming chunks for chat search tools. |
-| `show_in_ui` | `False` hides the provider from the Settings dropdown (default `True`). |
+| `show_in_ui` | `False` hides the provider from the first-run setup wizard. The in-app Settings → Providers page lists every discovered provider regardless (default `True`). |
 | `provider_properties` | Per-sub-provider overrides (used by OpenRouter for cancellation). |
 
 The final instance config is: static provider config → the lightweight copy in
@@ -204,8 +203,10 @@ changed.
 ## 4. UI schema
 
 `get_ui_schema()` is consumed by
-[`src/ui/widgets/llm_provider_widget.py`](../src/ui/widgets/llm_provider_widget.py).
-Supported `type` values:
+[`src/ui/widgets/provider_form.py`](../src/ui/widgets/provider_form.py): the
+Settings → Providers page renders one `ProviderForm` per provider, and the
+first-run setup wizard reuses the same form through `LLMProviderWidget`
+(`src/ui/widgets/llm_provider_widget.py`). Supported `type` values:
 
 | Type | Widget |
 | --- | --- |
@@ -218,7 +219,7 @@ Supported `type` values:
 
 Each field may define `label` and `tooltip`. The `options_source` key is
 documentation only; model lists always come from `models.json` (see
-[Dynamic LLM Model Management](./system_architecture.md#dynamic-llm-model-management)).
+[Dynamic LLM Model Management](./system_architecture.md#model-and-provider-management)).
 
 To make a new provider's models selectable in the normal dropdown, the remote
 `models.json` must contain an entry for its provider id. Until then the combo
@@ -284,7 +285,7 @@ call `_record_usage(..., merge=True)` for the later reports.
 
 There is no automated test suite. After adding a provider:
 
-1. Start the app. The provider appears in Settings → AI Provider without any
+1. Start the app. The provider appears in Settings → Providers without any
    registration step.
 2. Its page renders exactly the fields from `get_ui_schema()`.
 3. Enter a key and model, select it as the active provider, and send a Chat

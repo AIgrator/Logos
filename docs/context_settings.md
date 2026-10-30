@@ -223,17 +223,17 @@ What happens then:
 
 The journal, the chat window and the session files keep the full history. Only the model-facing view is shortened. **Compact now** in the Session context dialog works regardless of this switch.
 
-**Auto-compact token cap** — *Settings.json key: `auto_compact_tokens` · Default: `200000` · Range: 0–1,000,000, step 10,000*
+**When to change it:** leave it on for long autonomous runs so the agent does not stall at the window limit mid-task. Turn it off if you want to decide yourself when the history is compacted, accepting that a very long task can reach the model limit.
+
+**Auto-compact at** — *Settings.json key: `auto_compact_tokens` · Default: `200000` · Range: 0–1,000,000, step 10,000*
 
 Automatic compaction also fires when the context reaches this size, even though a 1M+ token window is far from full: smaller requests are cheaper and faster, and the summary keeps the state that matters. `0` disables the cap and leaves only the free-space rule.
 
 **When to change it:** on 1M+ windows keep 200,000; cost-sensitive setups can use 100,000–150,000 for more frequent, smaller requests; set 0 if you want the model to see as much of the raw history as possible.
 
-**When to change it:** leave it on for long autonomous runs so the agent does not stall at the window limit mid-task. Turn it off if you want to decide yourself when the history is compacted, accepting that a very long task can reach the model limit.
-
 ## How the options interact
 
-- **Rolling handoff summary** is the master switch for options 5–7, 11 and 12. The four history-trimming options are independent of it, and *Compact now* is not gated by it.
+- **Rolling handoff summary** is the master switch for options 5–7 and 11. The four history-trimming options are independent of it, and *Compact now* is not gated by it.
 - **Auto-compact** needs both its own switch and the master switch. It uses the summary, so it also depends on the summarizer settings.
 - The **refresh threshold and budget** only schedule background updates. Mode switches, model switches, leaving a session, manual compaction and auto-compaction force a refresh when they need a current summary.
 - History trimming reduces what is sent but never touches the journal, the summary or the UI. Summary settings never change the history itself; they only change the compact replacement for it.
@@ -252,8 +252,10 @@ Automatic compaction also fires when the context reaches this size, even though 
 
 ## Where to see what happened
 
-- **Context indicator** next to the Send button: percentage of the model window in use. Hover it for the token counts and whether they are provider-reported or estimated.
-- **Session context dialog** (click the indicator): current fill, model window, usage of the latest request and session totals, the breakdown of the model payload, the compaction boundary, and the **Compact now** button with an optional compaction focus. A summary line above the text states whether the rolling summary came from the model or the deterministic fallback (with provider/model and update time), how many journal events it covers, and whether a refresh is due, running or paused.
+- **Context indicator** next to the Send button: percentage of the model window in use, colored at 80% (warning) and 95% (error). Hover it for the token counts, whether they are provider-reported or estimated, and — when the last answer reported a cache — the read/write split. Click it to open the **Context window** popover.
+- **Context window popover**: the percentage, `used / window tokens · source`, a segmented bar over the next request's estimated composition, and the rows `System prompt`, `System tools`, `Skills (N)`, `Messages`, `Other`. **Compress context** runs the same manual compaction as **Compact now**; **Session context…** opens the full dialog. Shares are estimates scaled to the provider-reported total, so they add up to the shown percentage. Vision, whose request is assembled elsewhere, shows a single share and a note instead of rows.
+- **Right panel ring**: the same fill percentage in the panel header, under the chevron when the panel is collapsed. Clicking it opens the same popover.
+- **Session context dialog**: current fill, model window, usage of the latest request and session totals, the breakdown of the model payload, the compaction boundary, and the **Compact now** button with an optional compaction focus. A summary line above the text states whether the rolling summary came from the model or the deterministic fallback (with provider/model and update time), how many journal events it covers, and whether a refresh is due, running or paused.
 - **Session journal** (from the session menu): the full, untrimmed record of every event.
 - On disk: `.logos/sessions/<name>.jsonl`, `<name>.summary.md` and `<name>.summary.json` inside the active project.
 

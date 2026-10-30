@@ -113,6 +113,9 @@ Logos supports a wide range of models from leading AI providers. You can easily 
 
 > **Stay updated!** We constantly monitor for new model releases. You can get the latest supported models by clicking **Update model lists** at the bottom of Settings → Providers. This ensures you always have access to the most modern and powerful LLMs.
 
+> [!NOTE]
+> **Reasoning effort.** When the model catalogue publishes effort levels for a model, a badge next to the model picker shows the active level (for example **High**). Click it to choose another level; the choice is stored per provider and model and sent with every request. Models without published levels hide the badge.
+
 
 ### Adding Files to Context
 
@@ -120,7 +123,7 @@ In all modes, you can add file content to the context by simply typing `@` and s
 
 ### Context and Memory Settings
 
-As a session grows, Logos keeps the full history on disk and sends the model a trimmed view plus a rolling summary. See the [**Context settings guide**](./docs/context_settings.md) for what each option in Settings → Context does, its default, and when to change it.
+As a session grows, Logos keeps the full history on disk and sends the model a trimmed view plus a rolling summary. The composer shows how full the context window is; click the indicator (or the ring in the right panel) to open a **Context window** popover with the token breakdown and a **Compress context** button. See the [**Context settings guide**](./docs/context_settings.md) for what each option in Settings → Context does, its default, and when to change it.
 
 ### Skills
 
@@ -129,6 +132,18 @@ Terminal and Browser can follow Agent Skills — instruction packages in the ope
 ### MCP servers
 
 Terminal can use tools from [Model Context Protocol](https://modelcontextprotocol.io) servers — local processes or remote Streamable HTTP endpoints that advertise their own tools. Servers are configured in Settings → MCP Servers or in the project's `.mcp.json`, project servers must be trusted before they start, and every call passes the Terminal access policy. See the [**MCP guide**](./docs/mcp.md) for configuration, secrets, permissions, limits and troubleshooting.
+
+### Terminal access permissions
+
+Every Terminal action passes an access policy before it runs. Settings → Terminal → Access permissions selects **Ask every time** (the default: read-only commands and edits inside the project run silently, everything else asks), **Auto approve** (only risky actions ask) or **Full access** (never asks). A denied action appears as a warning card and is reported to the model, which is told not to retry it.
+
+### Workspace panel
+
+The collapsible right panel is available in every mode. **Session** shows context statistics and a recap of the current session; **Activity** lists loaded skills, invoked tools and attached files; **Files** is a read-only tree of the active project; **Git** appears in Terminal mode and lists uncommitted changes with line counts. Clicking a file opens it in the detected editor.
+
+### Suggested next actions
+
+After a Terminal, Browser or Vision answer, the assistant can offer up to three clickable next-step suggestions. Clicking one sends it as a normal message; suggestions are never sent on their own, and you can ignore them.
 
 ## Features (Tools)
 
@@ -143,7 +158,7 @@ Vision mode does not use a local tool manifest. Actions come from the provider's
 *   **Pointer**: `click`, `double_click`, `triple_click`, `move`, `drag`, `left_mouse_down`, `left_mouse_up`, `scroll`, `cursor_position`.
 *   **Keyboard**: `type`, `keypress`, `hold_key`.
 *   **Observation**: `screenshot`, `zoom`.
-*   **Control**: `wait`, plus the `ask_user` function tool for questions that need a human answer.
+*   **Control**: `wait`, `launch_app` (starts an app from the allowed Applications list), plus the `ask_user` function tool for questions that need a human answer.
 
 #### Terminal Mode Tools
 *   **File System**: `list_directory`, `read_files`, `write_file`, `search_file_content`, `find_files`, `create_directory`, `delete_files`, `move_files`, `copy_files`, `path_exists`.
@@ -151,6 +166,7 @@ Vision mode does not use a local tool manifest. Actions come from the provider's
 *   **System**: `execute_shell` (incl. background jobs), `poll_shell_job`, `stop_shell_job`, `wait_seconds`.
 *   **Web Tools**: `web_search`, `web_fetchs`, `download_file`.
 *   **MCP**: `mcp_list`, `mcp_get`, `mcp_call` for tools exposed by configured MCP servers (see the [MCP guide](./docs/mcp.md)).
+*   **Skills**: `use_skill` loads an installed Agent Skill on demand (see the [skills guide](./docs/skills.md)).
 *   **User Interaction**: `display_message`, `communicate_to_user`.
 *   **General**: `finish`, `get_clipboard_content`.
 
@@ -159,6 +175,7 @@ Vision mode does not use a local tool manifest. Actions come from the provider's
 *   **Observation**: `browser_snapshot` (numbered element refs), `browser_screenshot` (with ref badges), `browser_read`, `browser_find`.
 *   **Interaction**: `browser_click`, `browser_fill`, `browser_select_option`, `browser_hover`, `browser_press`, `browser_handle_dialog`, `browser_wait_for`.
 *   **Attachments**: `read_files`, `list_directory`, `search_file_content` (read-only filesystem access for files attached by reference).
+*   **Skills**: `use_skill` loads an installed Agent Skill on demand (see the [skills guide](./docs/skills.md)).
 *   **User Interaction**: `communicate_to_user`, `finish`.
 
 ---

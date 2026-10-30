@@ -117,7 +117,7 @@ before the UI exists. It:
 
 1. Deep-copies `SettingsManager.PROVIDER_CONFIG`.
 2. Loads `cache/models.json` (downloaded from the models repository; see
-   [Dynamic LLM Model Management](./system_architecture.md#dynamic-llm-model-management)).
+   [Dynamic LLM Model Management](./system_architecture.md#model-and-provider-management)).
 3. Merges each provider's `models` or `models_by_provider` list into the copy.
 4. Applies built-in fallback lists when a cached provider list is empty or
    incomplete, so dropdowns never go blank.

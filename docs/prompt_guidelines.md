@@ -25,9 +25,16 @@ Assembled by `Brain.get_terminal_prompts()` in
 
 Placeholders:
 
-- system: `{available_tools}`, `{response_format_instructions}`
+- system: `{available_tools}`, `{available_skills}`, `{available_mcp_servers}`,
+  `{response_format_instructions}`
 - user: `{user_request}`, `{os_info}`, `{current_directory}`,
   `{directory_listing_command}`, `{directory_listing}`, `{history_str}`
+
+`{available_skills}` is the `### Available Skills ###` block: the name and
+description of every installed skill under a 6,000-character budget.
+`{available_mcp_servers}` is the live MCP server list (transport, state, tool
+count and a one-line description, at most 12 servers). Both fall back to a
+short "none configured" line when empty.
 
 `{available_tools}` is the generated `cache/terminal/tools.txt`;
 `{response_format_instructions}` is the generated instructions + example for
@@ -50,8 +57,10 @@ Assembled by `Brain.get_browser_prompts()`.
 
 Placeholders:
 
-- system: `{available_tools}`, `{response_format_instructions}`
+- system: `{available_tools}`, `{available_skills}`, `{response_format_instructions}`
 - user: `{user_request}`, `{os_info}`, `{current_url}`, `{history_str}`
+
+Browser has no MCP block: MCP tools belong to Terminal only.
 
 `{available_tools}` comes from `cache/browser/tools.txt`; the response format
 comes from `cache/browser/response_formats.json` for `browser_tool_code`.
