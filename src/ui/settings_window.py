@@ -1,15 +1,19 @@
-"""
-This module defines the settings window for the application.
+"""Full-window settings page.
+
+The page replaces the chat workspace (or the home screen) inside the main
+window: a labelled sidebar on the left, one scrollable page per section, no
+OK/Cancel. Every edit is saved shortly after it is made (the Providers and
+MCP pages stage their own writes in the settings manager), so leaving the
+page never discards anything.
 """
 import copy
 import os
 import logging
 
+import qtawesome as qta
 from PySide6.QtWidgets import (
-    QDialog,
     QVBoxLayout,
     QWidget,
-    QDialogButtonBox,
     QLabel,
     QHBoxLayout,
     QGroupBox,
@@ -26,20 +30,20 @@ from PySide6.QtWidgets import (
     QButtonGroup,
     QStackedWidget,
     QScrollArea,
-    QToolButton,
     QFrame,
     QRadioButton,
     QMessageBox,
     QPlainTextEdit,
 )
-from PySide6.QtCore import Qt, QSize, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices, QIcon, QPalette
+from PySide6.QtCore import Qt, QSize, QTimer, QUrl, Signal
+from PySide6.QtGui import QDesktopServices, QIcon, QPalette, QKeySequence, QShortcut
 from src.ui.theme_manager import (
     LIGHT_THEME,
     DARK_THEME,
     create_dark_palette,
     create_light_palette,
 )
+from src.ui.navigation import _theme_colors
 
 from settings_manager import SettingsManager
 from context import skills as skills_store
@@ -52,7 +56,7 @@ from src.apps.installed_apps import AppScanner
 from src.ui.widgets.providers_page import ProvidersPage
 from src.ui.skill_catalog_dialog import SkillCatalogDialog
 from src.ui.mcp_settings_page import MCPSettingsPage
-from src.ui.utils import CustomToolTipManager, NavButtonHoverFilter
+from src.ui.utils import CustomToolTipManager
 
 CONTEXT_SETTINGS_DOC_URL = (
     "https://github.com/AIgrator/Logos/blob/main/docs/context_settings.md")
@@ -72,139 +76,213 @@ def _read_license_text() -> str:
         return "MIT License"
 
 
-class SettingsWindow(QDialog):
+class SettingsPage(QWidget):
+    """Full-window settings: labelled sections, live autosave, Back to app."""
+
+    back_requested = Signal()
+
+    SIDEBAR_WIDTH = 248
+    # Settings read as a compact column instead of spanning the whole window.
+    CONTENT_MAX_WIDTH = 880
+    # The rail and the content travel as one centered block; the 56 px are
+    # the content page's left and right margins, so the rail sits right next
+    # to the column instead of being pinned to the window edge.
+    BODY_MAX_WIDTH = SIDEBAR_WIDTH + CONTENT_MAX_WIDTH + 56
+    # Nav groups in display order; a separator line sits between groups.
+    # Modes follow the mode selector order: Terminal, Browser, Vision.
+    NAV_GROUPS = (
+        ("providers",),
+        ("common", "hotkeys", "context"),
+        ("terminal", "browser", "vision"),
+        ("skills", "mcp"),
+    )
+    SAVE_DELAY_MS = 400
 
     def __init__(self, settings_manager: SettingsManager, controller, parent=None):
         super().__init__(parent)
         self.settings_manager = settings_manager
         self.controller = controller
-        self.setWindowTitle("Settings")
-        self.setWindowIcon(QIcon("assets/ico.ico"))
-        self.setMinimumWidth(400)
-        self.setModal(True)
+        self.setObjectName("SettingsPage")
 
         self.tooltip_manager = CustomToolTipManager(self)
         self._context_doc_links = []
-        # QDialog turns a window close into reject(); MCP edits are already
-        # saved when made, so only an explicit Cancel reverts them.
-        self._closing_settings = False
+        self._loading = False
+        self._saved_state = {}
+        self._fonts_scheduled = False
 
-        # Main layout
-        self.layout = QVBoxLayout(self)
-        self.layout.setContentsMargins(0, 0, 0, 10)
-        self.layout.setSpacing(0)
+        root = QHBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        # Content layout
-        content_layout = QHBoxLayout()
-        content_layout.setSpacing(0)
-        content_layout.setContentsMargins(0, 0, 0, 0)
+        body = QWidget()
+        body.setObjectName("SettingsBody")
+        body.setMaximumWidth(self.BODY_MAX_WIDTH)
+        body_layout = QHBoxLayout(body)
+        body_layout.setContentsMargins(0, 0, 0, 0)
+        body_layout.setSpacing(0)
+        body_layout.addWidget(self._create_nav_bar())
 
-        # Navigation bar on the left
-        self.nav_bar = self._create_nav_bar()
-        content_layout.addWidget(self.nav_bar)
-
-        # Separator line
-        line = QFrame()
-        line.setFrameShape(QFrame.VLine)
-        line.setFrameShadow(QFrame.Sunken)
-        content_layout.addWidget(line)
-
-        # Section pages on the right (one visible at a time)
         _, self.sections = self._create_content_area()
-        content_layout.addWidget(self.section_stack)
+        body_layout.addWidget(self.section_stack, 1)
 
-        self.layout.addLayout(content_layout)
+        # The dominant stretch grows the body to its cap before the side
+        # stretches claim the rest, so the block stays centered.
+        root.addStretch(1)
+        root.addWidget(body, 1000)
+        root.addStretch(1)
 
-        # OK and Cancel buttons
-        self.button_box = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
-        self.button_box.accepted.connect(self.save_and_accept)
-        self.button_box.rejected.connect(self.reject)
-        self.layout.addWidget(self.button_box)
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(self.SAVE_DELAY_MS)
+        self._save_timer.timeout.connect(self._apply_changes)
 
-        # Defer height adjustment to ensure all widgets are initialized
-        QTimer.singleShot(0, self._adjust_window_height)
+        self._wire_autosave()
+        self.providers_page.changed.connect(self._schedule_save)
 
-        self.load_settings()
+        self._escape_shortcut = QShortcut(QKeySequence("Esc"), self)
+        self._escape_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+        self._escape_shortcut.activated.connect(self._on_escape)
 
-        self.controller.theme_manager.theme_changed.connect(self._update_icon_colors)
+        self.controller.theme_manager.theme_changed.connect(self._apply_style)
         self.controller.theme_manager.theme_changed.connect(self._refresh_context_doc_links)
-        self._update_icon_colors()
+        self._apply_style()
 
-    def _update_icon_colors(self):
-        """Updates all icon colors based on the current theme."""
-        # The NavButtonHoverFilter will handle nav button icon updates automatically.
-        pass
+        first_button = self.nav_button_group.buttons()[0]
+        first_button.setChecked(True)
+        self._show_section(first_button)
 
-    def _update_all_nav_button_icons(self):
-        """Forces an update of all navigation button icons."""
-        for button in self.nav_button_group.buttons():
-            # The event filter is a child of the button
-            filter_instance = button.findChild(NavButtonHoverFilter)
-            if filter_instance:
-                filter_instance.force_update()
-
-    def _adjust_window_height(self):
-        """Adjusts the window height to fit the navigation bar and buttons."""
-        nav_height = self.nav_bar.sizeHint().height()
-        button_box_height = self.button_box.sizeHint().height()
-        main_margins = self.layout.contentsMargins()
-
-        # Calculate total height with some padding
-        total_height = nav_height + button_box_height + main_margins.top() + main_margins.bottom() + 20
-
-        self.setFixedHeight(total_height)
+    # --- sidebar ----------------------------------------------------------
 
     def _create_nav_bar(self):
-        """Creates the left-side navigation bar with icon buttons."""
-        nav_widget = QWidget()
-        nav_layout = QVBoxLayout(nav_widget)
-        nav_layout.setContentsMargins(5, 10, 5, 10)
-        nav_layout.setSpacing(5)
-        nav_layout.setAlignment(Qt.AlignTop)
+        """Left rail: Back, grouped section buttons, About pinned."""
+        self.nav_panel = QWidget()
+        self.nav_panel.setObjectName("SettingsNav")
+        self.nav_panel.setFixedWidth(self.SIDEBAR_WIDTH)
+        layout = QVBoxLayout(self.nav_panel)
+        layout.setContentsMargins(6, 8, 6, 8)
+        layout.setSpacing(6)
 
-        self.nav_button_group = QButtonGroup(self)
-        self.nav_button_group.setExclusive(True)
+        self.back_button = QPushButton("Back to application")
+        self.back_button.setObjectName("settingsBack")
+        self.back_button.setToolTip("Close settings and return to the workspace (Esc)")
+        self.back_button.clicked.connect(self._request_back)
+        layout.addWidget(self.back_button)
 
-        # Define sections: icon, tooltip, and a placeholder for the widget
         self.nav_sections = {
             "providers": ("fa5s.brain", "Providers"),
             "common": ("fa5s.cogs", "Common"),
             "hotkeys": ("fa5s.keyboard", "Hotkeys"),
-            "browser": ("fa5s.globe", "Browser"),
-            "terminal": ("fa5s.terminal", "Terminal"),
-            "mcp": ("fa5s.server", "MCP Servers"),
-            "skills": ("fa5s.puzzle-piece", "Skills"),
-            "vision": ("fa5s.robot", "Vision"),
-            "compact": ("fa5s.compress-arrows-alt", "Compact Mode"),
-            "apps": ("fa5s.th-large", "Applications"),
             "context": ("fa5s.file-alt", "Context"),
+            "terminal": ("fa5s.terminal", "Terminal"),
+            "browser": ("fa5s.globe", "Browser"),
+            "vision": ("fa5s.robot", "Vision"),
+            "skills": ("fa5s.puzzle-piece", "Skills"),
+            "mcp": ("fa5s.server", "MCP Servers"),
             "about": ("fa5s.info-circle", "About"),
         }
 
-        for key, (icon_name, tooltip) in self.nav_sections.items():
-            if key == "about":
-                # Keep About pinned to the bottom of the navigation bar.
-                nav_layout.addStretch(1)
-            button = QToolButton()
-            # The icon is now set and managed by the NavButtonHoverFilter
-            button.setIconSize(QSize(24, 24))
-            button.setCheckable(True)
-            button.setProperty("section_key", key)
-            button.setStyleSheet("""
-                QToolButton { border: none; padding: 5px; border-radius: 4px; }
-                QToolButton:checked { background-color: palette(highlight); }
-            """)
+        nav_host = QWidget()
+        nav_layout = QVBoxLayout(nav_host)
+        nav_layout.setContentsMargins(0, 0, 0, 0)
+        nav_layout.setSpacing(1)
 
-            # Install the new filter to manage icon colors for different states
-            button.installEventFilter(NavButtonHoverFilter(self.controller.theme_manager, icon_name, parent=button))
-
-            self.tooltip_manager.install(button, tooltip)
-            nav_layout.addWidget(button)
-            self.nav_button_group.addButton(button)
-
+        self.nav_button_group = QButtonGroup(self)
+        self.nav_button_group.setExclusive(True)
         self.nav_button_group.buttonClicked.connect(self._on_nav_button_clicked)
 
-        return nav_widget
+        self._nav_buttons = []
+        for group_index, group in enumerate(self.NAV_GROUPS):
+            if group_index:
+                nav_layout.addWidget(self._create_nav_separator())
+            for key in group:
+                nav_layout.addWidget(self._create_nav_button(key))
+        # Keep the buttons at their natural height on tall windows.
+        nav_layout.addStretch(1)
+
+        nav_scroll = QScrollArea()
+        nav_scroll.setWidgetResizable(True)
+        nav_scroll.setFrameShape(QFrame.NoFrame)
+        nav_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        nav_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        nav_scroll.setWidget(nav_host)
+        layout.addWidget(nav_scroll, 1)
+
+        layout.addWidget(self._create_nav_separator())
+        layout.addWidget(self._create_nav_button("about"))
+
+        return self.nav_panel
+
+    def _create_nav_button(self, key):
+        icon_name, label = self.nav_sections[key]
+        button = QPushButton(label)
+        button.setObjectName("settingsNavButton")
+        button.setCheckable(True)
+        button.setProperty("section_key", key)
+        button.setProperty("icon_name", icon_name)
+        button.setIconSize(QSize(16, 16))
+        button.setCursor(Qt.PointingHandCursor)
+        self.nav_button_group.addButton(button)
+        self._nav_buttons.append((button, label))
+        return button
+
+    def _create_nav_separator(self):
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setObjectName("settingsNavSeparator")
+        line.setFixedHeight(1)
+        return line
+
+    def _apply_style(self):
+        """Re-tints icons and rebuilds the rail sheet for the current theme."""
+        colors = _theme_colors(self.controller.theme_manager)
+        self.nav_panel.setStyleSheet(f"""
+            QWidget#SettingsNav {{
+                background: {colors['panel']};
+                border-right: 1px solid {colors['border']};
+            }}
+            QFrame#settingsNavSeparator {{ background: {colors['border']}; border: none; }}
+            QPushButton#settingsNavButton {{
+                background: transparent; color: {colors['text']};
+                border: none; border-radius: 7px;
+                padding: 7px 11px; text-align: left;
+            }}
+            QPushButton#settingsNavButton:hover {{ background: {colors['hover']}; }}
+            QPushButton#settingsNavButton:checked {{
+                background: {colors['selected']}; font-weight: 600;
+            }}
+            QPushButton#settingsBack {{
+                background: transparent; color: {colors['muted']};
+                border: none; border-radius: 7px;
+                padding: 7px 11px; text-align: left;
+            }}
+            QPushButton#settingsBack:hover {{
+                background: {colors['hover']}; color: {colors['text']};
+            }}
+            QScrollArea {{ background: transparent; border: none; }}
+            QScrollBar:vertical {{
+                background: transparent; width: 6px; margin: 2px 0;
+            }}
+            QScrollBar::handle:vertical {{
+                background: {colors['border']}; min-height: 24px;
+                border-radius: 3px;
+            }}
+            QScrollBar::handle:vertical:hover {{ background: {colors['muted']}; }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0; background: none; border: none;
+            }}
+            QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical {{
+                background: none;
+            }}
+            QScrollBar:horizontal {{ height: 0; }}
+        """)
+        self.back_button.setIcon(
+            qta.icon("fa5s.arrow-left", color=colors["muted"]))
+        icon_color = colors["text"]
+        for button, _label in self._nav_buttons:
+            button.setIcon(
+                qta.icon(button.property("icon_name"), color=icon_color))
+
+    # --- content ----------------------------------------------------------
 
     def _create_content_area(self):
         """Creates the right-side area: one independent page per section.
@@ -212,7 +290,9 @@ class SettingsWindow(QDialog):
         Each nav button shows ONLY its section (QStackedWidget). Every page
         is wrapped in its own scroll area whose vertical bar appears only
         when that section doesn't fit the height (AsNeeded) — no shared
-        scrollbar anymore.
+        scrollbar anymore. Inside, the section sits in a column capped at
+        CONTENT_MAX_WIDTH and centered, so settings stay compact instead of
+        stretching across a wide window.
         """
         sections = {
             "providers": self._create_providers_section(),
@@ -223,8 +303,6 @@ class SettingsWindow(QDialog):
             "mcp": self._create_mcp_section(),
             "skills": self._create_skills_section(),
             "vision": self._create_vision_section(),
-            "compact": self._create_compact_mode_section(),
-            "apps": self._create_apps_section(),
             "context": self._create_context_section(),
             "about": self._create_about_section(),
         }
@@ -238,10 +316,18 @@ class SettingsWindow(QDialog):
             page.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
             page.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
             holder = QWidget()
-            holder_layout = QVBoxLayout(holder)
-            holder_layout.setContentsMargins(15, 15, 15, 15)
-            holder_layout.setAlignment(Qt.AlignTop)
-            holder_layout.addWidget(sections[key])
+            row = QHBoxLayout(holder)
+            row.setContentsMargins(28, 22, 28, 22)
+            row.setSpacing(0)
+            column = QWidget()
+            column.setMaximumWidth(self.CONTENT_MAX_WIDTH)
+            column_layout = QVBoxLayout(column)
+            column_layout.setContentsMargins(0, 0, 0, 0)
+            column_layout.setSpacing(0)
+            column_layout.addWidget(sections[key])
+            row.addStretch(1)
+            row.addWidget(column, 1000)
+            row.addStretch(1)
             page.setWidget(holder)
             self.section_stack.addWidget(page)
             self.section_order.append(key)
@@ -249,50 +335,128 @@ class SettingsWindow(QDialog):
         self.section_stack.setMinimumWidth(400)
         return self.section_stack, sections
 
-    def _on_nav_button_clicked(self, button):
+    def _show_section(self, button):
         """Shows only the selected section's page."""
         section_key = button.property("section_key")
         if section_key in self.section_order:
             self.section_stack.setCurrentIndex(
                 self.section_order.index(section_key))
 
-        self._update_all_nav_button_icons()
+    def _on_nav_button_clicked(self, button):
+        self._show_section(button)
+
+    # --- lifecycle and autosave ------------------------------------------
 
     def showEvent(self, event):
-        """Reload settings and set initial state when shown."""
-        self.load_settings()
-        # Set the first button as checked by default
-        first_button = self.nav_button_group.buttons()[0]
-        first_button.setChecked(True)
-        self._on_nav_button_clicked(first_button)
-        if not getattr(self, "_fonts_scheduled", False):
+        """Reload settings each time the page becomes visible."""
+        super().showEvent(event)
+        self._reload()
+        if not self._fonts_scheduled:
             # Registering every OS font with Qt takes ~0.8 s; do it after the
-            # window is painted so opening Settings never waits for it.
+            # page is painted so opening Settings never waits for it.
             self._fonts_scheduled = True
             QTimer.singleShot(100, self.font_combo.populate_fonts)
-        super().showEvent(event)
 
-    def closeEvent(self, event):
-        self.providers_page.rollback()
+    def hideEvent(self, event):
+        """Persist pending edits when the page is left or the app closes."""
+        self.flush_changes()
         page = getattr(self, "mcp_page", None)
         if page is not None:
             page.commit()
-        self._closing_settings = True
-        try:
-            super().closeEvent(event)
-        finally:
-            self._closing_settings = False
+        super().hideEvent(event)
 
-    def reject(self):
-        self.providers_page.rollback()
-        if not self._closing_settings:
-            self._discard_mcp_changes()
-        super().reject()
+    def _on_escape(self):
+        self._request_back()
 
-    def _discard_mcp_changes(self):
+    def _request_back(self):
+        self.flush_changes()
         page = getattr(self, "mcp_page", None)
         if page is not None:
-            page.rollback()
+            page.commit()
+        self.back_requested.emit()
+
+    def _reload(self):
+        """Loads values without autosaving the widgets while they change."""
+        self._loading = True
+        try:
+            self.load_settings()
+        finally:
+            self._loading = False
+        self._saved_state = copy.deepcopy(self._collect_settings_from_ui())
+
+    def _wire_autosave(self):
+        """Schedules a save whenever a value control changes."""
+        for signal in (
+            self.max_retries_spinbox.valueChanged,
+            self.retry_delay_spinbox.valueChanged,
+            self.max_errors_spinbox.valueChanged,
+            self.prevent_multiple_instances_checkbox.toggled,
+            self.light_theme_radio.toggled,
+            self.dark_theme_radio.toggled,
+            self.block_ads_checkbox.toggled,
+            self.browser_headless_checkbox.toggled,
+            self.browser_timeout_spinbox.valueChanged,
+            self.terminal_access_combo.currentIndexChanged,
+            self.shell_timeout_spinbox.valueChanged,
+            self.shell_detach_spinbox.valueChanged,
+            self.allow_shell_commands_checkbox.toggled,
+            self.allow_system_surfaces_checkbox.toggled,
+            self.restrict_to_allowed_apps_checkbox.toggled,
+            self.max_turns_spinbox.valueChanged,
+            self.shot_width_spinbox.valueChanged,
+            self.save_trace_log_checkbox.toggled,
+            self.save_pre_intent_checkbox.toggled,
+            self.save_post_checkbox.toggled,
+            self.font_combo.currentIndexChanged,
+            self.font_size_spinbox.valueChanged,
+            self.text_padding_spinbox.valueChanged,
+            self.history_keep_last_spinbox.valueChanged,
+            self.history_max_chars_spinbox.valueChanged,
+            self.history_dedup_checkbox.toggled,
+            self.history_trim_tracebacks_checkbox.toggled,
+            self.handoff_enabled_checkbox.toggled,
+            self.handoff_mode_switch_checkbox.toggled,
+            self.handoff_model_switch_checkbox.toggled,
+            self.summary_max_tokens_spinbox.valueChanged,
+            self.summary_threshold_spinbox.valueChanged,
+            self.summary_refresh_tokens_spinbox.valueChanged,
+            self.auto_compact_checkbox.toggled,
+            self.auto_compact_tokens_spinbox.valueChanged,
+            self.summary_model_lineedit.textChanged,
+            self.compact_mode_width_spinbox.valueChanged,
+            self.compact_mode_height_spinbox.valueChanged,
+            self.position_button_group.buttonClicked,
+            self.toggle_mode_hotkey.textChanged,
+            self.pause_resume_hotkey.textChanged,
+            self.stop_execution_hotkey.textChanged,
+            self.pause_for_feedback_hotkey.textChanged,
+            self.cancel_request_hotkey.textChanged,
+            self.apps_list_widget.itemChanged,
+        ):
+            signal.connect(self._schedule_save)
+
+    def _schedule_save(self, *_args):
+        if self._loading:
+            return
+        self._save_timer.start()
+
+    def flush_changes(self):
+        """Writes a pending edit immediately (leaving the page, app close)."""
+        if self._save_timer.isActive():
+            self._apply_changes()
+
+    def _apply_changes(self):
+        """Persists the current widget values; no-op when nothing changed."""
+        self._save_timer.stop()
+        if self._loading:
+            return
+        collected = self._collect_settings_from_ui()
+        if collected == self._saved_state:
+            return
+        self._saved_state = copy.deepcopy(collected)
+        self.settings_manager.set_many(collected)
+        # Provider deletions prune their keychain entries once saved.
+        self.providers_page.commit()
 
     def load_settings(self):
         """Loads settings from the manager and updates the UI."""
@@ -533,21 +697,11 @@ class SettingsWindow(QDialog):
             "search": search_settings
         }
 
-    def save_and_accept(self):
-        """Saves settings."""
-        self.all_settings_to_save = self._collect_settings_from_ui()
-        self.settings_manager.set_many(self.all_settings_to_save)
-        self.providers_page.commit()
-        page = getattr(self, "mcp_page", None)
-        if page is not None:
-            page.commit()
-        self.hide()
-
     def _create_providers_section(self):
         """Provider connection and activation page."""
         self.providers_page = ProvidersPage(self.settings_manager)
         # The page's sheet resolves palette() roles at polish time; theme
-        # switching in Common must repolish it while this window is open.
+        # switching in Common must repolish it while the page is open.
         self.controller.theme_manager.theme_changed.connect(
             self.providers_page.repolish)
         return self.providers_page
@@ -867,7 +1021,7 @@ class SettingsWindow(QDialog):
         return group
 
     def _create_vision_section(self):
-        """Vision page: agent-loop tunables; the model lives on Providers."""
+        """Vision page: agent loop, compact window and allowed applications."""
         page = QWidget()
         page_layout = QVBoxLayout(page)
         page_layout.setContentsMargins(0, 0, 0, 0)
@@ -879,6 +1033,8 @@ class SettingsWindow(QDialog):
         model_note.setWordWrap(True)
         page_layout.addWidget(model_note)
         page_layout.addWidget(self._create_vision_agent_loop_group())
+        page_layout.addWidget(self._create_compact_mode_section())
+        page_layout.addWidget(self._create_apps_section())
         page_layout.addStretch(1)
         return page
 
@@ -1175,7 +1331,12 @@ class SettingsWindow(QDialog):
         return label
 
     def _create_about_section(self):
-        """Creates the About section pinned to the bottom of the navigation."""
+        """About page kept at its natural height, pinned in the navigation."""
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(12)
+
         group = QGroupBox("About")
         layout = QVBoxLayout(group)
         layout.setSpacing(14)
@@ -1231,7 +1392,9 @@ class SettingsWindow(QDialog):
         license_box.setToolTip("MIT License (LICENSE file in the project root)")
         layout.addWidget(license_box)
 
-        return group
+        page_layout.addWidget(group)
+        page_layout.addStretch(1)
+        return page
 
     def _create_browser_section(self):
         """Creates the Browser settings section."""

@@ -27,7 +27,6 @@ from settings_manager import SettingsManager
 from ui.manager import UIManager
 from ui.text_render import render_text
 from ui.theme_manager import ThemeManager
-from ui.settings_window import SettingsWindow
 from handlers.chat_handler import ChatHandler
 from handlers.vision_handler import VisionHandler
 from handlers.terminal_handler import TerminalHandler
@@ -165,7 +164,6 @@ class AppController(QObject):
         self.chat_queue = []
         self.thinking_timer = QTimer(self)
         self.thinking_time = 0
-        self.settings_window = None
         self._shutting_down = False
         self._load_project_session()
         self._load_handoff_state()
@@ -3722,11 +3720,7 @@ class AppController(QObject):
             self._update_attachment_menu()
 
     def _show_settings_window(self):
-        if not self.settings_window:
-            self.settings_window = SettingsWindow(self.settings_manager, self)
-        self.settings_window.show()
-        self.settings_window.raise_()
-        self.settings_window.activateWindow()
+        self.ui.show_settings_page()
 
     def _model_context_payload(self) -> dict:
         """Components of the next request to the active model."""

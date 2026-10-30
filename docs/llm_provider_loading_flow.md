@@ -244,11 +244,13 @@ holds the agent-loop tunables and points here.
 The Providers page stages its edits in the settings manager
 (`set_many(..., save=False, emit=False)`). Connect, Use, custom-provider
 add/edit/delete, the active-provider switch and the Vision-model choice apply
-immediately in memory so the page stays in sync, while a snapshot
-(`active_provider`, `llm_providers`, `custom_providers`, `mode_models`) taken
-before the first change is kept. Cancel and window close restore that snapshot;
-OK writes the batch and only then removes keyring keys belonging to deleted
-custom providers. The installer's initial setup still uses
+immediately in memory so the page stays in sync, and each change emits
+`ProvidersPage.changed`. The full-window settings page listens and autosaves
+the collected settings (`active_provider`, `llm_providers`, `custom_providers`,
+`mode_models` and the other sections) after its 400 ms debounce; after each
+write it calls `providers_page.commit()`, which removes keyring keys belonging
+to deleted custom providers. There is no OK/Cancel — leave settings with Back or
+Esc. The installer's initial setup still uses
 `LLMProviderWidget`, which builds every provider page up front.
 
 ---

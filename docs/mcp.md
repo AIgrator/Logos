@@ -47,11 +47,11 @@ Open `Settings → MCP Servers`.
 
 - **Add Server...** creates a server. A **local process (stdio)** server has a command, one argument per line, an optional working directory and environment variables. A **remote (Streamable HTTP)** server has a URL and optional headers. The legacy SSE transport is not supported.
 - **Import...** accepts a pasted or opened JSON file in the Claude Desktop / VS Code shape (`{"mcpServers": {...}}`) or a bare map of names to definitions.
-- **Edit...** and **Remove** work on user servers. Removing a server deletes its stored secrets when you press **OK** or close the window.
+- **Edit...** and **Remove** work on user servers. Removing a server deletes its stored secrets when you leave settings.
 - The checkbox in the Server column enables or disables a server: disabled servers stay configured but are not started and their tools are not offered.
 - `Tool timeout` (default 60 s) bounds one call; `Connect timeout` (default 30 s) bounds the first connection and the initial tool listing.
 
-Changes are saved as you make them, so closing the window or the app keeps them. **Cancel** restores the configuration from before you opened the page. Secrets of removed servers are deleted from the keychain when you press **OK** or close the window.
+Changes are saved as you make them, so leaving the page (**Back to application** or Esc) or closing the app keeps them. There is no OK or Cancel. Secrets of removed servers are deleted from the keychain when you leave settings.
 
 ## Project servers
 

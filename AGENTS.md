@@ -196,6 +196,38 @@ directory) is the terminal/browser `working_directory` and the root passed to
 `Indexer`; `.logos` is ignored by the indexer. Do not hardcode `Indexer('.')` or
 `os.getcwd()` for project-scoped paths.
 
+## Settings
+
+Settings is a full-window page, not a dialog: `src/ui/settings_window.py::SettingsPage`
+is built lazily by `UIManager.show_settings_page` on first open (the module is
+imported there) and mounted in the main layout in place of the home screen or
+workspace; `hide_settings_page` restores the workspace, or the home screen when
+no project is active, and compact mode switches to full mode first. The fixed
+248 px left rail (`QWidget#SettingsNav`) holds a Back item ("Back to application"),
+labelled icon buttons grouped by `NAV_GROUPS` with separator lines, and About
+pinned at the bottom. Modes list in the mode-selector order (Terminal, Browser,
+Vision last). The rail and the content travel as one block capped at
+`BODY_MAX_WIDTH` (1184 px) and centered, so the rail stays next to the settings
+instead of sitting in the window corner. Each section sits in a column capped
+at `CONTENT_MAX_WIDTH` (880 px), so settings stay compact on wide windows
+instead of stretching to the edges. There is no OK/Cancel and no
+separate close button: Back (or Esc) is the way out. The Vision section combines
+the Vision agent-loop tunables, the compact-window geometry/position and the
+allowed Applications list; the About page keeps its natural height instead of
+filling the viewport.
+
+Every control is wired in `_wire_autosave` to a 400 ms debounce
+(`_save_timer` -> `_apply_changes`). A save compares `_collect_settings_from_ui()`
+with the `_saved_state` snapshot taken on load, so nothing is written when the
+page is only opened; a real change goes through `settings_manager.set_many`
+(save + emit, so the theme, hotkeys and controllers update live) and then
+`providers_page.commit()`, which prunes keychain entries of deleted custom
+providers. `ProvidersPage` stages its own edits in memory
+(`set_many(save=False, emit=False)`) and announces them with `changed`, which
+the page also listens to; other sections write their own keys directly. Leaving
+the page by any path (Back, Esc, app close, any hide) runs `flush_changes()`
+and `mcp_page.commit()` so pending edits and removed MCP secrets are not lost.
+
 ## Providers and the Vision model
 
 Settings → Providers (`src/ui/widgets/providers_page.py`) is the single place
@@ -213,9 +245,9 @@ providers stay out of Vision either way.
 The page's **VISION (COMPUTER USE)** row chooses the default Vision model: a
 provider combo (configured OpenAI/Anthropic/Google providers with models where
 `ModeCapabilities.supports(pid, model, "vision")`) plus an editable model combo.
-The choice is stored as `mode_models.vision` and staged with the page's other
-edits, so Cancel restores it. Settings → Vision only holds agent-loop tunables
-and points to this row. Provider tiles use bundled brand SVGs from
+The choice is stored as `mode_models.vision`; the page stages it in memory like
+its other edits and emits `changed`, so the settings page autosaves it.
+Settings → Vision only holds agent-loop tunables and points to this row. Provider tiles use bundled brand SVGs from
 `assets/providers/` (MIT, LobeHub icons; `logos.spec` packages `assets/`),
 tinted per provider, with initials as the fallback for custom providers.
 Lazy discovery (`src/llm/__init__.py`) reads real `get_display_name()` literals
@@ -335,13 +367,15 @@ checked with `shutil.which`, and `~/.logos/mcp` is created for default paths;
 Add Server and Import stay for custom definitions. Every
 add/edit/remove/trust/enable change is written to `settings.json` immediately
 (`save=True, emit=False`) and the live manager is refreshed, so Restart/Test/
-Logs act on the saved definition and closing the window or the app keeps it.
-Cancel and Esc restore the snapshot taken when the page first changed; the
-window's close event commits instead (secrets of removed servers are pruned
-by `commit()`). A connection failure stores the unwrapped task-group cause in
+Logs act on the saved definition and closing the app keeps it. There is no
+Cancel: leaving the settings page (Back or Esc) or closing the app calls
+`commit()`, which prunes keychain entries of removed servers and fields from
+the snapshot taken when the page first changed. A connection failure stores the
+unwrapped task-group cause in
 `ServerStatus.error`, and child stderr is decoded as UTF-8 with a Windows
 OEM code page (cp866) fallback before it reaches `MCPManager.logs`. The page
-is imported by the settings window directly; the server dialog module is
+is imported by the settings page module directly, which `UIManager` itself
+imports on first open; the server dialog module is
 imported on first Add/Edit/Import and the catalog dialog on first Browse
 Catalog.
 
@@ -353,6 +387,6 @@ placeholders `${keyring:mcp:<server>:<kind>:<name>}` with kind `env` or
 `header`, service `Logos-ai-assistant`); `SettingsManager` hydrates placeholders
 on load and writes sanitized copies, so the in-memory settings stay usable and
 the plaintext never reaches `settings.json`, even when the keychain is
-unavailable (the placeholder is written and the failure logged). Accepting the
-page's `commit()` prunes keychain entries for removed servers or fields. The helpers live in `context.secrets` (already imported at startup)
+unavailable (the placeholder is written and the failure logged). The page's
+`commit()` prunes keychain entries for removed servers or fields. The helpers live in `context.secrets` (already imported at startup)
 instead of `src.mcp_client`, whose import costs over a second.

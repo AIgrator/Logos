@@ -3,17 +3,17 @@
 The page lists connected providers as rows (tile, name, current model, Use /
 Edit / Delete) and the rest as a connect list. Built-in providers open a
 schema-driven dialog for the API key and model; custom OpenAI- or
-Anthropic-compatible endpoints keep their own definition dialog. Everything
-is staged in memory (``save=False, emit=False``) so Cancel restores the
-snapshot, and OK commits the staged state together with the rest of the
-settings window.
+Anthropic-compatible endpoints keep their own definition dialog. Edits are
+staged in memory (``save=False, emit=False``) and announced through the
+``changed`` signal, so the settings page autosaves them shortly after they
+are made; ``commit()`` then prunes keychain entries of deleted providers.
 """
 import copy
 import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QEvent, QRectF, Qt, QTimer
+from PySide6.QtCore import QByteArray, QEvent, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 from PySide6.QtWidgets import (
@@ -318,10 +318,11 @@ class ProviderDialog(QDialog):
 class ProvidersPage(QWidget):
     """Provider list with connect, edit, activate and delete actions."""
 
+    changed = Signal()
+
     def __init__(self, settings_manager, parent=None):
         super().__init__(parent)
         self.settings_manager = settings_manager
-        self._snapshot = None
         self._deleted_custom_ids = set()
         self.setStyleSheet(_PAGE_STYLE)
         self._build_ui()
@@ -595,15 +596,14 @@ class ProvidersPage(QWidget):
             mode_models.pop("vision", None)
         if mode_models == (self.settings_manager.get("mode_models", {}) or {}):
             return
-        self._remember_state()
         self.settings_manager.set_many(
             {"mode_models": mode_models}, save=False, emit=False)
+        self.changed.emit()
 
     # --- refresh ----------------------------------------------------------
 
     def load_settings(self):
-        """Reloads the page, dropping any staged state."""
-        self._snapshot = None
+        """Reloads the page from the current settings."""
         self._deleted_custom_ids.clear()
         self.refresh()
 
@@ -787,22 +787,11 @@ class ProvidersPage(QWidget):
 
     # --- staged writes ----------------------------------------------------
 
-    def _remember_state(self):
-        if self._snapshot is not None:
-            return
-        self._snapshot = {
-            "active_provider": self.settings_manager.get("active_provider", ""),
-            "llm_providers": copy.deepcopy(
-                self.settings_manager.get("llm_providers", {}) or {}),
-            "custom_providers": copy.deepcopy(
-                self.settings_manager.get("custom_providers", []) or []),
-            "mode_models": copy.deepcopy(
-                self.settings_manager.get("mode_models", {}) or {}),
-        }
-
     def _apply(self, changes):
         self.settings_manager.set_many(changes, save=False, emit=False)
         self.refresh()
+        self.changed.emit()
+
     def _sync_custom_providers(self):
         try:
             self.settings_manager.sync_custom_providers(
@@ -811,22 +800,11 @@ class ProvidersPage(QWidget):
             logger.error("Failed to sync custom providers: %s", exc,
                          exc_info=True)
 
-    def rollback(self):
-        """Restores the settings captured before the first staged change."""
-        snapshot = self._snapshot
-        self._snapshot = None
-        self._deleted_custom_ids.clear()
-        if snapshot is None:
-            return
-        self.settings_manager.set_many(snapshot, save=False, emit=False)
-        self._sync_custom_providers()
-        self.refresh()
     def commit(self):
-        """Keeps staged changes; drops keychain entries of deleted providers."""
+        """Drops keychain entries of deleted custom providers."""
         for provider_id in sorted(self._deleted_custom_ids):
             self.settings_manager.delete_provider_key(provider_id)
         self._deleted_custom_ids.clear()
-        self._snapshot = None
 
     # --- actions ----------------------------------------------------------
 
@@ -856,7 +834,6 @@ class ProvidersPage(QWidget):
         dialog = ProviderDialog(provider_id, self.settings_manager, self)
         if dialog.exec() != QDialog.Accepted:
             return
-        self._remember_state()
         providers = copy.deepcopy(
             self.settings_manager.get("llm_providers", {}) or {})
         entry = providers.get(provider_id)
@@ -878,7 +855,6 @@ class ProvidersPage(QWidget):
         dialog = ProviderDialog(provider_id, self.settings_manager, self)
         if dialog.exec() != QDialog.Accepted:
             return
-        self._remember_state()
         providers = copy.deepcopy(
             self.settings_manager.get("llm_providers", {}) or {})
         entry = providers.get(provider_id)
@@ -888,7 +864,6 @@ class ProvidersPage(QWidget):
         self._apply({"llm_providers": providers})
 
     def _use_provider(self, provider_id):
-        self._remember_state()
         self._apply({"active_provider": provider_id})
 
     def _add_custom_provider(self):
@@ -897,7 +872,6 @@ class ProvidersPage(QWidget):
             return
         definition = dialog.definition
         provider_id = definition["id"]
-        self._remember_state()
         self._deleted_custom_ids.discard(provider_id)
         definitions = self._custom_definitions()
         definitions.append(definition)
@@ -917,6 +891,8 @@ class ProvidersPage(QWidget):
         self.settings_manager.set_many(changes, save=False, emit=False)
         self._sync_custom_providers()
         self.refresh()
+        self.changed.emit()
+
     def _edit_custom_provider(self, provider_id):
         definition = self._custom_definition(provider_id)
         if definition is None:
@@ -928,7 +904,6 @@ class ProvidersPage(QWidget):
             reserved_ids=set(PROVIDERS))
         if dialog.exec() != QDialog.Accepted or not dialog.definition:
             return
-        self._remember_state()
         definitions = [
             dialog.definition if item.get("id") == provider_id else item
             for item in self._custom_definitions()
@@ -956,7 +931,6 @@ class ProvidersPage(QWidget):
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:
             return
-        self._remember_state()
         self._deleted_custom_ids.add(provider_id)
         definitions = [
             item for item in self._custom_definitions()
@@ -966,6 +940,8 @@ class ProvidersPage(QWidget):
             {"custom_providers": definitions}, save=False, emit=False)
         self._sync_custom_providers()
         self.refresh()
+        self.changed.emit()
+
     def _update_models(self):
         self.update_models_button.setEnabled(False)
         self.update_models_button.setText("Updating…")

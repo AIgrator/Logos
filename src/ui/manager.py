@@ -334,6 +334,9 @@ class UIManager(QWidget):
         self.tooltip_manager = CustomToolTipManager(self.main_window)
         self.main_window.setWindowTitle("Logos AI Assistant")
         self.main_window.setWindowIcon(QIcon("assets/ico.ico"))
+        # Settings page is built on first use: it pulls in every settings
+        # section (providers, MCP, skills), which would slow down startup.
+        self.settings_page = None
 
         self.full_mode_geometry = QRect(100, 100, 400, 640)
         self._last_full_frame = None  # (QRect, maximized) captured when leaving full mode
@@ -1526,6 +1529,34 @@ class UIManager(QWidget):
             # The sidebar rail is flush with the window's left edge; its own
             # equal left/right inset provides the visual padding.
             self.layout.setContentsMargins(0, 11, 11, 11)
+
+    def show_settings_page(self):
+        """Shows the full-window settings page in place of the workspace."""
+        if self.is_compact:
+            self.switchToFullMode()
+        if self.settings_page is None:
+            from src.ui.settings_window import SettingsPage
+            page = SettingsPage(self.settings_manager, self.controller)
+            page.back_requested.connect(self.hide_settings_page)
+            page.setVisible(False)
+            self.settings_page = page
+            self.layout.addWidget(page, 1)
+        self.home_page.setVisible(False)
+        self.workspace_container.setVisible(False)
+        self.custom_title_bar.setVisible(False)
+        self.layout.setContentsMargins(0, 11, 11, 11)
+        self.settings_page.setVisible(True)
+        self.settings_page.raise_()
+
+    def hide_settings_page(self):
+        """Leaves settings and restores the workspace or the home screen."""
+        if self.settings_page is None:
+            return
+        self.settings_page.setVisible(False)
+        if getattr(self.controller, "project_root", ""):
+            self.show_workspace()
+        else:
+            self.show_home()
 
     def refresh_sidebar(self):
         """Reloads the sidebar tree and restores the active project/session."""

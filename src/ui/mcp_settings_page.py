@@ -44,8 +44,8 @@ class MCPSettingsPage(QWidget):
     """Lists MCP servers, their live state and project trust decisions.
 
     Changes are saved as they are made, so restart/test/logs act on them and
-    closing the window keeps them. Cancel restores the snapshot taken before
-    the first change on this page.
+    leaving the settings page or closing the app keeps them. The snapshot is
+    only kept so ``commit()`` can prune keychain entries of removed servers.
     """
 
     def __init__(self, settings_manager, controller, parent=None):
@@ -200,26 +200,6 @@ class MCPSettingsPage(QWidget):
     def hideEvent(self, event):
         self._timer.stop()
         super().hideEvent(event)
-
-    def rollback(self):
-        """Restores the MCP settings captured before this page changed them."""
-        snapshot = self._snapshot
-        self._snapshot = None
-        if snapshot is None:
-            return
-        # Servers added after the snapshot disappear with it; prune their
-        # keychain entries the same way commit() does for removed servers.
-        current = self.settings_manager.get("mcp") or {}
-        try:
-            prune_mcp_secrets(
-                KEYRING_SERVICE_NAME,
-                current.get("servers") if isinstance(current, dict) else None,
-                snapshot.get("servers") if isinstance(snapshot, dict) else None)
-        except Exception as error:  # noqa: BLE001 - cleanup is best effort
-            logging.warning(f"Could not prune MCP secrets: {error}")
-        self.settings_manager.set_many({"mcp": snapshot}, save=True, emit=False)
-        self._refresh_manager()
-        self._populate()
 
     def commit(self):
         """Drops secrets of removed servers/fields after settings were saved."""
