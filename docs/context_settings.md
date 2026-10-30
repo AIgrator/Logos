@@ -4,6 +4,8 @@ Settings → **Context** controls how much of a session's history Logos sends to
 
 The first thing to know: **none of these settings delete anything.** The full conversation — every user request, command, tool output and error — stays in the session journal (`.logos/sessions/<name>.jsonl`) and in the chat window. The options only shape a separate, derived view that is rebuilt before each model request. If the model loses sight of an old detail, it can re-read a file, re-run a command, or inspect the journal.
 
+The page is split into three groups: **History trimming** (how much of the Terminal/Browser history is sent), **Rolling summary** (how and when the session summary is written) and **Automatic compaction** (when older events are replaced by that summary).
+
 This page describes each setting as it appears in the window. For the internal design (journal format, summary schema, provider usage normalization), see the [context management design notes](./context_management.md).
 
 ## How context is managed
@@ -164,20 +166,20 @@ A soft token budget for the LLM summary, written into the summarizer prompt as a
 
 ### 9. Refresh threshold
 
-*Settings.json key: `summary_threshold_ratio` · Default: `0.60` · Range: 0.10–1.00, step 0.05*
+*Settings.json key: `summary_threshold_ratio` · Default: `0.90` · Range: 0.10–1.00, step 0.05*
 
-The background summary refresh is triggered when the session's context fill reaches this fraction of the active model's context window.
+A near-full safety net: the background summary refresh is triggered when a completion not yet covered by the summary reaches this fraction of the active model's context window.
 
-- Fill is taken from the latest provider-reported usage when available; otherwise it is estimated from the journal. In the estimated path, no refresh happens until at least 4 events are recorded.
-- The refresh also fires when uncovered journal events exceed the token budget below, and when a session is left before it is fully covered. On 1M+ windows those triggers do most of the work; this window fraction matters for small windows.
+- Fill is taken from the latest provider-reported usage. The part of the journal the summary already covers is ignored: that completion describes the pre-compaction context, not the next request.
+- With defaults this trigger rarely fires: routine refreshes come from the token budget below (about every 30,000 uncovered tokens), and automatic compaction takes over at 200,000 tokens, which is below 90% of a 262k+ window. It matters when auto-compaction is off, the compaction cap is raised, or the budget is `0`.
 - The refresh itself does not add a chat message or resend anything. The updated summary is picked up by any handoff or compaction block built after it.
-- Manual compaction and the capture before leaving a session force a refresh regardless of this threshold.
+- Manual compaction, the capture before leaving a session, and a model switch force a refresh regardless of this threshold.
 
-Lower values keep the summary fresher (more summarizer calls); higher values make it cheaper but staler. `0.60` is a good default. Use `0.75`–`0.85` if summarizer calls are expensive, and `0.40`–`0.50` if you often switch modes in the middle of a long task and need the handoff to be current.
+Lower values keep the summary fresher on small windows (more summarizer calls); higher values are cheaper but let it lag when nothing else triggers a refresh. Use `0.60`–`0.75` if you set the refresh budget to `0`, or if you raised the auto-compact cap and want a fresh summary well before the window fills.
 
 **Summary refresh budget** — *Settings.json key: `summary_refresh_tokens` · Default: `30000` · Range: 0–1,000,000, step 5,000*
 
-The primary trigger: the summary is refreshed once this many tokens of new journal events are not covered by the current summary. It is independent of the model window, so long sessions stay summarized even though 60% of a 1M-token window is unreachable in practice. `0` disables the budget and leaves only the window threshold.
+The primary trigger: the summary is refreshed once this many tokens of new journal events are not covered by the current summary. It is independent of the model window, so long sessions stay summarized even though 90% of a 1M-token window is unreachable before compaction. `0` disables the budget and leaves only the window threshold.
 
 The budget is a cost dial: a lower value keeps the handoff closer to the journal (more summarizer calls), a higher value lets the summary lag behind. At the default, one refresh happens per ~30,000 tokens of new history — a handful of calls in a long session, not one per step.
 

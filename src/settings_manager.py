@@ -228,7 +228,7 @@ class SettingsManager(QObject):
             "auto_compact": True,
             "summary_model": "",
             "summary_max_tokens": 1200,
-            "summary_threshold_ratio": 0.6,
+            "summary_threshold_ratio": 0.9,
             "summary_refresh_tokens": 30000,
             "auto_compact_tokens": 200000
         },

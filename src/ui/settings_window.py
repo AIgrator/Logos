@@ -366,7 +366,7 @@ class SettingsWindow(QDialog):
         self.handoff_model_switch_checkbox.setChecked(bool(context_settings.get("handoff_on_model_switch", True)))
         self.auto_compact_checkbox.setChecked(bool(context_settings.get("auto_compact", True)))
         self.summary_max_tokens_spinbox.setValue(int(context_settings.get("summary_max_tokens", 1200)))
-        self.summary_threshold_spinbox.setValue(float(context_settings.get("summary_threshold_ratio", 0.6)))
+        self.summary_threshold_spinbox.setValue(float(context_settings.get("summary_threshold_ratio", 0.9)))
         self.summary_refresh_tokens_spinbox.setValue(int(context_settings.get(
             "summary_refresh_tokens", handoff_store.DEFAULT_REFRESH_TOKENS)))
         self.auto_compact_tokens_spinbox.setValue(int(context_settings.get(
@@ -988,9 +988,14 @@ class SettingsWindow(QDialog):
         return group
 
     def _create_context_section(self):
-        """Creates the Context (history compaction + handoff summary) section."""
-        group = QGroupBox("Context")
-        context_layout = QGridLayout(group)
+        """Creates the Context page: history trimming, rolling summary and compaction."""
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(0, 0, 0, 0)
+        page_layout.setSpacing(14)
+
+        history_group = QGroupBox("History trimming")
+        context_layout = QGridLayout(history_group)
         context_layout.setColumnStretch(2, 1)
 
         self.history_keep_last_spinbox = QSpinBox()
@@ -1039,40 +1044,46 @@ class SettingsWindow(QDialog):
         context_layout.addWidget(self._create_help_label(trim_tooltip), 3, 1, Qt.AlignLeft)
         context_layout.addWidget(self.history_trim_tracebacks_checkbox, 3, 3)
 
+        page_layout.addWidget(history_group)
+
+        summary_group = QGroupBox("Rolling summary")
+        summary_layout = QGridLayout(summary_group)
+        summary_layout.setColumnStretch(2, 1)
+
         self.handoff_enabled_checkbox = QCheckBox()
         handoff_tooltip = (
             "Keep a rolling summary next to each session journal so a new mode, "
             "model or application run can continue with compact context instead "
             "of the full journal. Summaries never mix between sessions."
         )
-        context_layout.addWidget(self._create_context_setting_label(
-            "Rolling handoff summary:", "5-rolling-handoff-summary"), 4, 0)
-        context_layout.addWidget(self._create_help_label(handoff_tooltip), 4, 1, Qt.AlignLeft)
-        context_layout.addWidget(self.handoff_enabled_checkbox, 4, 3)
+        summary_layout.addWidget(self._create_context_setting_label(
+            "Rolling handoff summary:", "5-rolling-handoff-summary"), 0, 0)
+        summary_layout.addWidget(self._create_help_label(handoff_tooltip), 0, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.handoff_enabled_checkbox, 0, 3)
 
         self.handoff_mode_switch_checkbox = QCheckBox()
         mode_tooltip = "Seed the new session's summary when switching chat/terminal/browser mode."
-        context_layout.addWidget(self._create_context_setting_label(
-            "On mode switch:", "6-on-mode-switch"), 5, 0)
-        context_layout.addWidget(self._create_help_label(mode_tooltip), 5, 1, Qt.AlignLeft)
-        context_layout.addWidget(self.handoff_mode_switch_checkbox, 5, 3)
+        summary_layout.addWidget(self._create_context_setting_label(
+            "On mode switch:", "6-on-mode-switch"), 1, 0)
+        summary_layout.addWidget(self._create_help_label(mode_tooltip), 1, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.handoff_mode_switch_checkbox, 1, 3)
 
         self.handoff_model_switch_checkbox = QCheckBox()
         model_tooltip = "Refresh and inject the summary when switching the active model."
-        context_layout.addWidget(self._create_context_setting_label(
-            "On model switch:", "7-on-model-switch"), 6, 0)
-        context_layout.addWidget(self._create_help_label(model_tooltip), 6, 1, Qt.AlignLeft)
-        context_layout.addWidget(self.handoff_model_switch_checkbox, 6, 3)
+        summary_layout.addWidget(self._create_context_setting_label(
+            "On model switch:", "7-on-model-switch"), 2, 0)
+        summary_layout.addWidget(self._create_help_label(model_tooltip), 2, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.handoff_model_switch_checkbox, 2, 3)
 
         self.summary_max_tokens_spinbox = QSpinBox()
         self.summary_max_tokens_spinbox.setRange(200, 8000)
         self.summary_max_tokens_spinbox.setSingleStep(100)
         self.summary_max_tokens_spinbox.setFixedWidth(80)
         max_tokens_tooltip = "Token budget requested from the summarizer model."
-        context_layout.addWidget(self._create_context_setting_label(
-            "Summary max tokens:", "8-summary-max-tokens"), 7, 0)
-        context_layout.addWidget(self._create_help_label(max_tokens_tooltip), 7, 1, Qt.AlignLeft)
-        context_layout.addWidget(self.summary_max_tokens_spinbox, 7, 3)
+        summary_layout.addWidget(self._create_context_setting_label(
+            "Summary max tokens:", "8-summary-max-tokens"), 3, 0)
+        summary_layout.addWidget(self._create_help_label(max_tokens_tooltip), 3, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.summary_max_tokens_spinbox, 3, 3)
 
         self.summary_threshold_spinbox = QDoubleSpinBox()
         self.summary_threshold_spinbox.setRange(0.1, 1.0)
@@ -1080,13 +1091,14 @@ class SettingsWindow(QDialog):
         self.summary_threshold_spinbox.setDecimals(2)
         self.summary_threshold_spinbox.setFixedWidth(80)
         threshold_tooltip = (
-            "Refresh the summary when estimated context usage reaches this "
-            "fraction of the model window."
+            "Refresh the summary when a completion not yet covered by the "
+            "summary reaches this fraction of the model window. A near-full "
+            "safety net: routine refreshes come from 'Summary refresh at'."
         )
-        context_layout.addWidget(self._create_context_setting_label(
-            "Refresh threshold:", "9-refresh-threshold"), 8, 0)
-        context_layout.addWidget(self._create_help_label(threshold_tooltip), 8, 1, Qt.AlignLeft)
-        context_layout.addWidget(self.summary_threshold_spinbox, 8, 3)
+        summary_layout.addWidget(self._create_context_setting_label(
+            "Refresh threshold:", "9-refresh-threshold"), 4, 0)
+        summary_layout.addWidget(self._create_help_label(threshold_tooltip), 4, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.summary_threshold_spinbox, 4, 3)
 
         self.summary_model_lineedit = QLineEdit()
         self.summary_model_lineedit.setPlaceholderText(
@@ -1096,23 +1108,10 @@ class SettingsWindow(QDialog):
             "'provider:model' (for example 'openai:gpt-5-mini'), or a bare "
             "model id to keep the active provider. Empty uses the session model."
         )
-        context_layout.addWidget(self._create_context_setting_label(
-            "Summarizer model:", "10-summarizer-model"), 9, 0)
-        context_layout.addWidget(self._create_help_label(summary_model_tooltip), 9, 1, Qt.AlignLeft)
-        context_layout.addWidget(self.summary_model_lineedit, 9, 2, 1, 2)
-
-        self.auto_compact_checkbox = QCheckBox()
-        auto_compact_tooltip = (
-            "When the context reaches the token cap below, or free space in "
-            "the model window drops to the response buffer (~15% of the "
-            "window, at least 16k tokens), older events are compacted into the "
-            "session summary automatically once the current step finishes. "
-            "Chat, Terminal and Browser only."
-        )
-        context_layout.addWidget(self._create_context_setting_label(
-            "Auto-compact on low headroom:", "11-auto-compact-on-low-headroom"), 10, 0)
-        context_layout.addWidget(self._create_help_label(auto_compact_tooltip), 10, 1, Qt.AlignLeft)
-        context_layout.addWidget(self.auto_compact_checkbox, 10, 3)
+        summary_layout.addWidget(self._create_context_setting_label(
+            "Summarizer model:", "10-summarizer-model"), 5, 0)
+        summary_layout.addWidget(self._create_help_label(summary_model_tooltip), 5, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.summary_model_lineedit, 5, 2, 1, 2)
 
         self.summary_refresh_tokens_spinbox = QSpinBox()
         self.summary_refresh_tokens_spinbox.setRange(0, 1_000_000)
@@ -1124,10 +1123,29 @@ class SettingsWindow(QDialog):
             "window, so long sessions keep a current summary on 1M+ windows. "
             "0 = only the refresh threshold above."
         )
-        context_layout.addWidget(self._create_context_setting_label(
-            "Summary refresh at:", "12-summary-refresh-at"), 11, 0)
-        context_layout.addWidget(self._create_help_label(refresh_tokens_tooltip), 11, 1, Qt.AlignLeft)
-        context_layout.addWidget(self.summary_refresh_tokens_spinbox, 11, 3)
+        summary_layout.addWidget(self._create_context_setting_label(
+            "Summary refresh at:", "12-summary-refresh-at"), 6, 0)
+        summary_layout.addWidget(self._create_help_label(refresh_tokens_tooltip), 6, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.summary_refresh_tokens_spinbox, 6, 3)
+
+        page_layout.addWidget(summary_group)
+
+        compact_group = QGroupBox("Automatic compaction")
+        compact_layout = QGridLayout(compact_group)
+        compact_layout.setColumnStretch(2, 1)
+
+        self.auto_compact_checkbox = QCheckBox()
+        auto_compact_tooltip = (
+            "When the context reaches the token cap below, or free space in "
+            "the model window drops to the response buffer (~15% of the "
+            "window, at least 16k tokens), older events are compacted into the "
+            "session summary automatically once the current step finishes. "
+            "Chat, Terminal and Browser only."
+        )
+        compact_layout.addWidget(self._create_context_setting_label(
+            "Auto-compact on low headroom:", "11-auto-compact-on-low-headroom"), 0, 0)
+        compact_layout.addWidget(self._create_help_label(auto_compact_tooltip), 0, 1, Qt.AlignLeft)
+        compact_layout.addWidget(self.auto_compact_checkbox, 0, 3)
 
         self.auto_compact_tokens_spinbox = QSpinBox()
         self.auto_compact_tokens_spinbox.setRange(0, 1_000_000)
@@ -1138,12 +1156,15 @@ class SettingsWindow(QDialog):
             "this many tokens, even when the model window is far from full. "
             "Keeps requests smaller and cheaper. 0 = only the free-space rule."
         )
-        context_layout.addWidget(self._create_context_setting_label(
-            "Auto-compact at:", "13-auto-compact-at"), 12, 0)
-        context_layout.addWidget(self._create_help_label(cap_tooltip), 12, 1, Qt.AlignLeft)
-        context_layout.addWidget(self.auto_compact_tokens_spinbox, 12, 3)
+        compact_layout.addWidget(self._create_context_setting_label(
+            "Auto-compact at:", "13-auto-compact-at"), 1, 0)
+        compact_layout.addWidget(self._create_help_label(cap_tooltip), 1, 1, Qt.AlignLeft)
+        compact_layout.addWidget(self.auto_compact_tokens_spinbox, 1, 3)
 
-        return group
+        page_layout.addWidget(compact_group)
+
+        page_layout.addStretch(1)
+        return page
 
     def _create_about_link(self, text, url):
         """Creates a label that opens an external URL in the default browser."""

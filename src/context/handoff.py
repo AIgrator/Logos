@@ -48,7 +48,7 @@ _LIST_SECTIONS = frozenset({
     "Next", "Unfinished", "Files", "Blockers",
 })
 DEFAULT_MAX_TOKENS = 1200
-DEFAULT_THRESHOLD_RATIO = 0.6
+DEFAULT_THRESHOLD_RATIO = 0.9
 # Uncovered-journal budget: refreshing on a window fraction alone never fires
 # on 1M+ windows, so the summary is also refreshed once this many tokens of
 # new events are not covered yet.
