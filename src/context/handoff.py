@@ -652,8 +652,10 @@ def build_summary_prompts(
     return system_prompt, user_prompt
 
 
-def _latest_completion_tokens(events: list) -> int:
-    for event in reversed(events or []):
+def _latest_completion(events: list) -> tuple[int, int]:
+    """Index and size of the latest completion usage event, or ``(-1, 0)``."""
+    for index in range(len(events or []) - 1, -1, -1):
+        event = events[index]
         if not isinstance(event, dict) or event.get("type") != "usage":
             continue
         if str(event.get("purpose") or "completion") != "completion":
@@ -670,8 +672,8 @@ def _latest_completion_tokens(events: list) -> int:
                 except (TypeError, ValueError):
                     continue
         if total:
-            return total
-    return 0
+            return index, total
+    return -1, 0
 
 
 def needs_refresh(
@@ -706,8 +708,11 @@ def needs_refresh(
         return True
     threshold = float(threshold_ratio or DEFAULT_THRESHOLD_RATIO)
     if provider_id and model_id:
-        actual = _latest_completion_tokens(events)
-        if actual:
+        latest_index, actual = _latest_completion(events)
+        # A completion the summary already covers describes the context
+        # before compaction, not the next request: after a boundary the
+        # window fraction must come from a newer completion.
+        if actual and latest_index >= processed:
             window = context_usage(provider_id, model_id, "")["window"]
             if window and (actual / window) >= threshold:
                 return True

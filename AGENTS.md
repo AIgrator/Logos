@@ -119,9 +119,11 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   windows) or free space drops to `max(15% of the window, 16k tokens)`,
   whichever comes first; disabled by `context.auto_compact`. The background
   summary refresh fires when uncovered events exceed
-  `context.summary_refresh_tokens` (default 30k), when the latest request
-  crosses `context.summary_threshold_ratio` of the window, or right before a
-  session is left (`src/controller.py::_refresh_leaving_summary`). A capture
+  `context.summary_refresh_tokens` (default 30k), when a completion newer than
+  the summary crosses `context.summary_threshold_ratio` of the window, or right
+  before a session is left (`src/controller.py::_refresh_leaving_summary`). A
+  completion the summary already covers describes the pre-compaction context,
+  so it never counts toward the window fraction. A capture
   never overwrites a model-written summary with the deterministic fallback.
   Agent `finish` / `communicate_to_user` / `display_message`
   text is persisted as an assistant `message`. `objective` is auto-derived from
