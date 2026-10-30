@@ -706,6 +706,17 @@ class SettingsPage(QWidget):
             self.providers_page.repolish)
         return self.providers_page
 
+    @staticmethod
+    def _page(widget):
+        """Wraps a section so it hugs the top instead of absorbing height."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(12)
+        layout.addWidget(widget)
+        layout.addStretch(1)
+        return page
+
     def _create_hotkeys_section(self):
         """Creates the Hotkeys settings section."""
         group = QGroupBox("Hotkeys")
@@ -722,7 +733,7 @@ class SettingsPage(QWidget):
         self.cancel_request_hotkey = HotkeyEdit()
         layout.addRow("Cancel Request:", self.cancel_request_hotkey)
 
-        return group
+        return self._page(group)
 
     def _create_apps_section(self):
         """Creates the Apps settings section."""
@@ -965,7 +976,7 @@ class SettingsPage(QWidget):
         agent_layout.addWidget(self.max_errors_spinbox, 0, 3)
         tab_layout.addWidget(agent_group)
 
-        return group
+        return self._page(group)
 
     def _on_theme_changed(self):
         """Applies the selected theme immediately."""
@@ -1428,7 +1439,7 @@ class SettingsPage(QWidget):
         browser_layout.addWidget(self._create_help_label(timeout_tooltip), 2, 1, Qt.AlignLeft)
         browser_layout.addWidget(self.browser_timeout_spinbox, 2, 3)
 
-        return group
+        return self._page(group)
 
     def _create_terminal_section(self):
         """Creates the Terminal settings section."""
@@ -1484,7 +1495,7 @@ class SettingsPage(QWidget):
         terminal_layout.addWidget(self._create_help_label(shell_detach_tooltip), 2, 1, Qt.AlignLeft)
         terminal_layout.addWidget(self.shell_detach_spinbox, 2, 3)
 
-        return group
+        return self._page(group)
 
     def _create_mcp_section(self):
         """Creates the MCP Servers settings section."""
