@@ -14,7 +14,7 @@ from PIL.ImageQt import ImageQt
 from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QEasingCurve, QMimeData, QPoint,
                             QPropertyAnimation, QRect, QSize, Qt, Signal, QTimer, Slot)
 from PySide6.QtGui import (QActionGroup, QColor, QCursor, QIcon, QImage, QPainter, QPen, QPixmap,
-                           QTextCursor, QTextOption)
+                           QTextCursor, QTextDocument, QTextOption)
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QMenu, QPushButton, QSizeGrip,
                                QTextEdit, QVBoxLayout, QWidget)
@@ -143,8 +143,15 @@ class ExpandingTextEdit(QTextEdit):
                 self.files_pasted.emit(file_paths)
                 return
 
-        # Fallback to default behavior for text or other data types
-        super().insertFromMimeData(source)
+        # Insert text as plain text: the default handler honours text/html and
+        # would carry inline colours and backgrounds copied from other apps
+        # into this themed composer.
+        text = source.text()
+        if not text and source.hasHtml():
+            document = QTextDocument()
+            document.setHtml(source.html())
+            text = document.toPlainText()
+        self.insertPlainText(text)
 
     def set_compact_mode(self, compact: bool):
         """Switches the text edit's behavior between compact and expanding modes."""
