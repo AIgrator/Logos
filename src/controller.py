@@ -134,6 +134,9 @@ class AppController(QObject):
             self.indexer.is_active_cb = lambda: self.state == ControllerState.TERMINAL
             self.indexer.index_updated.connect(self._on_index_updated)
         self.last_search_query = None
+        # Created lazily when Terminal mode starts; owned by the controller so
+        # it survives mode switches and is stopped once on shutdown.
+        self._mcp_manager = None
 
         # --- Background Vision Initialization ---
         self.vision_thread = None
@@ -422,6 +425,14 @@ class AppController(QObject):
         except Exception as e:
             logging.warning(f"Terminal exec thread stop failed: {e}")
         try:
+            manager = getattr(self, "_mcp_manager", None)
+            if manager is not None:
+                logging.info("Stopping MCP manager.")
+                manager.stop()
+                self._mcp_manager = None
+        except Exception as e:
+            logging.warning(f"MCP shutdown failed: {e}")
+        try:
             handler = getattr(self, "browser_handler", None)
             shutdown = getattr(handler, "shutdown", None)
             if callable(shutdown):
@@ -546,6 +557,8 @@ class AppController(QObject):
         }[mode]
         self.current_handler = handler
         self._set_state(state)
+        if mode == "terminal":
+            self.ensure_mcp_manager()
         try:
             self.ui.set_active_mode(mode)
         except Exception as e:
@@ -1940,6 +1953,68 @@ class AppController(QObject):
             return
         self._replay_session()
 
+    # --- MCP servers ------------------------------------------------------
+
+    def _mcp_config(self):
+        """Merges user MCP servers from settings with the project's .mcp.json."""
+        from src.mcp_client import load_servers
+        settings = self.settings_manager.get("mcp", None) or {}
+        if not isinstance(settings, dict):
+            settings = {}
+        servers = settings.get("servers") or {}
+        trusted_map = settings.get("trusted_projects") or {}
+        trusted: list[str] = []
+        if isinstance(trusted_map, dict):
+            value = trusted_map.get(self.project_root, [])
+            if isinstance(value, (list, tuple)):
+                trusted = [str(name) for name in value]
+        return load_servers(servers, self.project_root, trusted)
+
+    def _attach_mcp_manager(self):
+        manager = self._mcp_manager
+        if manager is None:
+            return
+        computer = getattr(getattr(self, "terminal_handler", None), "computer", None)
+        if computer is not None:
+            computer.mcp_manager = manager
+
+    def ensure_mcp_manager(self):
+        """Creates and starts the MCP manager once, then applies config changes."""
+        try:
+            config = self._mcp_config()
+        except Exception as error:
+            logging.error(f"MCP configuration failed: {error}", exc_info=True)
+            return self._mcp_manager
+        for message in config.errors:
+            logging.warning(f"MCP config: {message}")
+
+        manager = self._mcp_manager
+        if manager is None:
+            if not config.servers:
+                return None
+            from src.mcp_client import MCPManager
+            manager = MCPManager(config.servers)
+            try:
+                manager.start()
+            except Exception as error:
+                logging.error(f"MCP manager start failed: {error}", exc_info=True)
+                return None
+            self._mcp_manager = manager
+            logging.info(f"MCP manager started with {len(config.servers)} server(s).")
+        else:
+            try:
+                manager.refresh(config.servers)
+            except Exception as error:
+                logging.warning(f"MCP manager refresh failed: {error}")
+        self._attach_mcp_manager()
+        return manager
+
+    def refresh_mcp_servers(self):
+        """Re-applies MCP configuration after the active project changes."""
+        if self._mcp_manager is None:
+            return None
+        return self.ensure_mcp_manager()
+
     def _set_project_context(self, root: str):
         """Re-roots the indexer and the terminal/browser working directories."""
         self.project_root = os.path.abspath(root)
@@ -1952,6 +2027,7 @@ class AppController(QObject):
         except Exception as e:
             logging.warning(f"Indexer stop during project switch failed: {e}")
         self.indexer = Indexer(self.project_root)
+        self.refresh_mcp_servers()
 
     def _project_computers(self) -> list:
         """Computers whose working directory follows the active project."""
@@ -3158,6 +3234,7 @@ class AppController(QObject):
 
     def _activate_terminal_mode(self):
         self._cleanup_and_switch_handler(self.terminal_handler, ControllerState.TERMINAL)
+        self.ensure_mcp_manager()
         self.ui.set_active_mode('terminal')
         self.ui.add_message("<i>Terminal mode enabled. I will now use terminal commands to accomplish tasks.</i>", force_scroll=True)
         if self.indexer is not None:

@@ -9,6 +9,10 @@ Modes mirror the access-permission pickers of agent IDEs:
   paths and paths outside the project.
 - ``full`` - never ask.
 
+MCP calls are gated separately: a tool the server marks read-only on a trusted
+server runs silently, everything else asks in both ``ask`` and ``auto``
+(annotations are hints, so an unmarked or uninspectable call is a risk).
+
 The policy is best-effort. A shell command that cannot be proven read-only
 is treated as state-changing, and a script can always hide intent, so the
 risk list covers the patterns where a miss would be expensive.
@@ -32,7 +36,7 @@ DEFAULT_ACCESS_MODE = "ask"
 _READ_ONLY_TOOLS = {
     "read_files", "list_directory", "search_file_content", "find_files",
     "path_exists", "get_clipboard_content", "use_skill", "wait_seconds",
-    "poll_shell_job", "stop_shell_job",
+    "poll_shell_job", "stop_shell_job", "mcp_list", "mcp_get",
 }
 
 _NETWORK_TOOLS = {"web_fetchs", "web_search", "download_file"}
@@ -54,6 +58,7 @@ _ACTION_SUMMARIES = {
     "download_file": "Download a file",
     "web_fetchs": "Open web pages",
     "web_search": "Search the web",
+    "mcp_call": "Run an MCP tool",
 }
 
 _SENSITIVE_DIRS = {".ssh", ".aws", ".azure", ".gnupg", ".kube"}
@@ -72,8 +77,12 @@ def normalize_mode(mode) -> str:
 
 
 def evaluate(action_name, action_args, project_root: str = "",
-             mode: str = DEFAULT_ACCESS_MODE) -> dict | None:
-    """Approval request for one Terminal tool call, or None to run it."""
+             mode: str = DEFAULT_ACCESS_MODE, mcp_tool: dict | None = None) -> dict | None:
+    """Approval request for one Terminal tool call, or None to run it.
+
+    ``mcp_tool`` describes the MCP tool targeted by ``mcp_call`` (trusted,
+    read-only hint, state); without it the call cannot be inspected and asks.
+    """
     mode = normalize_mode(mode)
     if mode == "full":
         return None
@@ -87,6 +96,8 @@ def evaluate(action_name, action_args, project_root: str = "",
         return _network_request(name, args, project_root, mode)
     if name in _FILE_MUTATIONS:
         return _file_request(name, args, project_root, mode)
+    if name == "mcp_call":
+        return _mcp_request(args, mode, mcp_tool)
     if mode == "ask":
         detail = json.dumps(args, ensure_ascii=False, indent=2) if args else ""
         return _request(mode, name,
@@ -265,6 +276,42 @@ def _network_request(name: str, args: dict, project_root: str, mode: str):
         return _request(mode, name, _ACTION_SUMMARIES[name], detail,
                         ["Accesses the network"])
     return None
+
+
+# -- MCP --------------------------------------------------------------------
+
+def _mcp_request(args: dict, mode: str, mcp_tool: dict | None):
+    server = _first(args, "server")
+    tool = _first(args, "tool")
+    target = f"{server}/{tool}" if server and tool else (server or tool)
+    detail_parts = [target] if target else []
+    raw_arguments = args.get("arguments")
+    if isinstance(raw_arguments, str) and raw_arguments.strip():
+        detail_parts.append(raw_arguments.strip())
+    elif isinstance(raw_arguments, dict) and raw_arguments:
+        detail_parts.append(json.dumps(raw_arguments, ensure_ascii=False, indent=2))
+    detail = "\n".join(detail_parts)
+    summary = f"{_ACTION_SUMMARIES['mcp_call']} · {target}" if target \
+        else _ACTION_SUMMARIES["mcp_call"]
+
+    info = mcp_tool if isinstance(mcp_tool, dict) else None
+    if info:
+        trusted = bool(info.get("trusted", False))
+        read_only = info.get("read_only") is True
+        destructive = info.get("destructive") is True
+        if trusted and read_only and not destructive:
+            return None
+        reasons = ["Calls an external MCP server"]
+        if not trusted:
+            reasons.append("The MCP server is not trusted")
+        elif destructive:
+            reasons.append("The MCP tool is marked destructive")
+        elif not read_only:
+            reasons.append("The MCP tool is not marked read-only")
+        return _request(mode, "mcp_call", summary, detail, reasons)
+    return _request(mode, "mcp_call", summary, detail,
+                    ["Calls an external MCP server",
+                     "The MCP tool could not be inspected"])
 
 
 # -- shell ------------------------------------------------------------------

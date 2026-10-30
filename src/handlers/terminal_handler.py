@@ -119,6 +119,15 @@ def _action_summary(action_name: str, action_args: dict) -> str:
     if name == 'use_skill':
         skill = _shorten_text(args.get('name'))
         return f"Loading skill · {skill}" if skill else "Loading skill"
+    if name in {'mcp_list', 'mcp_get', 'mcp_call'}:
+        server = _shorten_text(args.get('server'))
+        tool = _shorten_text(args.get('tool'))
+        target = "/".join(part for part in (server, tool) if part)
+        if name == 'mcp_list':
+            return f"Listing MCP tools · {target}" if target else "Listing MCP servers"
+        if name == 'mcp_get':
+            return f"Inspecting MCP tool · {target}" if target else "Inspecting MCP tool"
+        return f"MCP call · {target}" if target else "MCP call"
     return f"Running {name.replace('_', ' ')}"
 
 
@@ -133,6 +142,8 @@ def _details_title(action_name: str) -> str:
         return "Directory details"
     if action_name == 'search_file_content':
         return "Search details"
+    if action_name == 'mcp_call':
+        return "MCP call details"
     return f"Details · {action_name}"
 
 
@@ -389,6 +400,21 @@ class TerminalHandler(BaseAgentHandler):
             content = f"Pattern: {pattern}\nPath: {path}"
             return {'type': 'collapsible', 'title': _details_title(action_name), 'content': content}
 
+        if action_name == 'mcp_call':
+            server = action_args.get('server', '')
+            tool = action_args.get('tool', '')
+            raw = action_args.get('arguments', '')
+            try:
+                parsed = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
+            except (TypeError, ValueError):
+                parsed = raw
+            if isinstance(parsed, (dict, list)):
+                rendered = json.dumps(parsed, ensure_ascii=False, indent=2)
+            else:
+                rendered = str(parsed or '(none)')
+            content = f"Server: {server}\nTool: {tool}\nArguments:\n{rendered}"
+            return {'type': 'collapsible', 'title': _details_title(action_name), 'content': content}
+
         return {
             'type': 'collapsible',
             'title': _details_title(action_name),
@@ -407,7 +433,7 @@ class TerminalHandler(BaseAgentHandler):
             if args and name not in {
                     'execute_shell', 'poll_shell_job', 'stop_shell_job',
                     'read_files', 'list_directory', 'search_file_content',
-                    'use_skill'}:
+                    'use_skill', 'mcp_list', 'mcp_get'}:
                 self.ui.add_message(self._details_block(name, args))
             return True
         return super().replay_event(event)
@@ -417,11 +443,36 @@ class TerminalHandler(BaseAgentHandler):
         terminal = settings.get("terminal") or {}
         return normalize_access_mode(terminal.get("access_mode"))
 
+    def _mcp_call_context(self, action_args) -> dict | None:
+        """Describes the MCP tool a call targets, for the access policy."""
+        manager = getattr(getattr(self, "computer", None), "mcp_manager", None)
+        if manager is None or not getattr(manager, "is_running", False):
+            return None
+        server = str(action_args.get("server") or "").strip()
+        tool = str(action_args.get("tool") or "").strip()
+        if not server or not tool:
+            return None
+        try:
+            status = manager.status(server)
+            info = manager.get_tool(server, tool)
+        except Exception:
+            return None
+        return {
+            "server": server,
+            "tool": tool,
+            "trusted": bool(status.trusted),
+            "state": status.state,
+            "read_only": bool(info.read_only),
+            "destructive": info.annotations.get("destructive_hint") is True,
+        }
+
     def _authorize_action(self, action_name, action_args) -> bool:
         """Ask the user before a tool call the access mode does not allow."""
         project_root = getattr(self.computer, "working_directory", "") or ""
+        mcp_tool = self._mcp_call_context(action_args) if action_name == "mcp_call" else None
         request = evaluate_terminal_access(
-            action_name, action_args, project_root, self._access_mode())
+            action_name, action_args, project_root, self._access_mode(),
+            mcp_tool=mcp_tool)
         if request is None:
             return True
         asker = getattr(self.controller, "ask_terminal_approval", None)
@@ -527,7 +578,7 @@ class TerminalHandler(BaseAgentHandler):
             if action_args and action_name not in {
                     'execute_shell', 'poll_shell_job', 'stop_shell_job',
                     'read_files', 'list_directory', 'search_file_content',
-                    'use_skill'}:
+                    'use_skill', 'mcp_list', 'mcp_get'}:
                 self.ui.add_message(self._details_block(action_name, action_args))
         # ---------------------------------------------
 
@@ -1066,6 +1117,26 @@ class TerminalHandler(BaseAgentHandler):
                 }
             else:
                 output_for_ui = f"<i>(Directory '{path}' is empty or not found)</i>"
+
+        elif tool_name in ('mcp_list', 'mcp_get', 'mcp_call'):
+            text = str(result)
+            server = str(args.get('server') or '')
+            tool = str(args.get('tool') or '')
+            target = f"{server}/{tool}" if server and tool else (server or tool)
+            if tool_name == 'mcp_list':
+                title = f"MCP tools · {target}" if target else "MCP servers"
+            elif tool_name == 'mcp_get':
+                title = f"MCP tool definition · {target}" if target else "MCP tool definition"
+            else:
+                title = f"MCP result · {target}" if target else "MCP result"
+            output_for_llm = f"**Tool Result:**\n```\n{text}\n```"
+            output_for_ui = {
+                'type': 'collapsible',
+                'title': title,
+                'content': text,
+                'plain_content': text,
+                'copy_payloads': {'output': text},
+            }
 
         else:
             # Generic fallback for any other tool

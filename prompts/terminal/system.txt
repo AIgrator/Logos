@@ -42,6 +42,9 @@ Skills are optional instruction packages installed by the user or the project. W
 
 {available_skills}
 
+### MCP Tools ###
+MCP servers configured by the user expose external tools through three meta-tools: `mcp_list` shows the connected servers and their tools, `mcp_get` returns one tool's input schema, and `mcp_call` executes it with `arguments` passed as a JSON object string. Inspect a tool with `mcp_get` before calling it — never guess argument names. If a server is not connected or the call is denied, report it; do not pretend the tool ran.
+
 ### Response Format ###
 {response_format_instructions}
 

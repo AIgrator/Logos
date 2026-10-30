@@ -10,6 +10,7 @@ from src.computer.tools.terminal.fs.replace import replace
 from src.computer.tools.terminal.fs.replace_many import replace_many
 from src.computer.tools.terminal.fs.search_file_content import search_file_content
 from src.computer.tools.terminal.fs.write_file import write_file
+from src.computer.tools.terminal.mcp_tools import mcp_call, mcp_get, mcp_list
 from src.computer.tools.terminal.system.execute_shell import execute_shell
 from src.computer.tools.terminal.system.poll_shell_job import poll_shell_job
 from src.computer.tools.terminal.system.stop_shell_job import stop_shell_job
@@ -48,6 +49,9 @@ TOOLS_METADATA = {
     "finish": finish,
     "get_clipboard_content": get_clipboard_content,
     "use_skill": use_skill,
+    "mcp_list": mcp_list,
+    "mcp_get": mcp_get,
+    "mcp_call": mcp_call,
 }
 
 def get_tools_metadata():

@@ -206,6 +206,12 @@ class SettingsManager(QObject):
             "output_cap_chars": 20000,
             "inactivity_timeout_seconds": 300
         },
+        "mcp": {
+            # User-scoped servers; the active project may add .mcp.json entries.
+            "servers": {},
+            # project root -> server names approved from that project's .mcp.json
+            "trusted_projects": {}
+        },
         "context": {
             # Agent history compaction (browser mode). All defaults are
             # no-ops: full history is sent. Enable to cut transmitted context.

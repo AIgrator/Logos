@@ -178,3 +178,23 @@ rendered as an expanded warning card and reported to the model as `Denied: ...`
 so it must not retry silently; the dialog defaults to Deny and fails closed.
 The mode applies to Terminal only; Browser and Vision keep their own approval
 flows.
+
+## MCP servers
+
+Terminal mode reaches user-configured MCP servers through three meta-tools
+(`src/computer/tools/terminal/mcp_tools.py`): `mcp_list` (servers, states and
+their tools), `mcp_get` (one tool's definition and input schema) and `mcp_call`
+(executes it; `arguments` is a JSON object string because the strict tool schema
+cannot express a free-form object). Definitions come from `mcp.servers` in
+`settings.json` plus the active project's `.mcp.json`; project entries stay
+stopped (`needs_trust`) until their names are listed in
+`mcp.trusted_projects[<project root>]`. `src/mcp_client/` merges configuration
+(`load_servers`) and runs one `MCPManager` with a background asyncio loop and a
+persistent client per server. `AppController` creates the manager lazily when
+Terminal mode starts or is restored, attaches it to the Terminal `Computer`,
+refreshes it on project switch and stops it in `cleanup()`. `mcp_list` /
+`mcp_get` are read-only for the access policy; `mcp_call` runs silently only for
+a tool the server marks read-only on a trusted server and otherwise asks in both
+`ask` and `auto` (`full` never asks). `mcp_call` output is capped at 20k
+characters, and a tool-reported error is raised as a tool error so it gets the
+error card and `error` status in the journal.
