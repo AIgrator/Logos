@@ -135,7 +135,7 @@ Terminal can use tools from [Model Context Protocol](https://modelcontextprotoco
 
 ### Terminal access permissions
 
-Every Terminal action passes an access policy before it runs. Settings → Terminal → Access permissions selects **Ask every time** (the default: read-only commands and edits inside the project run silently, everything else asks), **Auto approve** (only risky actions ask) or **Full access** (never asks). A denied action appears as a warning card and is reported to the model, which is told not to retry it.
+Every Terminal action passes an access policy before it runs. Settings → Terminal → Access permissions selects **Ask every time** (the default: read-only commands and edits inside the project run silently, everything else asks), **Auto approve** (only risky actions ask) or **Full access** (never asks). The same choice is available in the Terminal composer: the chip next to the attachment button shows the current mode and opens the three options with a short explanation each, so it can be switched without opening Settings; **Full access** is painted red. A denied action appears as a warning card and is reported to the model, which is told not to retry it.
 
 ### Workspace panel
 

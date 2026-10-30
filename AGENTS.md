@@ -298,6 +298,18 @@ so it must not retry silently; the dialog defaults to Deny and fails closed.
 The mode applies to Terminal only; Browser and Vision keep their own approval
 flows.
 
+The current mode is also mirrored in the Terminal composer as a chip
+(`AccessModeChip` in `src/ui/manager.py`) with the mode icon and the label from
+`ACCESS_MODE_LABELS`; `full` is painted in the error color. Clicking it opens
+`src/ui/widgets/terminal_access_popup.py::TerminalAccessPopup`, a `Qt.Popup`
+anchored above the chip and clamped to the screen: three clickable rows, each
+with icon, title and a one-line explanation, and a check on the active one.
+Choosing a row calls `UIManager._set_access_mode`, which writes
+`terminal.access_mode` with `set_many` (save + emit), so the chip refreshes
+through `on_settings_changed` and Settings → Terminal shows the same value.
+The chip is hidden outside Terminal mode and participates in both toolbar
+layouts (`_reflow_toolbar`).
+
 ## MCP servers
 
 Terminal mode reaches user-configured MCP servers through three meta-tools

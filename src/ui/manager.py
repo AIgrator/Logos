@@ -28,6 +28,7 @@ from llm.reasoning_effort import label as effort_label
 from llm.reasoning_effort import levels as effort_levels
 from states import ControllerState
 from src.suggestions import normalize_suggestions
+from src.computer.terminal_policy import ACCESS_MODE_LABELS, normalize_mode as normalize_access_mode
 
 from . import editor_launcher, styles
 from .utils import CustomToolTipManager, IconHoverFilter
@@ -36,6 +37,7 @@ from .widgets.image_preview_dialog import ImagePreviewDialog
 from .text_render import render_reasoning, render_text, render_user_message
 from .widgets.chat_widget import ChatWidget
 from .widgets.model_switch_popup import ModelSwitchPopup, build_effort_menu
+from .widgets.terminal_access_popup import TerminalAccessPopup
 from .widgets.custom_title_bar import CustomTitleBar
 from .widgets.flow_layout import FlowLayout
 from .widgets.non_scrollable_scroll_area import NonScrollableScrollArea
@@ -580,10 +582,21 @@ class UIManager(QWidget):
             "Context window usage. Click to open Session context.")
         self._context_indicator_stats = None
 
-
+        # Terminal access permission chip (shown in Terminal mode only).
+        self.access_mode_button = QPushButton()
+        self.access_mode_button.setObjectName("AccessModeChip")
+        self.access_mode_button.setFixedHeight(24)
+        self.access_mode_button.setCursor(Qt.PointingHandCursor)
+        self.access_mode_button.setFocusPolicy(Qt.NoFocus)
+        self.access_mode_button.setVisible(False)
+        self.access_mode_button.clicked.connect(self._show_access_mode_popup)
+        self.tooltip_manager.install(
+            self.access_mode_button,
+            "Terminal access permissions. Click to change.")
 
         self.bottom_toolbar_layout.addWidget(self.toggle_button)
         self.bottom_toolbar_layout.addWidget(self.attachment_button)
+        self.bottom_toolbar_layout.addWidget(self.access_mode_button)
 
         self.mode_model_layout.addWidget(self.mode_button)
         self.mode_model_layout.addWidget(self.model_button, 1)
@@ -670,7 +683,10 @@ class UIManager(QWidget):
         self.controller.theme_manager.theme_changed.connect(self._update_icon_colors)
         self.controller.theme_manager.theme_changed.connect(
             self._refresh_model_effort_badge)
+        self.controller.theme_manager.theme_changed.connect(
+            self._refresh_access_mode_chip)
         self._update_icon_colors()
+        self._refresh_access_mode_chip()
         self._reflow_toolbar()
         init_duration = time.perf_counter() - init_start
         logging.info(f"UIManager.__init__ completed in {init_duration:.3f}s")
@@ -1085,11 +1101,79 @@ class UIManager(QWidget):
         popover.show()
         popover.raise_()
 
+    # -- terminal access mode ---------------------------------------------
+
+    def _access_mode(self) -> str:
+        terminal = self.settings_manager.get("terminal", {}) or {}
+        return normalize_access_mode(terminal.get("access_mode"))
+
+    def _refresh_access_mode_chip(self):
+        """Mirrors terminal.access_mode on the chip and repaints for the theme."""
+        mode = self._access_mode()
+        theme = self.controller.theme_manager
+        error = theme.get_style("ERROR_COLOR")
+        muted = theme.get_style("COLLAPSIBLE_META")
+        hover = theme.get_style("ICON_COLOR")
+        color = error if mode == "full" else muted
+        icons = {
+            "ask": "fa5s.shield-alt",
+            "auto": "fa5s.play-circle",
+            "full": "fa5s.exclamation-triangle",
+        }
+        self.access_mode_button.setIcon(
+            qta.icon(icons.get(mode, "fa5s.shield-alt"), color=color))
+        self.access_mode_button.setIconSize(QSize(13, 13))
+        self.access_mode_button.setText(f"{ACCESS_MODE_LABELS[mode]}  ▾")
+        hover_color = color if mode == "full" else hover
+        self.access_mode_button.setStyleSheet(f"""
+            QPushButton#AccessModeChip {{
+                background: transparent;
+                border: 1px solid {color};
+                border-radius: 9px;
+                color: {color};
+                font-size: 11px;
+                padding: 0 8px;
+            }}
+            QPushButton#AccessModeChip:hover {{
+                border-color: {hover_color};
+                color: {hover_color};
+            }}
+        """)
+
+    def _access_popup(self) -> TerminalAccessPopup:
+        popup = getattr(self, "_access_popup_widget", None)
+        if popup is None:
+            popup = TerminalAccessPopup(self.main_window)
+            popup.mode_selected.connect(self._set_access_mode)
+            self._access_popup_widget = popup
+        return popup
+
+    def _show_access_mode_popup(self):
+        popup = self._access_popup()
+        theme = self.controller.theme_manager
+        popup.set_theme(
+            _theme_colors(theme),
+            getattr(theme, "current_theme", "dark") == "dark",
+            theme.get_style("ERROR_COLOR"),
+        )
+        popup.set_current(self._access_mode())
+        popup.open_near(self.access_mode_button)
+
+    def _set_access_mode(self, mode: str):
+        mode = normalize_access_mode(mode)
+        terminal = dict(self.settings_manager.get("terminal", {}) or {})
+        if terminal.get("access_mode") == mode:
+            return
+        terminal["access_mode"] = mode
+        self.settings_manager.set_many({"terminal": terminal})
+
     def on_settings_changed(self, new_settings):
         if 'compact_mode' in new_settings:
             self._update_compact_mode_geometry()
             if self.is_compact:
                 self.animate_geometry(self.compact_mode_geometry)
+        if 'terminal' in new_settings:
+            self._refresh_access_mode_chip()
 
     def _update_compact_mode_geometry(self):
         settings = self.settings_manager.get("compact_mode", {"width": 700, "height": 120, "position": "bottom_center"})
@@ -1277,6 +1361,9 @@ class UIManager(QWidget):
     def set_active_mode(self, mode: str):
         is_terminal = (mode == 'terminal')
         self.add_folder_action.setVisible(is_terminal)
+        self.access_mode_button.setVisible(is_terminal)
+        if is_terminal:
+            self._refresh_access_mode_chip()
         # Pause button only while an agent task actually runs: nothing
         # to pause in plain chat, and it hides again when the task ends.
         # (Vision has its own pause controls.)
@@ -1338,6 +1425,8 @@ class UIManager(QWidget):
             self.toggle_button, self.attachment_button,
             self.mode_button, self.model_button, self.send_button,
         ]
+        if not self.access_mode_button.isHidden():
+            widgets.append(self.access_mode_button)
         if not self.model_effort_badge.isHidden():
             widgets.append(self.model_effort_badge)
         if not self.context_indicator_button.isHidden():
@@ -1413,25 +1502,28 @@ class UIManager(QWidget):
             return
         self._toolbar_single_row = single
 
-        extras = [self.mode_button, self.model_button, self.model_effort_badge]
+        extras = [self.access_mode_button, self.mode_button,
+                  self.model_button, self.model_effort_badge]
         for w in extras:
             self.bottom_toolbar_layout.removeWidget(w)
             self.mode_model_layout.removeWidget(w)
 
+        anchor = self.bottom_toolbar_layout.indexOf(self.attachment_button)
+        if anchor < 0:
+            anchor = 1
         if single:
             # Keep the mode/model dropdowns next to the attach button (left
             # side), before the stretch that pushes Send to the right. The
             # model selector keeps its stretch so it fills the spare width
             # here too, exactly like in the two-row layout.
-            anchor = self.bottom_toolbar_layout.indexOf(self.attachment_button)
-            if anchor < 0:
-                anchor = 1
-            self.bottom_toolbar_layout.insertWidget(anchor + 1, self.mode_button)
-            self.bottom_toolbar_layout.insertWidget(anchor + 2, self.model_button, 1)
+            self.bottom_toolbar_layout.insertWidget(anchor + 1, self.access_mode_button)
+            self.bottom_toolbar_layout.insertWidget(anchor + 2, self.mode_button)
+            self.bottom_toolbar_layout.insertWidget(anchor + 3, self.model_button, 1)
             self.bottom_toolbar_layout.insertWidget(
-                anchor + 3, self.model_effort_badge, 0, Qt.AlignmentFlag.AlignVCenter)
+                anchor + 4, self.model_effort_badge, 0, Qt.AlignmentFlag.AlignVCenter)
             self.mode_model_container.setVisible(False)
         else:
+            self.bottom_toolbar_layout.insertWidget(anchor + 1, self.access_mode_button)
             self.mode_model_layout.addWidget(self.mode_button)
             self.mode_model_layout.addWidget(self.model_button, 1)
             self.mode_model_layout.addWidget(
