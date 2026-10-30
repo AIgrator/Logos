@@ -275,12 +275,15 @@ class OpenRouterProvider(BaseLLMProvider):
                 logging.warning(f"Schema '{schema_name}' requested but not found. Falling back to 'auto'.")
                 use_forced_tool = False
 
-        if not use_forced_tool:
-            if system_prompt:
-                tools = self._get_tools_from_cache()
-                if tools:
-                    request_body["tools"] = tools
-                    request_body["tool_choice"] = "auto"
+        if not use_forced_tool and schema_name:
+            # Structured request with "Require JSON Output" disabled: keep the
+            # tools available so the model can still answer with an action.
+            # Plain-text calls (chat, session summaries) must never see them,
+            # or the model answers with a tool call instead of text.
+            tools = self._get_tools_from_cache()
+            if tools:
+                request_body["tools"] = tools
+                request_body["tool_choice"] = "auto"
 
         # The llm_communication logger is configured to write to a separate file
         llm_comms_logger = logging.getLogger('llm_communication')

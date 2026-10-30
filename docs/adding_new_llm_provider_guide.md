@@ -133,7 +133,13 @@ summary to offer.
 Return `{"text": "...", "tool_calls": {}}` when the model produced no call.
 With `require_json_output=True`, `BaseLLMProvider.get_response()` replaces an
 empty or non-dict `tool_calls` with a structured `error_explanation`, so the
-agent loop can self-correct instead of crashing.
+agent loop can self-correct instead of crashing. Plain-text callers (the
+session-summary request) pass `require_structured=False` to skip that
+replacement and keep the response as text.
+
+Advertise the tool set only when `schema_name` is set. A request without a
+schema (chat, session summaries) must be answered with text; attaching agent
+tools there lets the model reply with a `finish` tool call instead of text.
 
 For structured output, providers normally obtain the JSON with the vendor's
 native mechanism (forced tool call, response schema, or MIME type), then run

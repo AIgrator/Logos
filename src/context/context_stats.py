@@ -226,6 +226,7 @@ def build_session_stats(
         "summary_tokens": estimate_tokens(summary_text),
         "payload_tokens": payload_tokens,
         "payload_components": payload_components,
+        "skills_count": _to_int(payload.get("skills_count")),
         "payload_delta": (actual["latest_input_tokens"] - payload_tokens
                           if actual["latest_input_tokens"] and payload_tokens
                           else None),
@@ -246,6 +247,9 @@ def build_session_stats(
 
 DEFAULT_HEADROOM_RATIO = 0.15
 DEFAULT_MIN_HEADROOM_TOKENS = 16000
+# Compaction also fires at this context size even when the model window is far
+# from full: keeping requests small keeps them cheap and fast on 1M+ windows.
+DEFAULT_SOFT_CAP_TOKENS = 200_000
 
 
 def needs_auto_compaction(
@@ -253,11 +257,21 @@ def needs_auto_compaction(
     *,
     headroom_ratio: float = DEFAULT_HEADROOM_RATIO,
     min_headroom_tokens: int = DEFAULT_MIN_HEADROOM_TOKENS,
+    soft_cap_tokens: int = DEFAULT_SOFT_CAP_TOKENS,
 ) -> bool:
-    """Whether free context space is down to the response/compaction buffer."""
+    """Whether the model-facing history should be compacted now.
+
+    Two independent triggers, whichever comes first: the context reached the
+    soft cap, or free space is down to the response/compaction buffer.
+    """
     window = _to_int((stats or {}).get("window"))
     used = _to_int((stats or {}).get("context_tokens"))
-    if not window or not used:
+    if not used:
+        return False
+    cap = _to_int(soft_cap_tokens)
+    if cap > 0 and used >= cap:
+        return True
+    if not window:
         return False
     try:
         ratio = float(headroom_ratio)
@@ -265,6 +279,54 @@ def needs_auto_compaction(
         ratio = DEFAULT_HEADROOM_RATIO
     headroom = max(_to_int(min_headroom_tokens), int(window * max(0.0, ratio)))
     return max(0, window - used) <= headroom
+
+
+def payload_breakdown(stats: dict) -> list:
+    """Disjoint components of the next request, scaled to the reported total.
+
+    The provider reports one prompt size, while the component split is
+    estimated from the request. Components are scaled proportionally to that
+    total so their shares add up to the shown percentage; individual shares
+    stay approximate. Empty when no payload is available (for example
+    Vision, whose request is assembled elsewhere).
+    """
+    stats = stats or {}
+    components = stats.get("payload_components") or {}
+    if not components:
+        return []
+    skills_count = _to_int(stats.get("skills_count"))
+    system = _to_int(components.get("system"))
+    tools = _to_int(components.get("tool_schema"))
+    skills = _to_int(components.get("skills"))
+    messages = (_to_int(components.get("history"))
+                + _to_int(components.get("user")))
+    other = _to_int(components.get("images"))
+    counted = system + tools + skills + messages + other
+    total = _to_int(stats.get("context_tokens"))
+    scale = 1.0
+    if (counted and total
+            and str(stats.get("context_source") or "") in ("actual", "payload")):
+        scale = total / counted
+        if not 0.2 <= scale <= 10.0:
+            scale = 1.0
+
+    def scaled(value):
+        return int(round(value * scale))
+
+    rows = [
+        {"key": "system", "label": "System prompt", "tokens": scaled(system)},
+        {"key": "tools", "label": "System tools", "tokens": scaled(tools)},
+        {"key": "messages", "label": "Messages", "tokens": scaled(messages)},
+    ]
+    if skills_count or skills:
+        rows.insert(2, {
+            "key": "skills",
+            "label": f"Skills ({skills_count})" if skills_count else "Skills",
+            "tokens": scaled(skills),
+        })
+    if other:
+        rows.append({"key": "other", "label": "Other", "tokens": scaled(other)})
+    return rows
 
 
 def format_breakdown(stats: dict) -> str:

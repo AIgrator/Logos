@@ -92,6 +92,7 @@ class AppController(QObject):
         self._handoff_meta = {}
         self._summary_pending = False
         self._summary_force = False
+        self._leaving_summary = None
         self._summary_request_context = None
         self._manual_compact_pending = False
         self._compaction_trigger = ""
@@ -266,7 +267,9 @@ class AppController(QObject):
         self.ui.session_renamed.connect(self.rename_session)
         self.ui.session_deleted.connect(self.delete_session)
         self.ui.context_requested.connect(self._show_context_summary)
-        self.ui.journal_requested.connect(self._show_session_journal)
+        self.ui.context_compact_requested.connect(
+            self._request_manual_summary_refresh)
+        self.ui.session_journal_requested.connect(self._show_session_journal)
         self.ui.home_requested.connect(self.ui.show_home)
 
         # Thinking timer and settings change hook
@@ -1025,16 +1028,29 @@ class AppController(QObject):
                  else "Compaction failed")
         return f"<i>{label}: {detail}</i>"
 
-    def _add_compaction_message(self, trigger: str, covered: int, total: int):
+    @staticmethod
+    def _compaction_notice_text(trigger: str, covered: int, total: int) -> str:
         if trigger == "auto":
-            self.ui.add_message(
-                f"<i>Context was running low, so older events were compacted "
-                f"automatically: {covered:,} of {total:,} events are now "
-                "represented by the summary.</i>")
-        else:
-            self.ui.add_message(
-                f"<i>Session context compacted: {covered:,} of {total:,} "
-                "events are now represented by the summary.</i>")
+            return (f"Older events were compacted into the session summary "
+                    f"automatically: {covered:,} of {total:,} events are now "
+                    "represented by the summary.")
+        return (f"Session context compacted: {covered:,} of {total:,} "
+                "events are now represented by the summary.")
+
+    def _add_compaction_message(self, trigger: str, covered: int, total: int):
+        """Record the compaction in the journal and show it in the chat."""
+        meta = self._handoff_meta or {}
+        self.append_session_event(
+            "compaction",
+            trigger=trigger,
+            covered=int(covered or 0),
+            total=int(total or 0),
+            summary_source=str(meta.get("source") or ""),
+            provider=str(meta.get("provider") or ""),
+            model=str(meta.get("model") or ""),
+        )
+        self.ui.add_message(
+            f"<i>{self._compaction_notice_text(trigger, covered, total)}</i>")
 
     def _compaction_busy_reason(self) -> str:
         """Why live compaction must wait, or an empty string."""
@@ -1095,7 +1111,10 @@ class AppController(QObject):
         if len(self.session_events) - covered < handoff.MIN_EVENTS_FOR_SUMMARY:
             return
         stats = self._context_stats_snapshot()
-        if not context_stats.needs_auto_compaction(stats):
+        soft_cap = int(context_settings.get(
+            "auto_compact_tokens", context_stats.DEFAULT_SOFT_CAP_TOKENS) or 0)
+        if not context_stats.needs_auto_compaction(
+                stats, soft_cap_tokens=soft_cap):
             return
         logging.info(
             "Auto-compacting session context: %s of %s tokens used.",
@@ -1105,9 +1124,10 @@ class AppController(QObject):
         self._manual_compact_pending = True
         self._compaction_trigger = "auto"
         self._manual_compact_focus = ""
+        used = int(stats.get("context_tokens") or 0)
         self.ui.add_message(
-            "<i>Context window is almost full: compacting older events "
-            "into the session summary…</i>")
+            f"<i>Auto-compaction started at {used:,} tokens: older events are "
+            "being moved into the session summary…</i>")
         self._request_summary_update(
             force=True, advance_boundary=True, trigger="auto")
 
@@ -1171,6 +1191,9 @@ class AppController(QObject):
             "window": int(stats.get("window") or 0),
             "total_tokens": int(stats.get("actual_tokens") or 0),
             "percent": float(stats.get("percent") or 0.0),
+            "context_tokens": int(stats.get("context_tokens") or 0),
+            "context_source": str(stats.get("context_source") or ""),
+            "context_status": str(stats.get("status") or ""),
             "input_tokens": int(stats.get("latest_input_tokens") or 0),
             "output_tokens": int(stats.get("latest_output") or 0),
             "reasoning_tokens": int(stats.get("latest_reasoning") or 0),
@@ -1184,6 +1207,7 @@ class AppController(QObject):
                 header.get("created_at") or stats.get("first_ts") or ""),
             "last_activity": str(stats.get("last_ts") or ""),
             "summary": self._session_outcome_summary(header),
+            "compaction": self._session_compaction_info(),
             "skills": self._session_skill_records(),
             "tools": self._session_tool_records(),
             "attachments": attachments,
@@ -1226,6 +1250,36 @@ class AppController(QObject):
             "next": "",
             "updated_at": updated_at,
             "source": "journal",
+        }
+
+    def _session_compaction_info(self) -> dict:
+        """Latest compaction of this session, from its journal or summary meta."""
+        events = [event for event in getattr(self, "session_events", []) or []
+                  if isinstance(event, dict)]
+        for event in reversed(events):
+            if event.get("type") != "compaction":
+                continue
+            return {
+                "trigger": str(event.get("trigger") or ""),
+                "covered": int(event.get("covered") or 0),
+                "total": int(event.get("total") or 0),
+                "summary_source": str(event.get("summary_source") or ""),
+                "provider": str(event.get("provider") or ""),
+                "model": str(event.get("model") or ""),
+                "at": str(event.get("ts") or ""),
+            }
+        meta = self._compaction_meta()
+        covered = handoff.compacted_event_count(meta, events) if events else 0
+        if not covered:
+            return {}
+        return {
+            "trigger": "",
+            "covered": covered,
+            "total": len(events),
+            "summary_source": str(meta.get("source") or ""),
+            "provider": str(meta.get("provider") or ""),
+            "model": str(meta.get("model") or ""),
+            "at": str(meta.get("compacted_at") or ""),
         }
 
     def _session_skill_records(self) -> list:
@@ -1352,8 +1406,14 @@ class AppController(QObject):
             self.session_events, objective=self.session_objective)
         return handoff.session_injection_block(summary, self.session_mode)
 
-    def _capture_handoff_summary(self) -> str:
-        """Freeze this session's own summary before it is left behind."""
+    def _capture_handoff_summary(self, leaving: bool = True) -> str:
+        """Freeze this session's own summary before it is left behind.
+
+        An existing model-written summary is never replaced with the
+        deterministic fallback: only the LLM refresh may overwrite it. When
+        the journal moved past the recorded coverage, a refresh request is
+        issued for this session while it is still the active one.
+        """
         if not self.session_events or not self.session_file:
             return self._handoff_summary
         meta = handoff.read_meta(self.session_file)
@@ -1362,10 +1422,12 @@ class AppController(QObject):
             meta.get("source_session")
             and os.path.normcase(os.path.abspath(str(meta["source_session"])))
             == os.path.normcase(os.path.abspath(self.session_file)))
-        if (same_session and meta.get("source") == "llm"
-                and int(meta.get("event_count") or 0) >= len(self.session_events)):
+        if same_session and meta.get("source") == "llm":
             self._handoff_summary = summary
             self._handoff_meta = meta
+            if (leaving
+                    and int(meta.get("event_count") or 0) < len(self.session_events)):
+                self._refresh_leaving_summary()
             return summary
         fallback = handoff.fallback_summary(self.session_events, previous=summary)
         if fallback:
@@ -1377,8 +1439,64 @@ class AppController(QObject):
                 source="fallback",
             )
             self._handoff_meta = handoff.read_meta(self.session_file)
-        self._schedule_summary_refresh(force=True)
+        if leaving:
+            self._refresh_leaving_summary()
         return self._handoff_summary
+
+    def _refresh_leaving_summary(self):
+        """Summarize the session being left from a snapshot of its journal.
+
+        The session switch runs synchronously after capture, so the request
+        carries its own file, events and mode instead of re-reading
+        ``self.session_*`` once the new session is active.
+        """
+        if not self.session_file or not self.session_events:
+            return
+        if not self._summary_settings().get("handoff_enabled", True):
+            return
+        if len(self.session_events) < handoff.MIN_EVENTS_FOR_SUMMARY:
+            return
+        snapshot = {
+            "session_file": self.session_file,
+            "events": list(self.session_events),
+            "mode": self.session_mode,
+            "project_name": (self.project_manager.get_active_name()
+                             if self.project_manager else ""),
+            "retried": False,
+        }
+        self._leaving_summary = snapshot
+        if self._summary_pending:
+            # The in-flight request already targets this journal; if it lands
+            # short, _handle_summary_response chains this snapshot.
+            return
+        self._start_leaving_summary_request(snapshot)
+
+    def _start_leaving_summary_request(self, snapshot: dict):
+        started = self._start_summary_request(
+            session_file=str(snapshot.get("session_file") or ""),
+            events=snapshot.get("events") or [],
+            mode=str(snapshot.get("mode") or ""),
+            project_name=str(snapshot.get("project_name") or ""),
+            trigger="leave",
+        )
+        if not started:
+            self._leaving_summary = None
+
+    def _maybe_finish_leaving_summary(self, updated_file: str):
+        """Chain one more refresh when a leave summary landed short."""
+        target = self._leaving_summary
+        if not target or target.get("session_file") != updated_file:
+            return
+        events = target.get("events") or []
+        meta = handoff.read_meta(updated_file)
+        if (handoff.summary_coverage(meta, events) >= len(events)
+                or target.get("retried")):
+            self._leaving_summary = None
+            return
+        target["retried"] = True
+        if self._summary_pending:
+            return
+        self._start_leaving_summary_request(target)
 
     def _schedule_summary_refresh(self, force: bool = False):
         self._summary_force = bool(force or self._summary_force)
@@ -1432,9 +1550,12 @@ class AppController(QObject):
         meta = handoff.read_meta(self.session_file) or self._handoff_meta
         ratio = context_settings.get(
             "summary_threshold_ratio", handoff.DEFAULT_THRESHOLD_RATIO)
+        refresh_tokens = int(context_settings.get(
+            "summary_refresh_tokens", handoff.DEFAULT_REFRESH_TOKENS) or 0)
         if not handoff.needs_refresh(
                 self.session_events, provider_id, model_id, meta, self.session_file,
                 threshold_ratio=float(ratio or handoff.DEFAULT_THRESHOLD_RATIO),
+                refresh_tokens=refresh_tokens,
                 force=force):
             self._summary_force = False
             return
@@ -1451,8 +1572,7 @@ class AppController(QObject):
                 self._manual_compact_focus = (focus or "").strip()
             self._summary_force = True
             return
-        session_file = self.session_file
-        if not session_file or not self.session_events:
+        if not self.session_file or not self.session_events:
             return
         if advance_boundary:
             trigger = trigger or "manual"
@@ -1462,50 +1582,77 @@ class AppController(QObject):
         else:
             trigger = "background"
             focus = ""
-        previous = handoff.read_summary(session_file) or self._handoff_summary
+        self._start_summary_request(
+            session_file=self.session_file,
+            events=self.session_events,
+            mode=self.session_mode,
+            advance_boundary=advance_boundary,
+            trigger=trigger,
+            focus=focus,
+            history_cut=self._history_cut_key() if advance_boundary else 0,
+        )
+
+    def _start_summary_request(self, *, session_file: str, events: list,
+                               mode: str, project_name: str = "",
+                               advance_boundary: bool = False,
+                               trigger: str = "background",
+                               focus: str = "", history_cut: int = 0) -> bool:
+        """Emit one summary request for an explicit session and journal."""
+        if not session_file or not events:
+            return False
+        active = self._is_active_session(session_file)
+        previous = handoff.read_summary(session_file)
+        if active:
+            previous = previous or self._handoff_summary
         meta = handoff.read_meta(session_file)
         same_session = bool(
-            self.session_file and meta.get("source_session")
+            meta.get("source_session")
             and os.path.normcase(os.path.abspath(str(meta["source_session"])))
-            == os.path.normcase(os.path.abspath(self.session_file)))
+            == os.path.normcase(os.path.abspath(session_file)))
         processed = int(meta.get("event_count") or 0) if (
             same_session and meta.get("source") == "llm") else 0
-        new_events = self.session_events[processed:]
-        if not new_events and not focus:
-            self._summary_force = False
+        new_events = events[processed:]
+        # Bookkeeping events (compaction notices) carry no model-facing text,
+        # so they never justify a summary call on their own.
+        if not focus and not any(handoff.event_line(event) for event in new_events):
+            if active:
+                self._summary_force = False
             if advance_boundary:
-                covered = handoff.summary_coverage(meta, self.session_events)
+                covered = handoff.summary_coverage(meta, events)
                 self._apply_compaction(
-                    covered, self._history_cut_key())
-            return
+                    covered, history_cut or self._history_cut_key())
+            return False
+        if not project_name and active and self.project_manager is not None:
+            project_name = self.project_manager.get_active_name()
         provider_id, model_id = self._summary_model_ids()
         max_tokens = int(self._summary_settings().get(
             "summary_max_tokens", handoff.DEFAULT_MAX_TOKENS) or handoff.DEFAULT_MAX_TOKENS)
         system_prompt, user_prompt = handoff.build_summary_prompts(
             previous,
             new_events,
-            project_name=self.project_manager.get_active_name() if self.project_manager else "",
-            mode=self.session_mode,
+            project_name=project_name,
+            mode=mode,
             max_tokens=max_tokens,
             focus=focus,
         )
-        event_count = len(self.session_events)
+        event_count = len(events)
         self._summary_request_context = {
             "session_file": session_file,
             "source_session": session_file,
             "event_count": event_count,
-            "event_id": str(self.session_events[event_count - 1].get("id") or ""),
+            "event_id": str(events[event_count - 1].get("id") or ""),
             "provider": provider_id,
             "model": model_id,
             "advance_boundary": bool(advance_boundary),
             "trigger": trigger,
             "focus": focus,
-            "history_cut": self._history_cut_key() if advance_boundary else 0,
+            "history_cut": history_cut,
         }
         self._summary_pending = True
         self._summary_force = False
         self.summary_requested.emit(
             system_prompt, user_prompt, provider_id, model_id)
+        return True
 
     def _handle_summary_response(self, text: str):
         context = self._summary_request_context
@@ -1557,7 +1704,7 @@ class AppController(QObject):
                     "the summary could not be saved. Nothing was removed."))
             self._schedule_context_indicator_update()
             return
-        if session_file == self.session_file:
+        if self._is_active_session(session_file):
             self._handoff_summary = written
             self._handoff_meta = handoff.read_meta(session_file)
             if advance:
@@ -1581,6 +1728,7 @@ class AppController(QObject):
             self._clear_pending_compaction(cooldown=True)
             logging.info("Compaction finished for a session that is no "
                          "longer active: %s", session_file)
+        self._maybe_finish_leaving_summary(session_file)
         logging.info("Handoff summary updated (%d chars).", len(written))
         self._schedule_context_indicator_update()
         if self._manual_compact_pending:
@@ -1593,6 +1741,7 @@ class AppController(QObject):
     def _handle_summary_error(self, message: str):
         self._summary_request_context = None
         self._summary_pending = False
+        self._leaving_summary = None
         pending = self._manual_compact_pending
         trigger = self._compaction_trigger or "manual"
         if pending:
@@ -1793,8 +1942,9 @@ class AppController(QObject):
             f"Rebuilt {mode_name} history with {len(history)} entries "
             f"from {len(self.session_events)} session events{compacted_note}.")
 
-    def _event_attachment_records(self, event: dict) -> list:
+    def _event_attachment_records(self, event: dict, session_file: str = "") -> list:
         """Attachment metadata with its current on-disk status."""
+        session_file = session_file or self.session_file
         records = []
         for record in event.get("attachments") or []:
             if not isinstance(record, dict):
@@ -1803,7 +1953,7 @@ class AppController(QObject):
             if self.project_manager is not None:
                 try:
                     item["status"] = attachment_store.verify_attachment(
-                        self.project_manager, self.session_file, item,
+                        self.project_manager, session_file, item,
                         self.project_root)
                 except Exception as e:
                     logging.warning(f"Could not verify attachment: {e}")
@@ -1816,10 +1966,10 @@ class AppController(QObject):
         return attachment_store.context_block(
             self._event_attachment_records(event))
 
-    def _journal_attachment_lines(self, event: dict) -> str:
+    def _journal_attachment_lines(self, event: dict, session_file: str = "") -> str:
         """Debug metadata for attachments, shown under a journal message."""
         lines = []
-        for record in self._event_attachment_records(event):
+        for record in self._event_attachment_records(event, session_file):
             name = str(record.get("name") or "attachment")
             kind = str(record.get("kind") or "file")
             size = attachment_store.format_size(record.get("size"))
@@ -1911,6 +2061,15 @@ class AppController(QObject):
                 add = getattr(self.ui, "add_suggestions", None)
                 if callable(add):
                     add(event.get("items"))
+            elif event_type == "compaction":
+                try:
+                    covered = int(event.get("covered") or 0)
+                    total = int(event.get("total") or 0)
+                except (TypeError, ValueError):
+                    covered, total = 0, 0
+                notice = self._compaction_notice_text(
+                    str(event.get("trigger") or ""), covered, total)
+                self.ui.add_message(f"<i>{html.escape(notice)}</i>")
             elif event_type == "reasoning":
                 text = event_text(event)
                 if text:
@@ -3806,18 +3965,79 @@ class AppController(QObject):
             return "Auto-compaction: off (handoff is disabled in Settings → Context)"
         if not context_cfg.get("auto_compact", True):
             return "Auto-compaction: off (Settings → Context)"
-        if not window:
+        cap = int(context_cfg.get(
+            "auto_compact_tokens", context_stats.DEFAULT_SOFT_CAP_TOKENS) or 0)
+        triggers = [f"{cap:,} tokens"] if cap > 0 else []
+        if window:
+            headroom = max(
+                context_stats.DEFAULT_MIN_HEADROOM_TOKENS,
+                int(window * context_stats.DEFAULT_HEADROOM_RATIO))
+            triggers.append(f"≤{headroom:,} free tokens")
+        if not triggers:
             return "Auto-compaction: on"
-        headroom = max(
-            context_stats.DEFAULT_MIN_HEADROOM_TOKENS,
-            int(window * context_stats.DEFAULT_HEADROOM_RATIO))
-        return (f"Auto-compaction: on · starts at ≤{headroom:,} free tokens "
-                "once the step settles with ≥4 new events")
+        return ("Auto-compaction: on · starts at " + " or ".join(triggers)
+                + " once the step settles with ≥4 new events")
+
+    def _summary_diagnostic_text(self, summary: str = "") -> str:
+        """Source, coverage and freshness of the rolling session summary."""
+        if not self.session_events and not summary:
+            return ""
+        meta = handoff.read_meta(self.session_file) if self.session_file else {}
+        events = self.session_events or []
+        total = len(events)
+        source = str(meta.get("source") or "")
+        source_label = {
+            "llm": "LLM summary",
+            "fallback": "Fallback summary",
+            "handoff": "Handed off from another session",
+        }.get(source) or ("Summary" if summary else "No summary yet")
+        headline = [f"<b>Summary:</b> {source_label}"]
+        provider = str(meta.get("provider") or "")
+        model = str(meta.get("model") or "")
+        if source == "llm" and model:
+            headline.append(html.escape(
+                f"{provider}::{model}" if provider else model))
+        updated = str(meta.get("updated_at") or "")[:19]
+        if updated:
+            headline.append(f"updated {html.escape(updated)}")
+        covered = handoff.summary_coverage(meta, events) if summary else 0
+        if total:
+            if covered >= total:
+                coverage = f"covers all {total:,} events"
+            else:
+                coverage = (f"covers {covered:,} of {total:,} events "
+                            f"({total - covered:,} new)")
+        else:
+            coverage = "no events yet"
+        details = [coverage]
+        if self._summary_pending:
+            details.append("refresh running")
+        elif self.session_file and events:
+            context_cfg = self._summary_settings()
+            if not context_cfg.get("handoff_enabled", True):
+                details.append("refresh paused (handoff disabled)")
+            else:
+                provider_id, model_id = self._summary_model_ids()
+                try:
+                    ratio = float(context_cfg.get(
+                        "summary_threshold_ratio", handoff.DEFAULT_THRESHOLD_RATIO))
+                except (TypeError, ValueError):
+                    ratio = handoff.DEFAULT_THRESHOLD_RATIO
+                try:
+                    refresh_tokens = int(context_cfg.get(
+                        "summary_refresh_tokens", handoff.DEFAULT_REFRESH_TOKENS) or 0)
+                except (TypeError, ValueError):
+                    refresh_tokens = handoff.DEFAULT_REFRESH_TOKENS
+                due = handoff.needs_refresh(
+                    events, provider_id, model_id, meta, self.session_file,
+                    threshold_ratio=ratio, refresh_tokens=refresh_tokens)
+                details.append("refresh due" if due else "up to date")
+        return " · ".join(headline) + "<br>" + " · ".join(details)
 
     def _show_context_summary(self):
         summary = handoff.read_summary(self.session_file) if self.session_file else ""
         if not summary and self.session_events:
-            summary = self._capture_handoff_summary()
+            summary = self._capture_handoff_summary(leaving=False)
         stats = self._context_stats_snapshot(summary)
         if not summary and not stats:
             QMessageBox.information(
@@ -3830,6 +4050,11 @@ class AppController(QObject):
         layout = QVBoxLayout(dialog)
         if stats:
             layout.addWidget(self._context_stats_widget(dialog, stats))
+        diagnostic = self._summary_diagnostic_text(summary)
+        if diagnostic:
+            info = QLabel(diagnostic, dialog)
+            info.setWordWrap(True)
+            layout.addWidget(info)
         if summary:
             browser = QTextBrowser(dialog)
             browser.setOpenExternalLinks(False)
@@ -3900,13 +4125,28 @@ class AppController(QObject):
             force=True, advance_boundary=True, trigger="manual", focus=focus)
         self.ui.add_message("<i>Compacting the session context…</i>")
 
-    def _show_session_journal(self):
-        if not self.session_events and not self.session_file:
+    def _show_session_journal(self, path: str = ""):
+        """Show the raw journal of the clicked session (or the open one)."""
+        path = str(path or "")
+        if not path or self._is_active_session(path):
+            session_file = self.session_file
+            events = self.session_events
+            mode = self.session_mode
+            objective = self.session_objective
+        elif self.project_manager is not None:
+            data = self.project_manager.load_session_data(path)
+            session_file = data.get("path") or path
+            events = data.get("events") or []
+            mode = data.get("mode") or ""
+            objective = data.get("objective") or ""
+        else:
+            session_file, events, mode, objective = "", [], "", ""
+        if not events:
             QMessageBox.information(
                 self.ui.main_window, "Session journal",
                 "This session has no recorded events yet.")
             return
-        text = self._session_journal_text()
+        text = self._session_journal_text(session_file, events, mode, objective)
         dialog = QDialog(self.ui.main_window)
         dialog.setWindowTitle("Session journal")
         dialog.resize(760, 600)
@@ -3920,20 +4160,31 @@ class AppController(QObject):
         layout.addWidget(close_button)
         dialog.exec()
 
-    def _session_journal_text(self) -> str:
+    def _is_active_session(self, path: str) -> bool:
+        if not path or not self.session_file:
+            return False
+        try:
+            return os.path.normcase(os.path.abspath(path)) == os.path.normcase(
+                os.path.abspath(self.session_file))
+        except (OSError, ValueError):
+            return False
+
+    def _session_journal_text(
+        self, session_file: str, events: list, mode: str, objective: str,
+    ) -> str:
         """Plain-text journal of every recorded session event."""
         lines = [
-            f"Session: {os.path.basename(self.session_file or '(new)')}",
-            f"Mode: {self.session_mode}",
-            f"Objective: {self.session_objective or '(not set)'}",
+            f"Session: {os.path.basename(session_file or '(new)')}",
+            f"Mode: {mode}",
+            f"Objective: {objective or '(not set)'}",
             "",
         ]
-        for event in self.session_events:
+        for event in events:
             event_type = str(event.get("type") or "event")
             stamp = str(event.get("ts") or "")
             if event_type == "message":
                 detail = f"{event.get('role') or 'message'}: {event_text(event)}"
-                attachments = self._journal_attachment_lines(event)
+                attachments = self._journal_attachment_lines(event, session_file)
                 if attachments:
                     detail += "\n" + attachments
             elif event_type == "tool_call":
@@ -3950,6 +4201,19 @@ class AppController(QObject):
                 detail = str(event.get("message") or event_text(event))
             elif event_type == "usage":
                 detail = self._usage_journal_detail(event)
+            elif event_type == "compaction":
+                try:
+                    covered = int(event.get("covered") or 0)
+                    total = int(event.get("total") or 0)
+                except (TypeError, ValueError):
+                    covered, total = 0, 0
+                detail = self._compaction_notice_text(
+                    str(event.get("trigger") or ""), covered, total)
+                source = "::".join(
+                    str(value) for value in (event.get("provider"),
+                                             event.get("model")) if value)
+                if source:
+                    detail += f"\nSummary by {source}"
             else:
                 detail = event_text(event)
             lines.append(f"[{stamp}] {event_type}\n{detail}\n")

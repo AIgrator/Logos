@@ -37,7 +37,7 @@ The journal always keeps the untrimmed text.
 | Group | Chat | Terminal | Browser | Vision |
 |---|---|---|---|---|
 | History trimming (Keep last N, Max chars, Dedup snapshots, Trim tracebacks) | not used | yes | yes | not used |
-| Rolling summary settings (switches, size, threshold, model) | yes | yes | yes | handoff / manual compaction |
+| Rolling summary settings (switches, size, threshold, budgets, model) | yes | yes | yes | handoff / manual compaction |
 | Automatic compaction | yes | yes | yes | not used |
 
 Chat has no local tool loop, so there is no tool history to trim. Vision uses the provider's Computer Use chain, which the provider manages itself; it receives summaries through handoffs and manual compaction, but automatic compaction does not run there.
@@ -169,10 +169,19 @@ A soft token budget for the LLM summary, written into the summarizer prompt as a
 The background summary refresh is triggered when the session's context fill reaches this fraction of the active model's context window.
 
 - Fill is taken from the latest provider-reported usage when available; otherwise it is estimated from the journal. In the estimated path, no refresh happens until at least 4 events are recorded.
+- The refresh also fires when uncovered journal events exceed the token budget below, and when a session is left before it is fully covered. On 1M+ windows those triggers do most of the work; this window fraction matters for small windows.
 - The refresh itself does not add a chat message or resend anything. The updated summary is picked up by any handoff or compaction block built after it.
-- Manual compaction and the capture before a mode switch force a refresh regardless of this threshold.
+- Manual compaction and the capture before leaving a session force a refresh regardless of this threshold.
 
 Lower values keep the summary fresher (more summarizer calls); higher values make it cheaper but staler. `0.60` is a good default. Use `0.75`–`0.85` if summarizer calls are expensive, and `0.40`–`0.50` if you often switch modes in the middle of a long task and need the handoff to be current.
+
+**Summary refresh budget** — *Settings.json key: `summary_refresh_tokens` · Default: `30000` · Range: 0–1,000,000, step 5,000*
+
+The primary trigger: the summary is refreshed once this many tokens of new journal events are not covered by the current summary. It is independent of the model window, so long sessions stay summarized even though 60% of a 1M-token window is unreachable in practice. `0` disables the budget and leaves only the window threshold.
+
+The budget is a cost dial: a lower value keeps the handoff closer to the journal (more summarizer calls), a higher value lets the summary lag behind. At the default, one refresh happens per ~30,000 tokens of new history — a handful of calls in a long session, not one per step.
+
+**When to change it:** lower it (10,000–15,000) when the summary must follow a long, detail-heavy task closely; raise it (60,000–100,000) when summarizer calls are expensive and the summary is mostly needed at handoff points.
 
 ### 10. Summarizer model
 
@@ -198,7 +207,7 @@ When the context window is nearly full, Logos compacts the session on its own in
 
 The trigger requires all of the following:
 
-- free space in the context window is at or below the response buffer — `max(15% of the window, 16,000 tokens)`;
+- the context reached `auto_compact_tokens` (default 200,000), or free space in the context window is at or below the response buffer — `max(15% of the window, 16,000 tokens)`;
 - the session is at rest: no streaming answer, no running tool call, no waiting background job;
 - at least 4 new events have accumulated since the last compaction boundary;
 - at least 120 seconds have passed since the last compaction;
@@ -212,13 +221,19 @@ What happens then:
 
 The journal, the chat window and the session files keep the full history. Only the model-facing view is shortened. **Compact now** in the Session context dialog works regardless of this switch.
 
+**Auto-compact token cap** — *Settings.json key: `auto_compact_tokens` · Default: `200000` · Range: 0–1,000,000, step 10,000*
+
+Automatic compaction also fires when the context reaches this size, even though a 1M+ token window is far from full: smaller requests are cheaper and faster, and the summary keeps the state that matters. `0` disables the cap and leaves only the free-space rule.
+
+**When to change it:** on 1M+ windows keep 200,000; cost-sensitive setups can use 100,000–150,000 for more frequent, smaller requests; set 0 if you want the model to see as much of the raw history as possible.
+
 **When to change it:** leave it on for long autonomous runs so the agent does not stall at the window limit mid-task. Turn it off if you want to decide yourself when the history is compacted, accepting that a very long task can reach the model limit.
 
 ## How the options interact
 
-- **Rolling handoff summary** is the master switch for options 5–7 and 11. The four history-trimming options are independent of it, and *Compact now* is not gated by it.
+- **Rolling handoff summary** is the master switch for options 5–7, 11 and 12. The four history-trimming options are independent of it, and *Compact now* is not gated by it.
 - **Auto-compact** needs both its own switch and the master switch. It uses the summary, so it also depends on the summarizer settings.
-- The **refresh threshold** only schedules background updates. Mode switches, model switches, manual compaction and auto-compaction force a refresh when they need a current summary.
+- The **refresh threshold and budget** only schedule background updates. Mode switches, model switches, leaving a session, manual compaction and auto-compaction force a refresh when they need a current summary.
 - History trimming reduces what is sent but never touches the journal, the summary or the UI. Summary settings never change the history itself; they only change the compact replacement for it.
 - `AGENTS.md` rules, handoff seeds, session context and compaction summaries are protected: none of the trimming options shorten them.
 
@@ -229,14 +244,14 @@ The journal, the chat window and the session files keep the full history. Only t
 | Default use | Keep all defaults. The app trims baseline history, keeps a summary, and compacts automatically. |
 | Long Terminal sessions with hundreds of steps | Keep last N steps full: `20`–`50`; Max chars per entry: `6,000`–`8,000`; Trim long tracebacks: on. |
 | Long Browser sessions on the same page | Dedup repeated snapshots: on; optionally Keep last N steps full: `20`–`40`. |
-| Cost-sensitive setups | Summarizer model: a cheap model; Refresh threshold: `0.75`–`0.85`; auto-compact stays on. |
+| Cost-sensitive setups | Summarizer model: a cheap model; Auto-compact at: `100,000`–`150,000`; Summary refresh at: `60,000`; auto-compact stays on. |
 | Need a clean start on every mode switch | On mode switch: off (and expect no cross-mode context). |
 | Prefer manual control of history | Auto-compact: off; use **Compact now** in the Session context dialog. |
 
 ## Where to see what happened
 
 - **Context indicator** next to the Send button: percentage of the model window in use. Hover it for the token counts and whether they are provider-reported or estimated.
-- **Session context dialog** (click the indicator): current fill, model window, usage of the latest request and session totals, the breakdown of the model payload, the compaction boundary, and the **Compact now** button with an optional compaction focus.
+- **Session context dialog** (click the indicator): current fill, model window, usage of the latest request and session totals, the breakdown of the model payload, the compaction boundary, and the **Compact now** button with an optional compaction focus. A summary line above the text states whether the rolling summary came from the model or the deterministic fallback (with provider/model and update time), how many journal events it covers, and whether a refresh is due, running or paused.
 - **Session journal** (from the session menu): the full, untrimmed record of every event.
 - On disk: `.logos/sessions/<name>.jsonl`, `<name>.summary.md` and `<name>.summary.json` inside the active project.
 

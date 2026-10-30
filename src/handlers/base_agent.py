@@ -24,7 +24,7 @@ import os
 import re
 import uuid
 
-from context import model_context
+from context import model_context, skills
 from project_manager import event_text
 from states import VisionState
 from src.suggestions import normalize_suggestions
@@ -639,9 +639,12 @@ class BaseAgentHandler:
         if self.MODE_NAME not in ("terminal", "browser"):
             return {}
         system_prompt, user_prompt = self.build_prompts()
+        skills_text = self.skills_block()
         _, stats = self._model_history_and_stats()
         return {
             "system_text": system_prompt or "",
+            "skills_text": skills_text,
+            "skills_count": skills.prompt_block_count(skills_text),
             "history_text": "",
             "user_text": user_prompt or "",
             "tool_schema_text": model_context.tool_schema_text(

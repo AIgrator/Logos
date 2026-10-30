@@ -49,6 +49,10 @@ _LIST_SECTIONS = frozenset({
 })
 DEFAULT_MAX_TOKENS = 1200
 DEFAULT_THRESHOLD_RATIO = 0.6
+# Uncovered-journal budget: refreshing on a window fraction alone never fires
+# on 1M+ windows, so the summary is also refreshed once this many tokens of
+# new events are not covered yet.
+DEFAULT_REFRESH_TOKENS = 30_000
 MIN_EVENTS_FOR_SUMMARY = 4
 MAX_PROMPT_CHARS = 40_000
 MAX_EVENT_CHARS = 2_400
@@ -414,16 +418,25 @@ def fallback_summary(events: list, previous: str = "") -> str:
     ) or ["- None."]
     unfinished = _section_lines(previous_sections, "Unfinished") or ["- None."]
 
-    last_event = events[-1]
-    current = _clip(event_text(last_event) or _event_line(last_event), 700) or "(not set)"
-
-    next_steps = []
+    # Current describes where the work stands, so it comes from the last
+    # assistant message or, failing that, the latest request. Raw tool output
+    # is the last resort: it says what ran, not what the session is doing.
+    last_assistant = next(
+        (event_text(event) for event in reversed(events)
+         if event.get("type") == "message" and event.get("role") == "assistant"
+         and event_text(event)),
+        "",
+    )
     last_user = next(
         (event_text(event) for event in reversed(events)
          if event.get("type") == "message" and event.get("role") == "user"
          and event_text(event)),
         "",
     )
+    current = _clip(
+        last_assistant or last_user or _event_line(events[-1]), 700) or "(not set)"
+
+    next_steps = []
     if last_user:
         next_steps.append(f"- Continue from the latest request: {_clip(last_user, 500)}")
     else:
@@ -669,9 +682,14 @@ def needs_refresh(
     session_file: str,
     *,
     threshold_ratio: float = DEFAULT_THRESHOLD_RATIO,
+    refresh_tokens: int = DEFAULT_REFRESH_TOKENS,
     force: bool = False,
 ) -> bool:
-    """Whether the rolling summary is missing or worth updating now."""
+    """Whether the rolling summary is missing or worth updating now.
+
+    The uncovered-journal token budget is the primary trigger; the window
+    fraction stays as a secondary trigger for small windows.
+    """
     count = len(events or [])
     if not count:
         return False
@@ -691,9 +709,22 @@ def needs_refresh(
         actual = _latest_completion_tokens(events)
         if actual:
             window = context_usage(provider_id, model_id, "")["window"]
-            return bool(window and (actual / window) >= threshold)
+            if window and (actual / window) >= threshold:
+                return True
     if count < MIN_EVENTS_FOR_SUMMARY:
         return False
+    budget = int(refresh_tokens or 0)
+    if budget > 0:
+        uncovered = events[processed:] if processed > 0 else list(events)
+        lines = []
+        for event in uncovered:
+            line = _event_line(event)
+            if line:
+                lines.append(line)
+        if lines:
+            used = context_usage(provider_id, model_id, "\n".join(lines))["used"]
+            if used >= budget:
+                return True
     if not meta:
         return True
     if not provider_id or not model_id:

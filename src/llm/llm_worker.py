@@ -346,6 +346,7 @@ class LLMWorker(QObject):
                 attachments=[],
                 system_prompt=system_prompt,
                 history=[],
+                require_structured=False,
             )
             self._emit_usage("summary", provider)
             text = ""

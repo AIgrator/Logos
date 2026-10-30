@@ -43,6 +43,8 @@ from src.ui.theme_manager import (
 
 from settings_manager import SettingsManager
 from context import skills as skills_store
+from context import context_stats as context_stats_store
+from context import handoff as handoff_store
 from llm import PROVIDERS, providers_ready, start_provider_warmup
 from build_info import APP_VERSION
 from src.ui.widgets.font_manager.font_combobox import FontComboBox
@@ -382,6 +384,10 @@ class SettingsWindow(QDialog):
         self.auto_compact_checkbox.setChecked(bool(context_settings.get("auto_compact", True)))
         self.summary_max_tokens_spinbox.setValue(int(context_settings.get("summary_max_tokens", 1200)))
         self.summary_threshold_spinbox.setValue(float(context_settings.get("summary_threshold_ratio", 0.6)))
+        self.summary_refresh_tokens_spinbox.setValue(int(context_settings.get(
+            "summary_refresh_tokens", handoff_store.DEFAULT_REFRESH_TOKENS)))
+        self.auto_compact_tokens_spinbox.setValue(int(context_settings.get(
+            "auto_compact_tokens", context_stats_store.DEFAULT_SOFT_CAP_TOKENS)))
         self.summary_model_lineedit.setText(str(context_settings.get("summary_model") or ""))
 
         # Compact Mode
@@ -492,6 +498,8 @@ class SettingsWindow(QDialog):
             "auto_compact": self.auto_compact_checkbox.isChecked(),
             "summary_max_tokens": self.summary_max_tokens_spinbox.value(),
             "summary_threshold_ratio": round(self.summary_threshold_spinbox.value(), 2),
+            "summary_refresh_tokens": self.summary_refresh_tokens_spinbox.value(),
+            "auto_compact_tokens": self.auto_compact_tokens_spinbox.value(),
             "summary_model": self.summary_model_lineedit.text().strip(),
         }
         # Preserve keys with no UI widget so saving never silently drops them.
@@ -1369,15 +1377,45 @@ class SettingsWindow(QDialog):
 
         self.auto_compact_checkbox = QCheckBox()
         auto_compact_tooltip = (
-            "When free space in the model window drops to the response buffer "
-            "(~15% of the window, at least 16k tokens), older events are "
-            "compacted into the session summary automatically once the current "
-            "step finishes. Chat, Terminal and Browser only."
+            "When the context reaches the token cap below, or free space in "
+            "the model window drops to the response buffer (~15% of the "
+            "window, at least 16k tokens), older events are compacted into the "
+            "session summary automatically once the current step finishes. "
+            "Chat, Terminal and Browser only."
         )
         context_layout.addWidget(self._create_context_setting_label(
             "Auto-compact on low headroom:", "11-auto-compact-on-low-headroom"), 10, 0)
         context_layout.addWidget(self._create_help_label(auto_compact_tooltip), 10, 1, Qt.AlignLeft)
         context_layout.addWidget(self.auto_compact_checkbox, 10, 3)
+
+        self.summary_refresh_tokens_spinbox = QSpinBox()
+        self.summary_refresh_tokens_spinbox.setRange(0, 1_000_000)
+        self.summary_refresh_tokens_spinbox.setSingleStep(5000)
+        self.summary_refresh_tokens_spinbox.setFixedWidth(100)
+        refresh_tokens_tooltip = (
+            "Refresh the rolling summary once this many tokens of new journal "
+            "events are not covered yet. Works independently of the model "
+            "window, so long sessions keep a current summary on 1M+ windows. "
+            "0 = only the refresh threshold above."
+        )
+        context_layout.addWidget(self._create_context_setting_label(
+            "Summary refresh at:", "12-summary-refresh-at"), 11, 0)
+        context_layout.addWidget(self._create_help_label(refresh_tokens_tooltip), 11, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.summary_refresh_tokens_spinbox, 11, 3)
+
+        self.auto_compact_tokens_spinbox = QSpinBox()
+        self.auto_compact_tokens_spinbox.setRange(0, 1_000_000)
+        self.auto_compact_tokens_spinbox.setSingleStep(10000)
+        self.auto_compact_tokens_spinbox.setFixedWidth(100)
+        cap_tooltip = (
+            "Compact older events into the summary once the context reaches "
+            "this many tokens, even when the model window is far from full. "
+            "Keeps requests smaller and cheaper. 0 = only the free-space rule."
+        )
+        context_layout.addWidget(self._create_context_setting_label(
+            "Auto-compact at:", "13-auto-compact-at"), 12, 0)
+        context_layout.addWidget(self._create_help_label(cap_tooltip), 12, 1, Qt.AlignLeft)
+        context_layout.addWidget(self.auto_compact_tokens_spinbox, 12, 3)
 
         return group
 

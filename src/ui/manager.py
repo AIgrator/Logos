@@ -39,8 +39,9 @@ from .widgets.model_switch_popup import ModelSwitchPopup, build_effort_menu
 from .widgets.custom_title_bar import CustomTitleBar
 from .widgets.flow_layout import FlowLayout
 from .widgets.non_scrollable_scroll_area import NonScrollableScrollArea
-from .navigation import HomePage, ProjectSidebar
+from .navigation import HomePage, ProjectSidebar, _theme_colors
 from .right_panel import RightPanel
+from .context_popover import ContextPopover
 
 class MainWindow(QMainWindow):
     """Custom MainWindow to ensure the application quits on close."""
@@ -290,9 +291,10 @@ class UIManager(QWidget):
     session_open_requested = Signal(str)
     session_renamed = Signal(str, str)
     session_deleted = Signal(str)
+    session_journal_requested = Signal(str)
     new_session_requested = Signal()
     context_requested = Signal()
-    journal_requested = Signal()
+    context_compact_requested = Signal()
     home_requested = Signal()
 
     # Signals for new pilot controls
@@ -368,6 +370,7 @@ class UIManager(QWidget):
         self.right_panel = RightPanel(self.controller.theme_manager)
         self.right_panel.attachment_open_requested.connect(
             self._open_session_attachment)
+        self.right_panel.context_clicked.connect(self._show_context_popover)
         self.workspace_layout.addWidget(self.right_panel)
         self._restore_right_panel_state()
         self._update_right_panel_visibility()
@@ -382,17 +385,19 @@ class UIManager(QWidget):
         self.home_page.project_removed.connect(self.project_removed.emit)
         self.home_page.session_renamed.connect(self.session_renamed.emit)
         self.home_page.session_deleted.connect(self.session_deleted.emit)
+        self.home_page.session_journal_requested.connect(
+            self.session_journal_requested.emit)
         self.sidebar.home_requested.connect(self.home_requested.emit)
         self.sidebar.project_selected.connect(self.project_switch_requested.emit)
         self.sidebar.session_selected.connect(self.session_open_requested.emit)
         self.sidebar.new_session_requested.connect(self.new_session_requested.emit)
-        self.sidebar.context_requested.connect(self.context_requested.emit)
-        self.sidebar.journal_requested.connect(self.journal_requested.emit)
         self.sidebar.settings_requested.connect(self.settings_button_clicked.emit)
         self.sidebar.project_renamed.connect(self.project_renamed.emit)
         self.sidebar.project_removed.connect(self.project_removed.emit)
         self.sidebar.session_renamed.connect(self.session_renamed.emit)
         self.sidebar.session_deleted.connect(self.session_deleted.emit)
+        self.sidebar.session_journal_requested.connect(
+            self.session_journal_requested.emit)
         self._restore_sidebar_state()
 
         self.chat_widget = ChatWidget(self.controller.theme_manager)
@@ -558,7 +563,8 @@ class UIManager(QWidget):
         self.context_indicator_button.setCursor(Qt.PointingHandCursor)
         self.context_indicator_button.setFocusPolicy(Qt.NoFocus)
         self.context_indicator_button.setVisible(False)
-        self.context_indicator_button.clicked.connect(self.context_requested.emit)
+        self.context_indicator_button.clicked.connect(
+            lambda: self._show_context_popover(self.context_indicator_button))
         self.tooltip_manager.install(
             self.context_indicator_button,
             "Context window usage. Click to open Session context.")
@@ -948,6 +954,9 @@ class UIManager(QWidget):
         """Shows the model-facing context fill next to Send; None hides it."""
         if not stats:
             self._context_indicator_stats = None
+            popover = getattr(self, "_context_popover_widget", None)
+            if popover is not None:
+                popover.hide()
             self.context_indicator_button.setVisible(False)
             self._schedule_toolbar_reflow()
             return
@@ -980,12 +989,16 @@ class UIManager(QWidget):
             f"Context {approximate}{percent:.0f}% full\n"
             f"{approximate}{used:,} / {window:,} tokens · {source_label}"
             f"{cache_line}\n"
-            "Click to open Session context")
+            "Click for the context breakdown")
         self._style_context_indicator(percent)
         was_hidden = self.context_indicator_button.isHidden()
         self.context_indicator_button.setVisible(True)
         if was_hidden:
             self._schedule_toolbar_reflow()
+        popover = getattr(self, "_context_popover_widget", None)
+        if popover is not None and popover.isVisible():
+            self._style_context_popover(popover)
+            popover.set_stats(stats)
 
     def _style_context_indicator(self, percent: float | None = None):
         if percent is None:
@@ -1013,6 +1026,54 @@ class UIManager(QWidget):
                 color: {hover};
             }}
         """)
+
+    def _context_popover(self) -> ContextPopover:
+        popover = getattr(self, "_context_popover_widget", None)
+        if popover is None:
+            popover = ContextPopover(self.main_window)
+            popover.compress_requested.connect(
+                self.context_compact_requested.emit)
+            popover.details_requested.connect(self.context_requested.emit)
+            self._context_popover_widget = popover
+        return popover
+
+    def _style_context_popover(self, popover: ContextPopover):
+        theme = self.controller.theme_manager
+        popover.set_theme(
+            _theme_colors(theme),
+            getattr(theme, "current_theme", "dark") == "dark",
+            theme.get_style("SUCCESS_COLOR"),
+            theme.get_style("WARNING_COLOR"),
+            theme.get_style("ERROR_COLOR"),
+        )
+
+    def _show_context_popover(self, anchor=None):
+        """Detail card above the context fill pill or the panel gauge."""
+        stats = getattr(self, "_context_indicator_stats", None)
+        if not stats:
+            return
+        popover = self._context_popover()
+        self._style_context_popover(popover)
+        popover.set_stats(stats)
+        popover.adjustSize()
+        target = anchor if isinstance(anchor, QWidget) else None
+        if target is None or not target.isVisible():
+            target = self.context_indicator_button
+        if target is None or not target.isVisible():
+            return
+        top_left = target.mapToGlobal(QPoint(0, 0))
+        x = top_left.x() + target.width() - popover.width()
+        y = top_left.y() - popover.height() - 8
+        screen = QApplication.screenAt(top_left) or QApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            x = max(area.left() + 6,
+                    min(x, area.right() - popover.width() - 6))
+            if y < area.top() + 6:
+                y = top_left.y() + target.height() + 8
+        popover.move(x, y)
+        popover.show()
+        popover.raise_()
 
     def on_settings_changed(self, new_settings):
         if 'compact_mode' in new_settings:

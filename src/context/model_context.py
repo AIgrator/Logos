@@ -305,13 +305,20 @@ def tool_schema_text(mode: str, schema_name: str | None) -> str:
 
 
 def payload_token_estimate(payload: dict | None) -> dict:
-    """Token estimates for the components of one model request."""
+    """Token estimates for the components of one model request.
+
+    ``skills_text`` is counted separately and subtracted from the system
+    prompt so the components stay disjoint for the context breakdown.
+    """
     payload = payload if isinstance(payload, dict) else {}
     images = _as_int(payload.get("image_count"))
+    skills = estimate_tokens(str(payload.get("skills_text") or ""))
+    system = max(0, estimate_tokens(str(payload.get("system_text") or "")) - skills)
     return {
-        "system": estimate_tokens(str(payload.get("system_text") or "")),
+        "system": system,
         "history": estimate_tokens(str(payload.get("history_text") or "")),
         "user": estimate_tokens(str(payload.get("user_text") or "")),
         "tool_schema": estimate_tokens(str(payload.get("tool_schema_text") or "")),
+        "skills": skills,
         "images": images * IMAGE_TOKEN_ESTIMATE,
     }

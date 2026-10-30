@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 from attachments import format_size
 from git_status import read_status
 from . import editor_launcher
+from .context_popover import ContextGauge
 from .navigation import _theme_colors
 
 _HIDDEN_NAMES = frozenset({
@@ -117,6 +118,7 @@ class RightPanel(QWidget):
     PAGE_GIT = 3
 
     attachment_open_requested = Signal(str)
+    context_clicked = Signal(object)
 
     def __init__(self, theme_manager, parent=None):
         super().__init__(parent)
@@ -124,8 +126,10 @@ class RightPanel(QWidget):
         self.collapsed = False
         self._mode = ""
         self._root = ""
+        self._has_context_fill = False
         self._last_title = ""
         self._last_summary = {}
+        self._last_compaction = {}
         self._last_skills = []
         self._last_tools = []
         self._last_attachments = []
@@ -158,12 +162,34 @@ class RightPanel(QWidget):
         self.title_label.setObjectName("PanelSection")
         header.addWidget(self.title_label)
         header.addStretch(1)
+        self.context_gauge = ContextGauge(24, self)
+        self.context_gauge.clicked.connect(
+            lambda: self.context_clicked.emit(self.context_gauge))
+        header.addWidget(self.context_gauge)
+        self.context_percent = QLabel("")
+        self.context_percent.setObjectName("PanelContextPercent")
+        header.addWidget(self.context_percent)
         self.collapse_button = QPushButton()
         self.collapse_button.setObjectName("PanelIconButton")
         self.collapse_button.setFixedSize(26, 26)
         self.collapse_button.clicked.connect(self.toggle_collapsed)
         header.addWidget(self.collapse_button)
         layout.addLayout(header)
+
+        self.context_rail = QWidget(self)
+        rail_layout = QVBoxLayout(self.context_rail)
+        rail_layout.setContentsMargins(0, 2, 0, 0)
+        rail_layout.setSpacing(2)
+        self.context_gauge_rail = ContextGauge(24, self.context_rail)
+        self.context_gauge_rail.clicked.connect(
+            lambda: self.context_clicked.emit(self.context_gauge_rail))
+        rail_layout.addWidget(self.context_gauge_rail, 0, Qt.AlignHCenter)
+        self.context_percent_rail = QLabel("")
+        self.context_percent_rail.setObjectName("PanelContextPercent")
+        self.context_percent_rail.setAlignment(Qt.AlignHCenter)
+        rail_layout.addWidget(self.context_percent_rail, 0, Qt.AlignHCenter)
+        self.context_rail.hide()
+        layout.addWidget(self.context_rail)
 
         self.project_label = QLabel("No project")
         self.project_label.setObjectName("PanelProject")
@@ -251,6 +277,7 @@ class RightPanel(QWidget):
         self._summary_separator.setVisible(False)
         layout.addWidget(self._summary_separator)
         layout.addWidget(self._build_summary_block(page))
+        layout.addWidget(self._build_compaction_block(page))
         layout.addStretch(1)
         scroll.setWidget(page)
         return scroll
@@ -297,6 +324,24 @@ class RightPanel(QWidget):
             self._summary_sections[key] = (section, body)
         block.setVisible(False)
         self._summary_block = block
+        return block
+
+    def _build_compaction_block(self, parent):
+        block = QWidget(parent)
+        layout = QVBoxLayout(block)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        caption = QLabel("COMPACTION")
+        caption.setObjectName("PanelSummaryCaption")
+        self.compaction_value = QLabel("")
+        self.compaction_value.setObjectName("PanelSummaryText")
+        self.compaction_value.setWordWrap(True)
+        self.compaction_value.setTextInteractionFlags(
+            Qt.TextInteractionFlag.TextSelectableByMouse)
+        layout.addWidget(caption)
+        layout.addWidget(self.compaction_value)
+        block.setVisible(False)
+        self._compaction_block = block
         return block
 
     def _build_stats_grid(self, parent):
@@ -405,12 +450,18 @@ class RightPanel(QWidget):
         data = data or {}
         title = str(data.get("title") or "").strip()
         self._set_stat_values(data)
+        self._apply_context_fill(data)
         summary = data.get("summary")
         summary = summary if isinstance(summary, dict) else {}
         if summary != self._last_summary or title != self._last_title:
             self._render_summary(summary, title)
             self._last_summary = dict(summary)
             self._last_title = title
+        compaction = data.get("compaction")
+        compaction = compaction if isinstance(compaction, dict) else {}
+        if compaction != self._last_compaction:
+            self._render_compaction(compaction)
+            self._last_compaction = dict(compaction)
         skills = [record for record in data.get("skills") or []
                   if isinstance(record, dict)]
         tools = [record for record in data.get("tools") or []
@@ -470,6 +521,45 @@ class RightPanel(QWidget):
         set_value("created_at", self._format_ts(data.get("created_at")))
         set_value("last_activity", self._format_ts(data.get("last_activity")))
 
+    def _apply_context_fill(self, data: dict):
+        """Ring in the header (expanded) or rail (collapsed) with a tooltip."""
+        try:
+            window = int(data.get("window") or 0)
+            used = int(data.get("context_tokens") or 0)
+            percent = float(data.get("percent") or 0.0)
+        except (TypeError, ValueError):
+            window, used, percent = 0, 0, 0.0
+        self._has_context_fill = bool(window)
+        if not window:
+            self.context_gauge.hide()
+            self.context_percent.hide()
+            self.context_rail.hide()
+            return
+        source = str(data.get("context_source") or "")
+        source_label = {
+            "actual": "provider-reported",
+            "payload": "estimated from the request",
+            "estimated": "estimated from the journal",
+        }.get(source, source)
+        tooltip = (f"Context {percent:.0f}% full\n"
+                   f"{used:,} / {window:,} tokens")
+        if source_label:
+            tooltip += f" · {source_label}"
+        tooltip += "\nClick for the breakdown"
+        for gauge in (self.context_gauge, self.context_gauge_rail):
+            gauge.set_state(percent, str(data.get("context_status") or ""))
+            gauge.setToolTip(tooltip)
+        text = f"{percent:.0f}%"
+        self.context_percent.setText(text)
+        self.context_percent_rail.setText(text)
+        self._sync_context_widgets()
+
+    def _sync_context_widgets(self):
+        visible = getattr(self, "_has_context_fill", False)
+        self.context_gauge.setVisible(visible and not self.collapsed)
+        self.context_percent.setVisible(visible and not self.collapsed)
+        self.context_rail.setVisible(visible and self.collapsed)
+
     def _render_summary(self, summary: dict, title: str):
         title_norm = " ".join(str(title or "").split())
         visible = False
@@ -490,6 +580,39 @@ class RightPanel(QWidget):
             self._summary_source_tooltip(summary.get("source")))
         self._summary_block.setVisible(visible)
         self._summary_separator.setVisible(visible)
+
+    def _render_compaction(self, info: dict):
+        try:
+            covered = max(0, int(info.get("covered") or 0))
+            total = max(0, int(info.get("total") or 0))
+        except (TypeError, ValueError):
+            covered, total = 0, 0
+        if not covered:
+            self.compaction_value.setText("")
+            self._compaction_block.setVisible(False)
+            return
+        line = f"{covered:,} of {total:,} events" if total else f"{covered:,} events"
+        trigger = {"auto": "automatic", "manual": "manual"}.get(
+            str(info.get("trigger") or ""))
+        if trigger:
+            line += f" · {trigger}"
+        source = str(info.get("summary_source") or "")
+        details = []
+        if source == "llm":
+            model = str(info.get("model") or "").strip()
+            details.append(f"LLM summary ({model})" if model else "LLM summary")
+        elif source == "fallback":
+            details.append("Fallback summary")
+        stamp = self._format_short_ts(info.get("at"))
+        if stamp:
+            details.append(stamp)
+        if details:
+            line += "\n" + " · ".join(details)
+        self.compaction_value.setText(line)
+        self.compaction_value.setToolTip(
+            "Older journal events stay in the transcript and in this session's "
+            "file, but the model continues from the session summary.")
+        self._compaction_block.setVisible(True)
 
     @staticmethod
     def _summary_html(text: str) -> str:
@@ -1017,6 +1140,7 @@ class RightPanel(QWidget):
                 and self.stack.currentIndex() == self.PAGE_GIT):
             self._select_page(self.PAGE_SESSION)
         self._apply_tool_tabs()
+        self._sync_context_widgets()
         self.collapse_button.setToolTip(
             "Expand panel" if self.collapsed else "Collapse panel")
         self._apply_style()
@@ -1079,6 +1203,13 @@ class RightPanel(QWidget):
         self.git_refresh_button.setIcon(
             qta.icon("fa5s.sync", color=colors["muted"]))
         self.git_refresh_button.setIconSize(QSize(13, 13))
+        for gauge in (self.context_gauge, self.context_gauge_rail):
+            gauge.set_theme(
+                colors,
+                self.theme_manager.get_style("SUCCESS_COLOR"),
+                self.theme_manager.get_style("WARNING_COLOR"),
+                self.theme_manager.get_style("ERROR_COLOR"),
+            )
         self._render_git(self._last_git_status or {})
         self.setStyleSheet(f"""
             QWidget#RightPanel {{
@@ -1136,6 +1267,11 @@ class RightPanel(QWidget):
             QLabel#PanelSection {{
                 color: {colors['muted']};
                 font-size: 11px;
+                font-weight: 600;
+            }}
+            QLabel#PanelContextPercent {{
+                color: {colors['muted']};
+                font-size: 10px;
                 font-weight: 600;
             }}
             QLabel#PanelProject {{

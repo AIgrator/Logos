@@ -190,10 +190,11 @@ class _ProjectMenuMixin:
                 self.project_removed.emit(path, delete_data)
 
     def _show_session_menu(self, path: str, title: str, pos, view=None):
-        """Rename/reveal/delete menu shared by the home screen and sidebar."""
+        """Rename/reveal/journal/delete menu shared by home and sidebar."""
         global_pos = view.viewport().mapToGlobal(pos) if view is not None else pos
         menu = QMenu(self)
         rename_action = menu.addAction("Rename...")
+        journal_action = menu.addAction("Show journal")
         reveal_action = menu.addAction("Show in Explorer")
         menu.addSeparator()
         delete_action = menu.addAction("Delete Session...")
@@ -202,6 +203,8 @@ class _ProjectMenuMixin:
             new_title = _ask_session_title(self, title or "Empty session")
             if new_title:
                 self.session_renamed.emit(path, new_title)
+        elif chosen is journal_action:
+            self.session_journal_requested.emit(path)
         elif chosen is reveal_action:
             _reveal_in_explorer(path)
         elif chosen is delete_action:
@@ -221,6 +224,7 @@ class HomePage(_ProjectMenuMixin, QWidget):
     project_removed = Signal(str, bool)  # project path, delete .logos data
     session_renamed = Signal(str, str)   # session path, new title
     session_deleted = Signal(str)        # session path
+    session_journal_requested = Signal(str)  # session path
 
     def __init__(self, project_manager, theme_manager, parent=None):
         super().__init__(parent)
@@ -472,13 +476,12 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
     project_selected = Signal(str)
     session_selected = Signal(str)
     new_session_requested = Signal()
-    context_requested = Signal()
-    journal_requested = Signal()
     settings_requested = Signal()
     project_renamed = Signal(str, str)   # project path, new name
     project_removed = Signal(str, bool)  # project path, delete .logos data
     session_renamed = Signal(str, str)   # session path, new title
     session_deleted = Signal(str)        # session path
+    session_journal_requested = Signal(str)  # session path
 
     EXPANDED_WIDTH = 238
     COLLAPSED_WIDTH = 54
@@ -563,18 +566,6 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.new_session_button.clicked.connect(self.new_session_requested.emit)
         root.addWidget(self.new_session_button)
 
-        self.context_button = QPushButton("Context")
-        self.context_button.setIcon(qta.icon("fa5s.file-alt", color=colors["text"]))
-        self.context_button.setToolTip("Show session context summary")
-        self.context_button.clicked.connect(self.context_requested.emit)
-        root.addWidget(self.context_button)
-
-        self.journal_button = QPushButton("Journal")
-        self.journal_button.setIcon(qta.icon("fa5s.list", color=colors["text"]))
-        self.journal_button.setToolTip("Show the current session journal")
-        self.journal_button.clicked.connect(self.journal_requested.emit)
-        root.addWidget(self.journal_button)
-
         self.settings_button = QPushButton("Settings")
         self.settings_button.setIcon(qta.icon("fa5s.cog", color=colors["text"]))
         self.settings_button.setToolTip("Settings")
@@ -634,8 +625,6 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.collapse_button.setIcon(qta.icon("fa5s.bars", color=colors["muted"]))
         self.home_button.setIcon(qta.icon("fa5s.home", color=colors["text"]))
         self.new_session_button.setIcon(qta.icon("fa5s.pen", color=colors["text"]))
-        self.context_button.setIcon(qta.icon("fa5s.file-alt", color=colors["text"]))
-        self.journal_button.setIcon(qta.icon("fa5s.list", color=colors["text"]))
         self.settings_button.setIcon(qta.icon("fa5s.cog", color=colors["text"]))
         self._render_projects()
 
@@ -650,8 +639,6 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
         self.collapse_button.setToolTip("Expand sidebar" if self.collapsed else "Collapse sidebar")
         self.home_button.setText("" if self.collapsed else "Home")
         self.new_session_button.setText("" if self.collapsed else "New session")
-        self.context_button.setText("" if self.collapsed else "Context")
-        self.journal_button.setText("" if self.collapsed else "Journal")
         self.settings_button.setText("" if self.collapsed else "Settings")
         self.section_label.setVisible(not self.collapsed)
         self._top_layout.setStretch(0, 1 if self.collapsed else 0)

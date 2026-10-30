@@ -240,17 +240,13 @@ class XAIProvider(BaseLLMProvider):
         if self.reasoning_effort:
             request_body["reasoning_effort"] = self.reasoning_effort
 
-        # Always provide all tools if JSON output is required, then specify tool_choice
-        if self.require_json_output:
+        # Tools belong to structured requests only: plain-text calls (chat,
+        # session summaries) must answer with text, never with a tool call.
+        if self.require_json_output and schema_name:
             all_tools = self._get_tools_from_cache()
             if all_tools:
                 request_body["tools"] = all_tools
-                if schema_name:
-                    # Force a specific tool
-                    request_body["tool_choice"] = {"type": "function", "function": {"name": schema_name}}
-                else:
-                    # Let the model choose
-                    request_body["tool_choice"] = "auto"
+                request_body["tool_choice"] = {"type": "function", "function": {"name": schema_name}}
             else:
                 logger.warning("`require_json_output` is True, but no tools were found in cache.")
 

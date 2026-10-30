@@ -120,6 +120,13 @@ def prompt_block(project_root: str, user_home: str | None = None) -> str:
     return "\n".join(lines)
 
 
+def prompt_block_count(block: str) -> int:
+    """Skills actually listed by ``prompt_block`` (omitted tail excluded)."""
+    return sum(
+        1 for line in str(block or "").splitlines()
+        if line.startswith("- ") and "more skill(s)" not in line)
+
+
 def load(project_root: str, name: str, user_home: str | None = None) -> str:
     """Full instructions for one skill, plus its auxiliary file paths."""
     items = discover(project_root, user_home)

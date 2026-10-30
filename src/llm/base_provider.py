@@ -199,11 +199,14 @@ class BaseLLMProvider(ABC):
         attachments: list[Any] | None = None,
         system_prompt: str | None = None,
         history: list[dict[str, Any]] | None = None,
-        schema_name: str | None = None
+        schema_name: str | None = None,
+        require_structured: bool | None = None
     ) -> dict[str, Any]:
         """
         Public wrapper for making a non-streaming request to the LLM.
         It ensures that the response always contains a structured tool_calls object.
+        Plain-text callers (session summaries) pass ``require_structured=False``
+        so the empty-tool_calls error is not injected into their response.
         """
         import logging
         self.last_usage = None
@@ -212,10 +215,11 @@ class BaseLLMProvider(ABC):
         )
 
         tool_calls = response_dict.get("tool_calls")
+        require = self.require_json_output if require_structured is None else require_structured
 
         # Centralized validation: If the provider is *supposed* to return a JSON object
         # but fails to do so, replace the empty tool_calls with a structured error.
-        if self.require_json_output and (not tool_calls or not isinstance(tool_calls, dict)):
+        if require and (not tool_calls or not isinstance(tool_calls, dict)):
             logging.warning(
                 "Provider configured to require JSON output returned no valid tool_calls object. "
                 "Replacing with a structured error_explanation."

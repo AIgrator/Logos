@@ -30,7 +30,11 @@ etc. as dependencies.
 The app runs inside a selected project directory. Startup resolves the remembered
 `active_project` from `settings.json`; if it is missing or gone, the UI opens the
 full-screen `HomePage` (`src/ui/navigation.py`) instead of a modal picker. In the
-workspace, projects and sessions are reached through the collapsible left sidebar.
+workspace, projects and sessions are reached through the collapsible left sidebar;
+its footer keeps only Home, New session and Settings. The session context menu
+(shared by the sidebar and the home screen) carries Rename, Show journal, Show in
+Explorer and Delete Session; Show journal opens the raw event journal of that
+session, whether or not it is the open one.
 The full-mode window frame (`window_geometry`) and the sidebar's collapsed state
 (`sidebar_collapsed`) are saved to `settings.json` on close and restored on the
 next launch; layout margins are not persisted. The right workspace panel
@@ -61,6 +65,26 @@ refreshes when the tab opens, when the project
 or mode changes, on the refresh button, and after session events while the tab
 is visible. The panel's collapsed state is saved as
 `right_panel_collapsed`.
+Context fill is visible in three places backed by one snapshot: the composer
+pill next to Send (`ContextIndicator`), the right panel header ring with its
+percent (in the collapsed rail, under the chevron), and a popover opened by
+clicking either. `src/ui/context_popover.py` holds `ContextGauge` (ring),
+`SegmentedBar` and `ContextPopover`; the popover is a `Qt.Popup` anchored above
+its trigger and clamped to the screen. It shows the percentage,
+`used / window tokens · source`, a segmented bar and the rows `System prompt`,
+`System tools`, `Skills (N)`, `Messages`, `Other`, plus `Compress context`
+(emits `Manager.context_compact_requested`, handled by the same manual
+compaction as Compact now) and `Session context…` (opens the existing dialog).
+Row shares are estimates from the next request scaled to the provider-reported
+total (`context_stats.payload_breakdown`), so they add up to the shown
+percentage; Vision, whose request is assembled elsewhere, gets one
+status-colored share and a note instead of rows. Skills are counted separately:
+`BaseAgentHandler.context_payload` passes `skills_text` and `skills_count`
+(`skills.prompt_block_count`), and `model_context.payload_token_estimate`
+subtracts that block from `system` so the components stay disjoint. The panel
+receives `context_tokens` / `context_source` / `context_status` from
+`AppController.session_panel_payload`; a gauge click emits
+`RightPanel.context_clicked` with itself as the anchor.
 Clicking a recent session opens
 its project and that exact session. Per-project data lives in `<project>/.logos/`:
 
@@ -70,7 +94,8 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `session` header (`schema_version`, `id`, `mode`, optional `title`, optional
   `objective`) and later
   lines are typed events (`message`, `reasoning`, `tool_call`, `tool_result`,
-  `job_result`, `usage`, `error`). `reasoning` events carry the model's stated
+  `job_result`, `usage`, `compaction`, `error`). `reasoning` events carry the
+  model's stated
   rationale and, for agent steps, the provider's thought summary when the API
   exposes one. `message` events may carry an `attachments`
   list (name, kind, path, size, SHA-256, stored flag/status). `usage` events
@@ -78,13 +103,26 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   counts
   (input/output/reasoning/cache/total); they are counted in context statistics
   but never replayed as chat text. No prices are stored or computed. Credentials
-  are redacted before events are written. The newest is
+  are redacted before events are written. A `compaction` event records each
+  applied boundary (`trigger` auto/manual, `covered`, `total`,
+  `summary_source`, provider, model) and is replayed as an italic notice, so a
+  reloaded transcript shows why older history disappeared; the right panel's
+  Session tab reads the latest one (falling back to the summary meta for
+  sessions compacted before this event existed) and shows a COMPACTION line.
+  The newest is
   restored at startup: messages are replayed into the
   chat, and terminal/browser `command_history` plus tool cards are rebuilt from
   the same events. After a manual or automatic compaction only events after the
   recorded boundary are rebuilt; the summary block stands in for the compacted
-  prefix (automatic compaction runs at idle when free context space drops to
-  `max(15% of the window, 16k tokens)`; disabled by `context.auto_compact`).
+  prefix. Automatic compaction runs at idle when the context reaches
+  `context.auto_compact_tokens` (default 200k, keeps requests cheap on 1M+
+  windows) or free space drops to `max(15% of the window, 16k tokens)`,
+  whichever comes first; disabled by `context.auto_compact`. The background
+  summary refresh fires when uncovered events exceed
+  `context.summary_refresh_tokens` (default 30k), when the latest request
+  crosses `context.summary_threshold_ratio` of the window, or right before a
+  session is left (`src/controller.py::_refresh_leaving_summary`). A capture
+  never overwrites a model-written summary with the deterministic fallback.
   Agent `finish` / `communicate_to_user` / `display_message`
   text is persisted as an assistant `message`. `objective` is auto-derived from
   the first request; Browser/Vision resumes get a deterministic session summary
@@ -98,9 +136,14 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   never cross session
   boundaries: switching
   mode copies the previous summary once into the new session. The deterministic
-  fallback is always available; the LLM refresh runs in the worker thread and
+  fallback is always available (its `Current` comes from the last assistant
+  message, else the latest request - never raw tool output); the LLM refresh
+  runs in the worker thread and
   is injected as chat system context, terminal/browser history, or the first
   task of a fresh Vision/CUA chain when continuing from another session/mode.
+  The Session context dialog states the summary source (LLM with provider/model,
+  fallback, or handoff), its event coverage and whether a refresh is due, running
+  or paused.
   Deleting a session removes its summary sidecars. Sidecars are not listed as
   sessions. The legacy project-level `.logos/context/summary.md` is no longer
   read.
