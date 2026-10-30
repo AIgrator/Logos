@@ -89,15 +89,18 @@ protocol:
   gate `allow_shell_commands`; the CUA loop does not read that manifest. The
   model still acts only through provider-native computer actions. Wiring the
   manifest into the CUA loop would resolve the last part of limitation (1).
-- **MCP as a toolset source**: an `MCPClientManager` exposing tools from
-  user-configured MCP servers (`mcp__<server>__<tool>`) into Terminal
-  (execution) and Chat (read-only first). Servers are allowlisted in settings,
-  side effects require confirmation, hung servers are isolated by a circuit
-  breaker. **Not implemented.** No per-app integrations are written by hand.
+- **MCP as a toolset source**: Terminal connects to user-configured MCP
+  servers through three meta-tools (`mcp_list`, `mcp_get`, `mcp_call`). Servers
+  come from settings and the project's `.mcp.json`; project entries require
+  explicit trust, every call passes the Terminal access policy, hung servers are
+  isolated by a circuit breaker and oversized output spills into the project.
+  **Shipped.** Browser/Chat MCP, direct `mcp__<server>__<tool>` names and OAuth
+  were deliberately dropped from this round. No per-app integrations are
+  written by hand.
 - **Cross-mode pilot (Blender)**: Terminal builds through Blender MCP
   (`create_object`, transforms, materials — headless, no GUI), Vision verifies
   the result via a rendered preview through the screen-evaluation loop.
-  **Not implemented**; depends on MCP.
+  **Not implemented**; the MCP client it depends on is now shipped.
 
 ## Principle 3: thin client distribution
 
@@ -260,7 +263,7 @@ until the execution core is ready. Voice will dock onto the same
 | 3 | Native execution for Google, then Anthropic/OpenAI | **Shipped** for all three. |
 | 4 | Long-lived sessions: JSONL store, autosave, summarization, restore, durable attachments, per-session objective/state | **Shipped:** JSONL sessions, autosave, restore/replay, auto-derived objective, deterministic per-session summary for Browser/Vision resume, durable attachments with reference/copy tiers. Tabs, parallel sessions and the screen arbiter were **dropped** (one mode per session). |
 | 5 | Thin client | **Effective:** ML stack removed; optional backends are no longer needed. Installer/packaging cleanup remains. |
-| 6 | MCP client + Blender cross-mode pilot | **Pending.** |
+| 6 | MCP client + Blender cross-mode pilot | MCP client **shipped** (Terminal meta-tools, settings page, trust gate, keychain secrets, circuit breaker, output spill). Blender pilot **pending.** |
 | 7 | Replace the local triple pipeline with a single grounding model (UI-TARS / OmniParser V2) | **Obsolete in current form** — the local pipeline was deleted. Revisit only if a `local` backend is reintroduced. |
 | 8 | Parallel Vision sessions / virtual displays | **Dropped.** Only meaningful with several simultaneous Vision sessions; out of scope while one session runs at a time. |
 

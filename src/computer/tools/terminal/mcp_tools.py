@@ -6,10 +6,18 @@ input schema with ``mcp_get`` and executes it with ``mcp_call``. The client
 manager itself lives in ``src.mcp_client`` and is attached by the controller.
 """
 import json
+import logging
+import os
+import re
+import time
 
 from src.computer.computer import tool_meta
 
+logger = logging.getLogger(__name__)
+
 MAX_RESULT_CHARS = 20000
+MAX_SPILL_CHARS = 5_000_000
+MAX_SPILL_FILES = 50
 LIST_DESCRIPTION_LIMIT = 160
 
 
@@ -40,10 +48,72 @@ def _shorten(value, limit: int) -> str:
     return text[:limit - 1].rstrip() + "…"
 
 
-def _clip(text: str, limit: int = MAX_RESULT_CHARS) -> str:
-    if len(text) <= limit:
+def _spill_directory(self) -> str:
+    root = getattr(self, "working_directory", "") or ""
+    if not root:
+        return ""
+    return os.path.join(root, ".logos", "mcp_outputs")
+
+
+def _safe_name(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", str(value or "")).strip(".-")
+    return cleaned or "output"
+
+
+def _prune_spills(directory: str) -> None:
+    try:
+        files = []
+        with os.scandir(directory) as entries:
+            for entry in entries:
+                try:
+                    if entry.is_file():
+                        files.append((entry.stat().st_mtime, entry.path))
+                except OSError:
+                    continue
+        files.sort(reverse=True)
+        for _, path in files[MAX_SPILL_FILES:]:
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+    except OSError:
+        return
+
+
+def _spill(self, text: str, kind: str, server: str = "", tool: str = "") -> str:
+    """Writes the full output under the project so the model can read it later."""
+    directory = _spill_directory(self)
+    if not directory:
+        return ""
+    try:
+        os.makedirs(directory, exist_ok=True)
+        parts = [kind] + [part for part in (server, tool) if part]
+        name = "_".join(_safe_name(part) for part in parts)
+        stamp = time.strftime("%Y%m%d-%H%M%S") + f"-{time.time_ns() % 1_000_000_000:09d}"
+        path = os.path.join(directory, f"{name}_{stamp}.txt")
+        body = text
+        if len(body) > MAX_SPILL_CHARS:
+            body = body[:MAX_SPILL_CHARS] + (
+                f"\n... (spill truncated, {len(text) - MAX_SPILL_CHARS} more characters)")
+        with open(path, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(body)
+    except OSError as error:
+        logger.warning(f"Could not spill MCP output: {error}")
+        return ""
+    _prune_spills(directory)
+    return path
+
+
+def _clip(self, text: str, kind: str, server: str = "", tool: str = "") -> str:
+    if len(text) <= MAX_RESULT_CHARS:
         return text
-    return text[:limit] + f"\n... (truncated, {len(text) - limit} more characters)"
+    overflow = len(text) - MAX_RESULT_CHARS
+    path = _spill(self, text, kind, server, tool)
+    if path:
+        return text[:MAX_RESULT_CHARS] + (
+            f"\n... (truncated, {overflow} more characters; the full output is "
+            f"saved at {path} and can be read with read_files)")
+    return text[:MAX_RESULT_CHARS] + f"\n... (truncated, {overflow} more characters)"
 
 
 def _parse_arguments(value) -> dict:
@@ -61,6 +131,75 @@ def _parse_arguments(value) -> dict:
     if not isinstance(parsed, dict):
         raise RuntimeError("'arguments' must decode to a JSON object, not a list or scalar.")
     return parsed
+
+
+# -- prompt summary ---------------------------------------------------------
+
+PROMPT_SERVER_LIMIT = 12
+PROMPT_DESCRIPTION_LIMIT = 140
+PROMPT_TOOL_LIMIT = 6
+
+
+def _first_sentence(text: str, limit: int) -> str:
+    text = " ".join(str(text or "").split())
+    cut = re.search(r"(?<=[.!?])\s", text)
+    if cut:
+        text = text[:cut.start()]
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0].rstrip(".,;:") + "…"
+    return text
+
+
+def _server_prompt_line(status, server_tools: dict, entry=None) -> str:
+    head = f"- {status.name} ({status.transport}, {status.state}"
+    if status.state == "connected":
+        head += f", {status.tools or len(server_tools)} tools"
+    head += ")"
+    if entry is not None and entry.transport == status.transport:
+        description = _first_sentence(entry.description, PROMPT_DESCRIPTION_LIMIT)
+        if description:
+            return f"{head}: {description}"
+    if status.state == "connected":
+        names = list(server_tools)[:PROMPT_TOOL_LIMIT]
+        if names:
+            extra = len(server_tools) - len(names)
+            suffix = f" (+{extra})" if extra > 0 else ""
+            return f"{head}: {', '.join(names)}{suffix}"
+        return head
+    if status.state == "error" and status.error:
+        return f"{head}: {_shorten(status.error, PROMPT_DESCRIPTION_LIMIT)}"
+    if status.state == "needs_trust":
+        return f"{head}: project server, not trusted yet"
+    return head
+
+
+def servers_prompt_block(manager) -> str:
+    """Configured servers, one line each, for the Terminal system prompt."""
+    if manager is None or not getattr(manager, "is_running", False):
+        return "No MCP servers are configured."
+    try:
+        statuses = manager.statuses()
+        tools = manager.tools()
+    except Exception as error:
+        logger.warning(f"Could not describe MCP servers: {error}")
+        return "MCP server state is unavailable; call mcp_list to check."
+    if not statuses:
+        return "No MCP servers are configured."
+
+    from src.mcp_client.catalog import CATALOG
+
+    catalog = {entry.name: entry for entry in CATALOG}
+    ordered = sorted(
+        statuses.values(),
+        key=lambda status: (status.state != "connected", status.name.lower()))
+    lines = ["Configured MCP servers (live state):"]
+    for status in ordered[:PROMPT_SERVER_LIMIT]:
+        lines.append(_server_prompt_line(
+            status, tools.get(status.name, {}), catalog.get(status.name)))
+    if len(ordered) > PROMPT_SERVER_LIMIT:
+        lines.append(
+            f"- …and {len(ordered) - PROMPT_SERVER_LIMIT} more; mcp_list shows them all.")
+    return "\n".join(lines)
 
 
 @tool_meta(
@@ -114,7 +253,7 @@ def mcp_list(self, server: str = "", **kwargs) -> str:
             description = _shorten(info.description, LIST_DESCRIPTION_LIMIT)
             line = f"  - {tool_name}{suffix}"
             lines.append(f"{line}: {description}" if description else line)
-    return _clip("\n".join(lines))
+    return _clip(self, "\n".join(lines), "list")
 
 
 @tool_meta(
@@ -154,7 +293,7 @@ def mcp_get(self, server: str = "", tool: str = "", **kwargs) -> str:
             f"inspected right now. {status.error}".strip())
     info = manager.get_tool(server, tool)
     payload = {"server": server, **info.as_dict()}
-    return _clip(json.dumps(payload, ensure_ascii=False, indent=2))
+    return _clip(self, json.dumps(payload, ensure_ascii=False, indent=2), "get", server, tool)
 
 
 @tool_meta(
@@ -185,7 +324,10 @@ def mcp_get(self, server: str = "", tool: str = "", **kwargs) -> str:
         },
         "returns": {
             "type": "STRING",
-            "description": "The text returned by the MCP tool.",
+            "description": (
+                "The text returned by the MCP tool. Output over 20,000 "
+                "characters is truncated; the full text is saved in the "
+                "project's .logos/mcp_outputs folder and its path is included."),
         },
     },
     flags={"platform": "any", "mode": "terminal"},
@@ -199,4 +341,6 @@ def mcp_call(self, server: str = "", tool: str = "", arguments: str = "", **kwar
     text = result.as_text().strip()
     if result.is_error:
         raise RuntimeError(text or f"MCP tool '{server}/{tool}' reported an error.")
-    return _clip(text or f"MCP tool '{server}/{tool}' returned no output.")
+    return _clip(
+        self, text or f"MCP tool '{server}/{tool}' returned no output.",
+        "call", server, tool)

@@ -5,6 +5,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 import threading
 import time
 from collections import deque
@@ -23,6 +24,25 @@ from .config import MCPServer
 logger = logging.getLogger(__name__)
 
 MAX_TOOLS_PER_SERVER = 200
+
+
+def _describe_error(error: BaseException) -> str:
+    """Unwrap anyio task-group wrappers so the status carries the real cause."""
+    while isinstance(error, BaseExceptionGroup) and error.exceptions:
+        error = error.exceptions[0]
+    text = str(error).strip()
+    return text or type(error).__name__
+
+
+def _decode_stderr(raw: bytes) -> str:
+    """Decode child output: UTF-8 normally, the Windows OEM code page for console tools."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    if sys.platform == "win32":
+        return raw.decode("cp866", "replace")
+    return raw.decode("utf-8", "replace")
 
 
 class MCPManagerError(RuntimeError):
@@ -152,7 +172,7 @@ class _StderrLog:
                 pass
 
     def _emit(self, raw: bytes) -> None:
-        text = raw.decode("utf-8", "replace").strip()
+        text = _decode_stderr(raw).strip()
         if text:
             self._manager._log(self._server, text)
 
@@ -312,7 +332,12 @@ class MCPManager:
             raise MCPManagerError(f"Unknown MCP server '{server}'", server=server, tool=tool)
         if client is None or status.state != "connected":
             detail = status.error or status.state
-            raise MCPManagerError(f"MCP server '{server}' is not connected ({detail})", server=server, tool=tool)
+            hint = (
+                " Restart it from Settings -> MCP Servers."
+                if status.state == "error" else "")
+            raise MCPManagerError(
+                f"MCP server '{server}' is not connected ({detail}).{hint}",
+                server=server, tool=tool)
         if self._loop is None:
             raise MCPManagerError("MCP manager is not running", server=server, tool=tool)
 
@@ -364,10 +389,12 @@ class MCPManager:
             await self._stop_task(name)
             with self._lock:
                 if name not in servers:
-                    status = self._status.get(name)
-                    if status is not None:
-                        status.state = "stopped"
-                        status.tools = 0
+                    # A removed server must also disappear from mcp_list.
+                    self._status.pop(name, None)
+                    self._logs.pop(name, None)
+                    self._failures.pop(name, None)
+                    self._attempt_events.pop(name, None)
+                    self._stop_events.pop(name, None)
         for name, server in servers.items():
             task = self._tasks.get(name)
             if task is not None and not task.done() and self._active.get(name) == server:
@@ -436,7 +463,13 @@ class MCPManager:
                 return
             self._set_status(name, "starting")
             client = await self._open_client(server, stack)
-            tools = await self._discover_tools(name, client)
+            try:
+                tools = await asyncio.wait_for(
+                    self._discover_tools(name, client), server.timeout)
+            except TimeoutError as error:
+                raise MCPManagerError(
+                    f"tool discovery did not finish in {server.timeout:g}s",
+                    server=name) from error
             with self._lock:
                 self._clients[name] = client
                 self._tools[name] = tools
@@ -447,7 +480,7 @@ class MCPManager:
         except asyncio.CancelledError:
             raise
         except Exception as error:  # noqa: BLE001 - one bad server must not break others
-            message = str(error) or type(error).__name__
+            message = _describe_error(error)
             self._log(name, f"connection failed: {message}")
             self._set_status(name, "error", error=message)
         finally:
@@ -455,12 +488,13 @@ class MCPManager:
                 if self._clients.get(name) is client:
                     self._clients.pop(name, None)
                 self._tools.pop(name, None)
-            await self._close_stack(name, stack)
-            with self._lock:
                 status = self._status.get(name)
                 if status is not None and status.state in ("connected", "starting"):
+                    # Clear the state in the same lock as the client: callers
+                    # must never see "connected" with no client.
                     status.state = "stopped"
                     status.tools = 0
+            await self._close_stack(name, stack)
             attempt_event.set()
 
     async def _open_client(self, server: MCPServer, stack: AsyncExitStack) -> Client:
@@ -474,10 +508,16 @@ class MCPManager:
             stderr_log = _StderrLog(self, server.name)
             stack.callback(stderr_log.close)
             transport = stdio_client(params, errlog=stderr_log.errlog)
-            client = await asyncio.wait_for(
-                stack.enter_async_context(Client(transport, read_timeout_seconds=server.timeout)),
-                server.connect_timeout,
-            )
+            try:
+                client = await asyncio.wait_for(
+                    stack.enter_async_context(
+                        Client(transport, read_timeout_seconds=server.timeout)),
+                    server.connect_timeout,
+                )
+            except TimeoutError as error:
+                raise MCPManagerError(
+                    f"connection did not open within {server.connect_timeout:g}s",
+                    server=server.name) from error
             stderr_log.close()
             return client
         if server.transport == "http":
@@ -486,10 +526,16 @@ class MCPManager:
             transport = streamable_http_client(server.url, http_client=http_client)
         else:
             raise MCPManagerError(f"Unsupported transport '{server.transport}'", server=server.name)
-        return await asyncio.wait_for(
-            stack.enter_async_context(Client(transport, read_timeout_seconds=server.timeout)),
-            server.connect_timeout,
-        )
+        try:
+            return await asyncio.wait_for(
+                stack.enter_async_context(
+                    Client(transport, read_timeout_seconds=server.timeout)),
+                server.connect_timeout,
+            )
+        except TimeoutError as error:
+            raise MCPManagerError(
+                f"connection did not open within {server.connect_timeout:g}s",
+                server=server.name) from error
 
     async def _discover_tools(self, name: str, client: Client) -> dict[str, ToolInfo]:
         tools: dict[str, ToolInfo] = {}

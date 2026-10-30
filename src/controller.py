@@ -1260,6 +1260,13 @@ class AppController(QObject):
             name = str(event.get("name") or "").strip()
             if not name or name in self.ACTIVITY_HIDDEN_TOOLS:
                 continue
+            if name == "mcp_call":
+                args = event.get("input")
+                if isinstance(args, dict):
+                    server = str(args.get("server") or "").strip()
+                    tool = str(args.get("tool") or "").strip()
+                    if server and tool:
+                        name = f"mcp_call · {server}/{tool}"
             key = name.casefold()
             if key in positions:
                 records[positions[key]]["count"] += 1

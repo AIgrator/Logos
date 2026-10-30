@@ -185,7 +185,16 @@ Terminal mode reaches user-configured MCP servers through three meta-tools
 (`src/computer/tools/terminal/mcp_tools.py`): `mcp_list` (servers, states and
 their tools), `mcp_get` (one tool's definition and input schema) and `mcp_call`
 (executes it; `arguments` is a JSON object string because the strict tool schema
-cannot express a free-form object). Definitions come from `mcp.servers` in
+cannot express a free-form object). Only `${...}` references are expanded;
+known names in single braces such as `{userHome}` are rejected at definition
+time (`src/mcp_client/config.py::_interpolate`) because the server would
+otherwise receive a literal relative path. The system prompt also carries a live
+`{available_mcp_servers}` block built by `servers_prompt_block` and passed from
+`TerminalHandler.build_prompts`: one line per configured server with transport,
+state, tool count and a one-line description (catalog text when name and
+transport match `src/mcp_client/catalog.py`, otherwise the first tool names),
+capped at 12 servers, so the model recognizes servers the user names without a
+discovery call. Definitions come from `mcp.servers` in
 `settings.json` plus the active project's `.mcp.json`; project entries stay
 stopped (`needs_trust`) until their names are listed in
 `mcp.trusted_projects[<project root>]`. `src/mcp_client/` merges configuration
@@ -196,8 +205,24 @@ refreshes it on project switch and stops it in `cleanup()`. `mcp_list` /
 `mcp_get` are read-only for the access policy; `mcp_call` runs silently only for
 a tool the server marks read-only on a trusted server and otherwise asks in both
 `ask` and `auto` (`full` never asks). `mcp_call` output is capped at 20k
-characters, and a tool-reported error is raised as a tool error so it gets the
-error card and `error` status in the journal.
+characters; the full text is spilled to `<project>/.logos/mcp_outputs/` (one
+`.txt` per call, 5 MB each, newest 50 kept) and the truncation notice carries
+the path so the model can read it with `read_files`. A tool-reported error is
+raised as a tool error so it gets the error card and `error` status in the
+journal.
+
+`MCPManager` bounds the first connection and tool discovery with
+`connect_timeout` (default 30 s) and `timeout` (default 60 s); a call uses the
+same tool timeout and fails with a timeout error. Three consecutive transport
+failures or timeouts trip the circuit breaker: the supervisor stops, the status
+becomes `error` with the cause, and later calls fail fast with a hint to
+Restart; `restart()` and a configuration refresh reset the counter. A
+tool-reported error result is not a breaker failure. `refresh()` reconciles the
+configuration into the running manager: changed servers restart, removed servers
+are stopped and dropped from the status map (so `mcp_list` no longer shows
+them), unchanged servers keep their clients. The right panel's Activity tab
+groups MCP calls as `mcp_call · <server>/<tool>`
+(`AppController._session_tool_records`). The end-user guide is `docs/mcp.md`.
 
 Settings → MCP Servers (`src/ui/mcp_settings_page.py`) manages those servers.
 The page lists user servers from `settings.json` and project servers from the
@@ -205,21 +230,33 @@ active `.mcp.json` in two groups, with transport, live state (stopped,
 starting, connected with tool count, error, disabled, needs trust), tooltips
 and a 700 ms status poll while visible. User rows carry an enable checkbox
 (`enabled` in the definition). A project server with the same name overrides
-the user server, marked "Overridden by project". Buttons: Add Server and Edit
-open `src/ui/mcp_server_dialog.py` (stdio command/args/cwd/env or HTTP
-url/headers, timeouts, validated without expanding `${...}` references);
+the user server, marked "Overridden by project". Buttons: Browse Catalog
+(one-click catalog, see below), Add Server and Edit
+(`src/ui/mcp_server_dialog.py`, stdio command/args/cwd/env or HTTP
+url/headers, timeouts, validated without expanding `${...}` references),
 Remove, Import (a `.mcp.json` or Claude Desktop `mcpServers` document),
 Restart, Test (restart plus connected/failed feedback), Logs (server stderr and
 failures from `MCPManager.logs`), Trust Server / Revoke Trust for project rows
 behind a warning that trusted servers start with Terminal mode and run code,
-Open `.mcp.json`, and Reload (controller refresh plus repopulate). Edits are
-staged in the live settings manager (`save=False, emit=False`, like custom
-providers), so Restart/Test/Logs act on them before OK; the manager is
-refreshed after each staged change and again from
-`AppController._on_settings_changed` after a save. OK commits; Cancel, the
-window's close event and `reject` restore the pre-page snapshot. The page is
-imported by the settings window directly; the dialog module is imported on
-first Add/Edit/Import.
+Open `.mcp.json`, and Reload (controller refresh plus repopulate).
+`src/ui/mcp_catalog_dialog.py` (opened by Browse Catalog) installs a bundled
+curated entry from `src/mcp_client/catalog.py` (memory, filesystem, sqlite,
+git, fetch, time, sequential-thinking; remote DeepWiki, Microsoft Learn,
+Context7, GitHub) through the same save path: the definition template is
+filled from folder/file/secret parameter values, `npx`/`uvx` availability is
+checked with `shutil.which`, and `~/.logos/mcp` is created for default paths;
+Add Server and Import stay for custom definitions. Every
+add/edit/remove/trust/enable change is written to `settings.json` immediately
+(`save=True, emit=False`) and the live manager is refreshed, so Restart/Test/
+Logs act on the saved definition and closing the window or the app keeps it.
+Cancel and Esc restore the snapshot taken when the page first changed; the
+window's close event commits instead (secrets of removed servers are pruned
+by `commit()`). A connection failure stores the unwrapped task-group cause in
+`ServerStatus.error`, and child stderr is decoded as UTF-8 with a Windows
+OEM code page (cp866) fallback before it reaches `MCPManager.logs`. The page
+is imported by the settings window directly; the server dialog module is
+imported on first Add/Edit/Import and the catalog dialog on first Browse
+Catalog.
 
 MCP env and header values whose names look like credentials (`TOKEN`, `KEY`,
 `SECRET`, `PASSWORD`, `AUTH`, `COOKIE`, ...) are kept in the OS keychain

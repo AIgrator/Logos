@@ -126,6 +126,10 @@ As a session grows, Logos keeps the full history on disk and sends the model a t
 
 Terminal and Browser can follow Agent Skills — instruction packages in the open `SKILL.md` format shared with Claude Code, Codex, Cursor and Qoder. A small built-in set works out of the box; project and user skills are discovered automatically too. Settings → Skills can install more from the public ClawHub catalogue. See the [**skills guide**](./docs/skills.md) for the folder layout, precedence rules and limits.
 
+### MCP servers
+
+Terminal can use tools from [Model Context Protocol](https://modelcontextprotocol.io) servers — local processes or remote Streamable HTTP endpoints that advertise their own tools. Servers are configured in Settings → MCP Servers or in the project's `.mcp.json`, project servers must be trusted before they start, and every call passes the Terminal access policy. See the [**MCP guide**](./docs/mcp.md) for configuration, secrets, permissions, limits and troubleshooting.
+
 ## Features (Tools)
 
 The assistant comes with a set of built-in tools, grouped by their mode of operation:
@@ -146,6 +150,7 @@ Vision mode does not use a local tool manifest. Actions come from the provider's
 *   **File Editing**: `replace`, `replace_many`.
 *   **System**: `execute_shell` (incl. background jobs), `poll_shell_job`, `stop_shell_job`, `wait_seconds`.
 *   **Web Tools**: `web_search`, `web_fetchs`, `download_file`.
+*   **MCP**: `mcp_list`, `mcp_get`, `mcp_call` for tools exposed by configured MCP servers (see the [MCP guide](./docs/mcp.md)).
 *   **User Interaction**: `display_message`, `communicate_to_user`.
 *   **General**: `finish`, `get_clipboard_content`.
 

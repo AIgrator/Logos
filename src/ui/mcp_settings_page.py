@@ -43,9 +43,9 @@ _POLL_MS = 700
 class MCPSettingsPage(QWidget):
     """Lists MCP servers, their live state and project trust decisions.
 
-    Edits are staged in the live settings (memory only, like custom
-    providers), so restart/test/logs see them immediately. OK persists;
-    Cancel rolls the whole page back.
+    Changes are saved as they are made, so restart/test/logs act on them and
+    closing the window keeps them. Cancel restores the snapshot taken before
+    the first change on this page.
     """
 
     def __init__(self, settings_manager, controller, parent=None):
@@ -107,6 +107,12 @@ class MCPSettingsPage(QWidget):
         layout.addWidget(self.config_errors_label)
 
         first_row = QHBoxLayout()
+        self.catalog_button = QPushButton("Browse Catalog...")
+        self.catalog_button.setToolTip(
+            "Install a standard MCP server in one click. Add Server and "
+            "Import remain for custom definitions.")
+        self.catalog_button.clicked.connect(self._browse_catalog)
+        first_row.addWidget(self.catalog_button)
         self.add_button = QPushButton("Add Server...")
         self.add_button.setToolTip("Create a local stdio or remote HTTP server.")
         self.add_button.clicked.connect(self._add_server)
@@ -201,7 +207,17 @@ class MCPSettingsPage(QWidget):
         self._snapshot = None
         if snapshot is None:
             return
-        self.settings_manager.set_many({"mcp": snapshot}, save=False, emit=False)
+        # Servers added after the snapshot disappear with it; prune their
+        # keychain entries the same way commit() does for removed servers.
+        current = self.settings_manager.get("mcp") or {}
+        try:
+            prune_mcp_secrets(
+                KEYRING_SERVICE_NAME,
+                current.get("servers") if isinstance(current, dict) else None,
+                snapshot.get("servers") if isinstance(snapshot, dict) else None)
+        except Exception as error:  # noqa: BLE001 - cleanup is best effort
+            logging.warning(f"Could not prune MCP secrets: {error}")
+        self.settings_manager.set_many({"mcp": snapshot}, save=True, emit=False)
         self._refresh_manager()
         self._populate()
 
@@ -337,7 +353,8 @@ class MCPSettingsPage(QWidget):
 
             user_group = self._add_group("User servers (settings.json)")
             if not user_servers:
-                self._add_placeholder(user_group, "No user servers. Use Add Server or Import.")
+                self._add_placeholder(
+                    user_group, "No user servers. Use Browse Catalog, Add Server or Import.")
             for name in sorted(user_servers):
                 raw = user_servers[name]
                 enabled = bool(raw.get("enabled", not raw.get("disabled", False))) if isinstance(raw, dict) else False
@@ -555,7 +572,7 @@ class MCPSettingsPage(QWidget):
         self._remember_state()
         mcp = self._mcp_settings()
         mcp["servers"] = servers
-        self.settings_manager.set_many({"mcp": mcp}, save=False, emit=False)
+        self.settings_manager.set_many({"mcp": mcp}, save=True, emit=False)
         self._refresh_manager()
         info["enabled"] = enabled
         # No repopulation here: the tree is inside the itemChanged signal of
@@ -570,13 +587,13 @@ class MCPSettingsPage(QWidget):
             # the item's own signal would delete the emitter.
             QTimer.singleShot(0, self._edit_server)
 
-    # -- staged edits -----------------------------------------------------
+    # -- edits ------------------------------------------------------------
 
     def _apply_user_servers(self, servers, select=None):
         self._remember_state()
         mcp = self._mcp_settings()
         mcp["servers"] = servers
-        self.settings_manager.set_many({"mcp": mcp}, save=False, emit=False)
+        self.settings_manager.set_many({"mcp": mcp}, save=True, emit=False)
         self._refresh_manager()
         self._populate(select=select)
 
@@ -597,9 +614,33 @@ class MCPSettingsPage(QWidget):
         else:
             trusted_map.pop(root, None)
         mcp["trusted_projects"] = trusted_map
-        self.settings_manager.set_many({"mcp": mcp}, save=False, emit=False)
+        self.settings_manager.set_many({"mcp": mcp}, save=True, emit=False)
         self._refresh_manager()
         self._populate(select=("project", name))
+
+    def _browse_catalog(self):
+        from src.ui.mcp_catalog_dialog import MCPCatalogDialog
+
+        dialog = MCPCatalogDialog(
+            self,
+            installed=set(self._user_servers()),
+            project_root=self._project_root(),
+            install=self._install_catalog_entry)
+        dialog.exec()
+
+    def _install_catalog_entry(self, name: str, definition: dict) -> str:
+        servers = self._user_servers()
+        servers[name] = definition
+        try:
+            self._apply_user_servers(servers, select=("user", name))
+        except Exception as error:  # noqa: BLE001 - reported in the catalog
+            logging.warning(f"Could not install MCP server '{name}': {error}")
+            return f"Could not install \"{name}\": {error}"
+        if name in self._project_servers_cache:
+            self._set_message(
+                f"The project's .mcp.json also defines \"{name}\" and takes "
+                "precedence while this project is open.")
+        return ""
 
     def _add_server(self):
         from src.ui.mcp_server_dialog import MCPServerDialog
@@ -663,8 +704,27 @@ class MCPSettingsPage(QWidget):
         dialog = MCPImportDialog(self)
         if dialog.exec() != QDialog.Accepted or not dialog.servers:
             return
+
+        from src.mcp_client import definition_error
+
+        accepted = {}
+        rejected = []
+        for name, definition in dialog.servers.items():
+            error = definition_error(name, definition)
+            if error:
+                rejected.append(f"{name}: {error}")
+            else:
+                accepted[name] = definition
+        if rejected:
+            more = "" if len(rejected) <= 8 else f"\n... and {len(rejected) - 8} more"
+            QMessageBox.warning(
+                self, "Import MCP Servers",
+                "These servers were not imported:\n\n" + "\n".join(rejected[:8]) + more)
+        if not accepted:
+            return
+
         servers = self._user_servers()
-        clashes = sorted(set(dialog.servers) & set(servers))
+        clashes = sorted(set(accepted) & set(servers))
         if clashes:
             more = "" if len(clashes) <= 6 else f"\n... and {len(clashes) - 6} more"
             answer = QMessageBox.question(
@@ -674,7 +734,7 @@ class MCPSettingsPage(QWidget):
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
             if answer != QMessageBox.Yes:
                 return
-        servers.update(dialog.servers)
+        servers.update(accepted)
         self._apply_user_servers(servers)
 
     def _toggle_trust(self):

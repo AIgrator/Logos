@@ -15,6 +15,7 @@ from ui.terminal_html_formatter import TerminalHtmlFormatter
 from src.computer.computer import Computer
 from src.computer.terminal_policy import evaluate as evaluate_terminal_access
 from src.computer.terminal_policy import normalize_mode as normalize_access_mode
+from src.computer.tools.terminal.mcp_tools import servers_prompt_block
 
 from .base_agent import BaseAgentHandler
 from .tool_exec_worker import ToolExecRelay, ToolExecWorker
@@ -286,7 +287,17 @@ class TerminalHandler(BaseAgentHandler):
             os_info=self.os_info,
             history=history,
             available_skills=self.skills_block(),
+            available_mcp_servers=self.mcp_servers_block(),
         )
+
+    def mcp_servers_block(self) -> str:
+        """Configured MCP servers (state and one-line description) for the prompt."""
+        manager = getattr(getattr(self, "computer", None), "mcp_manager", None)
+        try:
+            return servers_prompt_block(manager)
+        except Exception as error:
+            logging.warning(f"{type(self).__name__} MCP servers lookup failed: {error}")
+            return "No MCP servers are configured."
 
     def _dedent_lines(self, lines: list[str]) -> list[str]:
         """

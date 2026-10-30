@@ -93,6 +93,9 @@ class SettingsWindow(QDialog):
         # lets Cancel roll all of it back.
         self._custom_snapshot = None
         self._deleted_custom_ids = set()
+        # QDialog turns a window close into reject(); MCP edits are already
+        # saved when made, so only an explicit Cancel reverts them.
+        self._closing_settings = False
 
         # Main layout
         self.layout = QVBoxLayout(self)
@@ -281,12 +284,19 @@ class SettingsWindow(QDialog):
 
     def closeEvent(self, event):
         self._discard_custom_changes()
-        self._discard_mcp_changes()
-        super().closeEvent(event)
+        page = getattr(self, "mcp_page", None)
+        if page is not None:
+            page.commit()
+        self._closing_settings = True
+        try:
+            super().closeEvent(event)
+        finally:
+            self._closing_settings = False
 
     def reject(self):
         self._discard_custom_changes()
-        self._discard_mcp_changes()
+        if not self._closing_settings:
+            self._discard_mcp_changes()
         super().reject()
 
     def _discard_mcp_changes(self):

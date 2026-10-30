@@ -142,6 +142,19 @@ Terminal is a stateful shell/file agent with `terminal_tool_code`.
 - `web_search` and `web_fetchs` are intercepted before normal execution and run asynchronously in `WebTaskThread`: first the provider's native search/fetch (Plan A), then the local `ddgs` + `trafilatura` + `sumy` fallback (Plan B). The loop continues from the thread's completion slot.
 - The file index is rebuilt automatically only while Terminal mode is active; entering Terminal forces a fresh build.
 - `@` file search is fuzzy path matching, not globbing; see [file_search_guide.md](./file_search_guide.md).
+- MCP servers extend the toolset through three meta-tools (`mcp_list`, `mcp_get`, `mcp_call`); see [MCP servers](#mcp-servers) below.
+
+## MCP servers
+
+Terminal can call tools on user-configured [Model Context Protocol](https://modelcontextprotocol.io) servers. Browser, Chat and Vision have no MCP surface.
+
+- `src/mcp_client/config.py` merges two sources: `mcp.servers` from `settings.json` (user scope) and the active project's `.mcp.json` (project scope, overrides by name). `${workspaceFolder}`, `${userHome}`, `${env:NAME}` and related references are expanded at load time. Project servers stay `needs_trust` until their names appear in `mcp.trusted_projects[<project root>]`.
+- `src/mcp_client/manager.py` owns one background asyncio loop and one persistent `Client` per server (stdio process or Streamable HTTP). `MCPManager.call_tool()` runs the call through `asyncio.run_coroutine_threadsafe` with the server's tool timeout; connection and tool discovery are bounded by the connect and tool timeouts.
+- The circuit breaker counts transport failures and timeouts: three consecutive failures set the server to `error`, stop its supervisor and make later calls fail fast until **Restart** or a configuration change. A tool-reported error result is not a breaker failure.
+- `MCPManager.refresh()` reconciles a new configuration into the running manager: changed servers restart, removed servers are stopped and dropped, unchanged servers keep their connections. `AppController.ensure_mcp_manager()` calls it when Terminal starts, settings change or the active project switches.
+- `src/computer/tools/terminal/mcp_tools.py` exposes the agent-facing meta-tools. `mcp_call.arguments` is a JSON object string because the strict tool schema cannot express a free-form object. Results above 20,000 characters are truncated in place; the full text is spilled to `<project>/.logos/mcp_outputs/` (5 MB per file, newest 50 kept) and the notice carries the path.
+- Every call passes `src/computer/terminal_policy.py` with the server's trust/read-only hints; `mcp_list` and `mcp_get` are read-only, and `mcp_call` asks unless the tool is read-only on a trusted server (`full` never asks).
+- `src/ui/mcp_settings_page.py` is the Settings page; secrets live in the OS keychain through `context/secrets.py` (`${keyring:mcp:...}` placeholders only in `settings.json`). The end-user guide is [mcp.md](./mcp.md).
 
 ## Browser mode
 
@@ -343,6 +356,7 @@ These are guardrails, not a sandbox:
 - **Terminal:** `Executor` rejects shell commands matching the conservative destructive denylist (`rm -rf /`, `mkfs`, `format c:`, `shutdown`, …). A blocked command is returned to the model as an instructional error.
 - **Browser:** URL policy (schemes, private networks, domain allowlist), approval dialogs for risky actions, untrusted-content wrapping, ad blocking and per-task budgets.
 - **Vision:** provider safety checks, `ask_user`, deterministic desktop policy, optional app allowlist, shell/system surfaces off by default, input/capture capability probes and hard budgets.
+- **MCP:** project servers need explicit trust, every call passes the Terminal access policy, secrets are keychain-backed placeholders, and results are capped with the overflow spilled inside the project.
 - **Journal:** `context/secrets.redact_text()` / `redact_value()` mask API keys, tokens and passwords before session events and summaries are written.
 
 The user remains the final authority: `communicate_to_user`, approval dialogs and Stop/Pause are always available.
@@ -379,4 +393,5 @@ def on_settings_changed(self, new_settings: dict):
 - [hybrid_web_search_guide.md](./hybrid_web_search_guide.md) — provider-native search and local fallback.
 - [file_search_guide.md](./file_search_guide.md) — `@` fuzzy search behavior and limits.
 - [context_management.md](./context_management.md) — memory layers, session summaries, usage accounting, compaction and `AGENTS.md` baseline.
+- [mcp.md](./mcp.md) — MCP servers: configuration, trust, secrets, permissions, limits and troubleshooting.
 - [future_vision.md](./future_vision.md) — planned evolution (grounding backends, long-lived sessions, MCP, thin client).

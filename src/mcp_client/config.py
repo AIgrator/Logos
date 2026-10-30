@@ -15,6 +15,8 @@ SUPPORTED_TRANSPORTS = ("stdio", "http")
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _TOKEN_RE = re.compile(r"\$\{([^{}]+)\}")
+_SINGLE_BRACE_RE = re.compile(
+    r"(?<!\$)\{(workspaceFolderBasename|workspaceFolder|userHome|pathSeparator|env:[^{}]+)\}")
 
 
 class ConfigError(ValueError):
@@ -289,6 +291,10 @@ def _interpolate(value: Any, context: dict[str, str], environ: Mapping[str, str]
         return ""
     if not isinstance(value, str):
         value = str(value)
+    wrong = _SINGLE_BRACE_RE.search(value)
+    if wrong:
+        raise ConfigError(
+            f"'{wrong.group(0)}' is not expanded; write '${{{wrong.group(1)}}}' instead")
     if "${" not in value:
         return value
 
