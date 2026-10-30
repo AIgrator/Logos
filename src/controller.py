@@ -1907,6 +1907,10 @@ class AppController(QObject):
                 else:
                     self.ui.add_message(
                         f"<p><i>{html.escape(text)}</i></p>")
+            elif event_type == "suggestions":
+                add = getattr(self.ui, "add_suggestions", None)
+                if callable(add):
+                    add(event.get("items"))
             elif event_type == "reasoning":
                 text = event_text(event)
                 if text:

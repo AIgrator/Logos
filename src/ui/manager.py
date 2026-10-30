@@ -27,6 +27,7 @@ from llm.reasoning_effort import effective as effective_effort
 from llm.reasoning_effort import label as effort_label
 from llm.reasoning_effort import levels as effort_levels
 from states import ControllerState
+from src.suggestions import normalize_suggestions
 
 from . import editor_launcher, styles
 from .utils import CustomToolTipManager, IconHoverFilter
@@ -406,6 +407,8 @@ class UIManager(QWidget):
         self.chat_widget.job_stop_requested.connect(self.job_stop_requested.emit)
         self.chat_widget.attachment_preview_requested.connect(
             self._open_attachment_path)
+        self.chat_widget.suggestion_selected.connect(
+            self.user_command_submitted.emit)
         self.workspace_column_layout.addWidget(self.chat_widget, 1)
 
         self.attachment_scroll_area = NonScrollableScrollArea()
@@ -1697,6 +1700,14 @@ class UIManager(QWidget):
         """
         self.add_message(render_text(content, prefix_html, markdown_ok=True),
                          force_scroll=True)
+
+    def add_suggestions(self, items):
+        """Clickable next-step suggestions under an assistant answer."""
+        items = normalize_suggestions(items)
+        if not items:
+            return None
+        return self.add_message({'type': 'suggestions', 'items': items},
+                                force_scroll=True)
 
     def add_text(self, content: str, prefix_html: str = ""):
         """Adds machine-generated text (errors, statuses, reports) via the

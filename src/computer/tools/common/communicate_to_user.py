@@ -8,7 +8,8 @@ from src.computer.computer import tool_meta
         "description": "Asks the user a question or provides information if the task cannot proceed.",
         "arguments": {
             "message": {"type": "STRING", "description": "The question or information for the user.", "required": True},
-            "type": {"type": "STRING", "description": "The type of message: 'question' or 'info'", "enum": ["question", "info"], "required": False}
+            "type": {"type": "STRING", "description": "The type of message: 'question' or 'info'", "enum": ["question", "info"], "required": False},
+            "suggestions": {"type": "LIST_OF_STRINGS", "description": "Up to three short imperative answers or next actions the user is likely to choose, in the user's language; rendered as clickable chips. Leave empty only when no clear choice exists. Decide from the task context; never mention this in the message.", "required": False}
         }
     },
     flags={"platform": "any", "mode": "any"}

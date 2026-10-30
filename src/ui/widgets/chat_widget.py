@@ -43,6 +43,7 @@ class ChatWidget(QAbstractScrollArea):
     continue_requested = Signal()
     job_stop_requested = Signal(int)
     attachment_preview_requested = Signal(str, str)
+    suggestion_selected = Signal(str)
 
     # Readable, centered text column. On windows wider than this the chat text
     # stops stretching edge-to-edge and is centered with symmetric margins
@@ -248,6 +249,12 @@ class ChatWidget(QAbstractScrollArea):
                     self.continue_requested.emit()
                     return # Stop further processing
 
+                if anchor and anchor.startswith("suggest:"):
+                    parts = anchor.split(':', 2)
+                    if len(parts) == 3:
+                        self._select_suggestion(parts[1], parts[2])
+                        return
+
             # --- Standard Text Selection Logic ---
             current_time = QTime.currentTime().msecsSinceStartOfDay()
             double_click_interval = QApplication.instance().doubleClickInterval()
@@ -312,6 +319,47 @@ class ChatWidget(QAbstractScrollArea):
             copy_payloads=msg.get('copy_payloads'),
             actions=msg.get('actions'),
         )
+
+    def _format_suggestions(self, msg: dict) -> str:
+        """One muted row of clickable next-step suggestions."""
+        items = msg.get('items') or []
+        if not items:
+            return ""
+        meta = self.theme_manager.get_style("COLLAPSIBLE_META")
+        accent = self.theme_manager.get_style("COLLAPSIBLE_TITLE")
+        if msg.get('consumed'):
+            joined = "&nbsp;&nbsp;·&nbsp;&nbsp;".join(
+                html.escape(item) for item in items)
+            return (f'<div style="margin: 2px 0 6px 0; font-size: 92%; '
+                    f'color: {meta};">Next steps: {joined}</div>')
+        links = []
+        for index, item in enumerate(items):
+            links.append(
+                f'<a href="suggest:{msg["id"]}:{index}" '
+                f'style="color: {accent}; text-decoration: none; '
+                f'font-weight: 600;">{html.escape(item)}</a>')
+        return (f'<div style="margin: 2px 0 6px 0; font-size: 92%; '
+                f'color: {meta};">Next steps: '
+                f'{"&nbsp;&nbsp;·&nbsp;&nbsp;".join(links)}</div>')
+
+    def _select_suggestion(self, msg_id: str, index: str) -> bool:
+        """Send one clicked suggestion as the user's next message."""
+        for msg in self.messages:
+            if msg.get('type') != 'suggestions' or msg.get('id') != msg_id:
+                continue
+            if msg.get('consumed'):
+                return False
+            try:
+                text = msg['items'][int(index)]
+            except (KeyError, IndexError, ValueError):
+                return False
+            msg['consumed'] = True
+            msg['doc'].setHtml(self._format_suggestions(msg))
+            self._update_scroll_bar()
+            self.viewport().update()
+            self.suggestion_selected.emit(text)
+            return True
+        return False
 
     def _run_collapsible_action(self, block_id: str, action: str) -> bool:
         for msg in self.messages:
@@ -648,6 +696,15 @@ class ChatWidget(QAbstractScrollArea):
             }
             html_content = self._format_collapsible_message(msg)
             doc.setHtml(html_content)
+        elif isinstance(data, dict) and data.get('type') == 'suggestions':
+            msg = {
+                'type': 'suggestions',
+                'id': f"suggestions-{uuid.uuid4().hex}",
+                'items': [str(item) for item in (data.get('items') or [])],
+                'consumed': bool(data.get('consumed')),
+                'doc': doc,
+            }
+            doc.setHtml(self._format_suggestions(msg))
         elif isinstance(data, str):
             html_content = data
             doc.setHtml(html_content)

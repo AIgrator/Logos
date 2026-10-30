@@ -151,6 +151,22 @@ directory) is the terminal/browser `working_directory` and the root passed to
 `Indexer`; `.logos` is ignored by the indexer. Do not hardcode `Indexer('.')` or
 `os.getcwd()` for project-scoped paths.
 
+## Suggested next actions
+
+Terminal and Browser answers can carry up to three clickable next-step
+suggestions. The model passes them as the optional `suggestions` list on
+`finish` / `communicate_to_user` (`src/computer/tools/common/`); Vision cannot
+call those tools, so its final report ends with a `SUGGESTIONS: a | b | c`
+line instead (`src/suggestions.py::extract_suggestions`, stripped before
+display). `src/handlers/base_agent.py::_publish_suggestions` normalizes them
+(dedupe, 80 characters, max 3), renders the chip row through
+`UIManager.add_suggestions` and journals a `suggestions` event, which
+`AppController._replay_session` renders on restore. Chips are plain anchors
+(`suggest:<id>:<index>`); a click marks the row consumed and emits
+`ChatWidget.suggestion_selected`, wired to `user_command_submitted`, so the
+text is sent exactly like a typed message. Vision done text is not journaled,
+so those chips do not survive replay. Chat has no suggestions.
+
 ## Terminal access permissions
 
 Every Terminal tool call passes `src/computer/terminal_policy.py` before it

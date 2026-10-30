@@ -27,6 +27,7 @@ import uuid
 from context import model_context
 from project_manager import event_text
 from states import VisionState
+from src.suggestions import normalize_suggestions
 
 # After this many unsuccessful turns in a row the loop stops asking the
 # model and calls the user instead (PAUSED_ON_ERROR). Endless silent
@@ -681,19 +682,23 @@ class BaseAgentHandler:
             return
 
         if action.get('name') == 'finish':
-            message = (action.get('arguments') or {}).get('message', 'Task completed successfully.')
+            arguments = action.get('arguments') or {}
+            message = arguments.get('message', 'Task completed successfully.')
             self._record_assistant_message(message)
             self.ui.add_formatted_message(message)
             success = self.controller.theme_manager.get_style("SUCCESS_COLOR")
             self.ui.add_message(
                 f'<p style="margin: 2px 0; color: {success};"><i>✓ Done</i></p>')
+            self._publish_suggestions(arguments.get('suggestions'))
             self.stop()
             return
 
         if action.get('name') == 'communicate_to_user':
-            message = (action.get('arguments') or {}).get('message', 'The assistant needs your input.')
+            arguments = action.get('arguments') or {}
+            message = arguments.get('message', 'The assistant needs your input.')
             self._record_assistant_message(message)
             self.ui.add_formatted_message(message)
+            self._publish_suggestions(arguments.get('suggestions'))
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()
             return
@@ -754,6 +759,20 @@ class BaseAgentHandler:
         schedule = getattr(self.controller, "_schedule_summary_refresh", None)
         if callable(schedule):
             schedule()
+
+    def _publish_suggestions(self, suggestions):
+        """Render clickable next-step suggestions and journal them."""
+        items = normalize_suggestions(suggestions)
+        if not items:
+            return
+        add = getattr(self.ui, "add_suggestions", None)
+        if callable(add):
+            add(items)
+        self._append_session_event(
+            "suggestions",
+            turn_id=getattr(self.controller, "session_turn_id", ""),
+            items=items,
+        )
 
     _RESULT_PREFIXES = (
         "**Tool Result:** Error: ",

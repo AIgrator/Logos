@@ -38,6 +38,7 @@ from src.handlers.base_agent import (
     _recent_commands,
     _summarize_failure,
 )
+from src.suggestions import extract_suggestions
 
 
 # ---------------------------------------------------------------------------
@@ -1721,12 +1722,17 @@ class VisionHandler(BaseAgent):
             return
         if outcome.get("done"):
             self._stop_thinking_timer()
-            text = outcome.get("done_text") or "Done."
+            text, suggestions = extract_suggestions(
+                outcome.get("done_text") or "Done.")
+            text = text or "Done."
             # Done text is a report, nothing more. Questions to the human
             # go through the ask_user tool (explicit call) or safety flags
             # (native channel) — never through text matching.
             self.command_history.append(f"Computer-use finished: {text[:300]}")
             self.ui.add_text(text)
+            add_suggestions = getattr(self.ui, "add_suggestions", None)
+            if suggestions and callable(add_suggestions):
+                add_suggestions(suggestions)
             self._consecutive_errors = 0
             self._assessment_sent = False
             logging.info("task-done: restoring full mode")
