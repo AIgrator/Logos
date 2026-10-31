@@ -56,7 +56,11 @@ def _browser_read_files(tool):
             paths = [kwargs["path"]]
         if isinstance(paths, str):
             paths = [paths]
-        return tool(self, paths=paths)
+        extra = {
+            name: kwargs[name] for name in ("offset", "limit")
+            if kwargs.get(name) is not None
+        }
+        return tool(self, paths=paths, **extra)
 
     return wrapper
 

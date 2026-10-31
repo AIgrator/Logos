@@ -176,7 +176,7 @@ Browser is a stateful web agent with `browser_tool_code`.
 - `BrowserExecWorker` runs tools on a dedicated thread. Before risky actions it requests GUI-thread approval (`require_approval`, default on); denial is the safe default and the model is told not to retry.
 - `validate_url()` blocks non-HTTP(S) schemes, loopback/private/link-local addresses, blocked hostnames/families and domains outside `browser.allowed_domains`. The one local exception is `file://`: it is accepted only when the resolved path stays inside the active project root (no host, no `..` escape, file must exist), so the agent can test its own HTML pages without gaining access to the rest of the disk. Redirects pass through the same guard via a CDP `Fetch` handler. This is a policy layer, not a sandbox.
 - Page text returned to the model is wrapped in `<untrusted_page_content>`; the system prompt treats it as data, never instructions.
-- Read-only filesystem tools (`read_files`, `list_directory`, `search_file_content`) let the model open attached files by reference instead of receiving their contents every step.
+- Read-only filesystem tools (`read_files`, `list_directory`, `search_file_content`) let the model open attached files by reference instead of receiving their contents every step. `read_files` accepts an optional 1-based `offset` and a per-file `limit`; a ranged read returns numbered lines under a `(lines a-b of N)` header so large files are loaded in slices.
 - Per-task budgets (`browser.max_steps`, `browser.max_task_seconds`) stop runaway loops.
 - Screenshots are attached to the next model request only when the model asks for one; they are invalidated by navigation.
 

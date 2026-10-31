@@ -183,8 +183,12 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
 Attachment contents are not re-sent on every agent step. Terminal and Browser
 receive a reference block (name, kind, size, path, status) and read the file on
 demand with `read_files` / `list_directory` / `search_file_content` (Browser
-includes those read-only filesystem tools too). Chat has no tool loop, so text
-files are inlined once in the current request and only referenced afterwards.
+includes those read-only filesystem tools too). `read_files` takes an optional
+1-based `offset` and a `limit` per file: the range comes back numbered, under a
+`--- START OF FILE: <path> (lines a-b of N) ---` header, so large files are read
+in slices instead of whole; without them the output is the unchanged full file.
+Chat has no tool loop, so text files are inlined once in the current request
+and only referenced afterwards.
 The Session journal shows the recorded path, size, SHA-256, stored flag and live
 status under the message that carried each attachment.
 

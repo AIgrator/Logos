@@ -148,7 +148,13 @@ def build_flat_action_schema(metadata: dict) -> dict:
         names.append(name)
         for arg_name, spec in (tool.get("arguments") or {}).items():
             if arg_name not in props:
-                props[arg_name] = _arg_schema(spec)
+                field = _arg_schema(spec)
+                # Optional arguments stay listed in `required` but become
+                # nullable, so the model can leave them out as null instead
+                # of being forced to invent a value (e.g. read_files.offset).
+                if isinstance(spec, dict) and not spec.get("required", False):
+                    field = _nullable(field)
+                props[arg_name] = field
     return {
         "type": "object",
         "properties": {

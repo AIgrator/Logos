@@ -6,6 +6,7 @@ for light and dark modes by integrating with the ThemeManager.
 """
 import base64
 import html
+import re
 
 from PySide6.QtCore import QBuffer, QIODevice, QSize
 import qtawesome as qta
@@ -88,7 +89,16 @@ class TerminalHtmlFormatter:
         while i < len(lines):
             line = lines[i]
             if line.startswith('--- START OF FILE: ') and line.endswith(' ---'):
-                path = line[len('--- START OF FILE: '):-len(' ---')]
+                label = line[len('--- START OF FILE: '):-len(' ---')]
+                path = label
+                range_note = ''
+                match = re.match(
+                    r'^(?P<path>.+?) \(lines (?P<first>\d+)-(?P<last>\d+) of (?P<total>\d+)\)$',
+                    label)
+                if match:
+                    path = match.group('path')
+                    range_note = (f'lines {match.group("first")}-'
+                                  f'{match.group("last")} of {match.group("total")}')
                 i += 1
                 body = []
                 end_marker = f'--- END OF FILE: {path} ---'
@@ -98,11 +108,12 @@ class TerminalHtmlFormatter:
                 i += 1
                 body_text = "\n".join(body)
                 line_count = len(body_text.splitlines())
+                meta_text = range_note or f'{line_count} line(s)'
                 header = (f'<div style="color: {self._get_style("COLLAPSIBLE_TITLE")}; '
                           f'font-weight: 600; margin: 10px 0 4px 0;">'
                           f'{html.escape(path)} <span style="color: '
                           f'{self._get_style("COLLAPSIBLE_META")}; font-weight: 400;">'
-                          f'· {line_count} line(s)</span></div>')
+                          f'· {meta_text}</span></div>')
                 sections.append(header + self.format_code_content(body_text, path))
             elif line.startswith('--- ERROR READING FILE: ') and line.endswith(' ---'):
                 path = line[len('--- ERROR READING FILE: '):-len(' ---')]
