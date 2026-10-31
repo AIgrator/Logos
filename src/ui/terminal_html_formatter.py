@@ -6,13 +6,25 @@ for light and dark modes by integrating with the ThemeManager.
 """
 import base64
 import html
+import itertools
+import os
 import re
 
 from PySide6.QtCore import QBuffer, QIODevice, QSize
 import qtawesome as qta
 
-from .code_highlight import highlight_code
+from .code_highlight import (MAX_HIGHLIGHT_LINES, highlight_code,
+                             is_html_filename, split_highlighted_lines)
 from .theme_manager import DARK_THEME
+
+# One numbered line of a ranged read_files section: "12\tcode" (current) or
+# "12: code" (journals written before the tab separator).
+_NUMBERED_LINE_RE = re.compile(r'^(?P<num>\d+)(?::|\t) ?(?P<text>.*)$')
+# Opening/closing tags of HTML blocks whose content gets its own lexer.
+_EMBEDDED_TAG_RE = re.compile(r'<(/?)(style|script)\b[^>]*>', re.IGNORECASE)
+_HTML_COMMENT_RE = re.compile(r'<!--.*?-->', re.DOTALL)
+# A ranged read never scans further than this to find its HTML context.
+_CONTEXT_SCAN_LINES = 20000
 
 class TerminalHtmlFormatter:
     """
@@ -20,8 +32,11 @@ class TerminalHtmlFormatter:
     """
     ICON_SIZE = 10  # Default icon size, matching font height
 
-    def __init__(self, theme_manager):
+    def __init__(self, theme_manager, base_dir=None):
+        # ``base_dir`` resolves read_files paths for HTML-context detection;
+        # it may be a getter because the project root can change in place.
         self.theme_manager = theme_manager
+        self.base_dir = base_dir
 
     def _get_style(self, key):
         """Fetches a style property from the ThemeManager for the current theme."""
@@ -114,7 +129,12 @@ class TerminalHtmlFormatter:
                           f'{html.escape(path)} <span style="color: '
                           f'{self._get_style("COLLAPSIBLE_META")}; font-weight: 400;">'
                           f'· {meta_text}</span></div>')
-                sections.append(header + self.format_code_content(body_text, path))
+                if match:
+                    first = int(match.group('first'))
+                    sections.append(header + self._numbered_code_block(
+                        body, path, first, self._embedded_context(path, first)))
+                else:
+                    sections.append(header + self.format_code_content(body_text, path))
             elif line.startswith('--- ERROR READING FILE: ') and line.endswith(' ---'):
                 path = line[len('--- ERROR READING FILE: '):-len(' ---')]
                 i += 1
@@ -134,6 +154,97 @@ class TerminalHtmlFormatter:
         if not sections:
             return self.format_code_content(str(result), "")
         return "\n".join(sections)
+
+    def _embedded_context(self, path: str, first: int) -> str | None:
+        """Which embedded HTML block ('style' or 'script') holds ``first``.
+
+        A slice that starts inside <style> or <script> carries no opening tag,
+        so the HTML lexer would show it as plain text. Knowing the surrounding
+        block lets the numbered block re-wrap the slice for highlighting.
+        """
+        if first <= 1 or first - 1 > _CONTEXT_SCAN_LINES:
+            return None
+        if not path or not is_html_filename(path):
+            return None
+        base_dir = self.base_dir() if callable(self.base_dir) else self.base_dir
+        if not os.path.isabs(path):
+            if not base_dir:
+                return None
+            path = os.path.join(base_dir, path)
+        try:
+            with open(path, encoding='utf-8', errors='replace') as handle:
+                prefix = "".join(itertools.islice(handle, first - 1))
+        except (OSError, ValueError):
+            return None
+        prefix = _HTML_COMMENT_RE.sub("", prefix)
+        context = None
+        for match in _EMBEDDED_TAG_RE.finditer(prefix):
+            context = None if match.group(1) else match.group(2).lower()
+        return context
+
+    def _numbered_code_block(self, body: list[str], path: str, first: int,
+                             context: str | None = None) -> str:
+        """Code block with a line-number gutter, highlighted without prefixes.
+
+        The numbers are stripped before highlighting (a numeric prefix breaks
+        the lexer) and rendered as a right-aligned gutter. Each line is its
+        own table row, so a wrapped long line cannot push the next number
+        beside its continuation. A body that is not a clean numbered list,
+        such as an older journal, falls back to the plain code block.
+        """
+        entries = []
+        for index, line in enumerate(body):
+            match = _NUMBERED_LINE_RE.match(line)
+            if not match or int(match.group('num')) != first + index:
+                return self.format_code_content("\n".join(body), path)
+            entries.append((match.group('num'), match.group('text')))
+        width = max((len(num) for num, _ in entries), default=1)
+        dark = self.theme_manager.get_current_theme_name() == DARK_THEME
+        # A slice taken inside <style>/<script> is wrapped in its opening and
+        # closing tag for the lexer; those two extra lines are dropped below.
+        wrapped = context in ('style', 'script')
+        limit = MAX_HIGHLIGHT_LINES - (2 if wrapped else 0)
+        hidden = max(0, len(entries) - limit)
+        shown = entries[:limit]
+        code = "\n".join(text for _, text in shown)
+        if wrapped:
+            rendered, _ = highlight_code(f"<{context}>\n{code}\n</{context}>",
+                                         path, dark=dark)
+            code_lines = split_highlighted_lines(rendered)[1:-1]
+        else:
+            rendered, _ = highlight_code(code, path, dark=dark)
+            code_lines = split_highlighted_lines(rendered)
+        if len(code_lines) != len(shown):
+            return self.format_code_content("\n".join(body), path)
+        meta = self._get_style("COLLAPSIBLE_META")
+        pre_color = self._get_style("TERMINAL_PRE_COLOR")
+        rows = "".join(
+            '<tr>'
+            f'<td width="1%" valign="top"><pre style="margin: 0; color: {meta};">'
+            f'{num.rjust(width)}&nbsp;&nbsp;</pre></td>'
+            f'<td width="99%" valign="top"><pre style="margin: 0; '
+            f'color: {pre_color}; white-space: pre-wrap; word-wrap: break-word;">'
+            f'{line_html or "&nbsp;"}</pre></td>'
+            '</tr>'
+            for (num, _), line_html in zip(shown, code_lines, strict=True)
+        )
+        if hidden:
+            muted = "#8b949e" if dark else "#57606a"
+            rows += (
+                '<tr><td width="1%"></td>'
+                f'<td width="99%" valign="top"><pre style="margin: 0; '
+                f'color: {muted};">... {hidden} more line(s) hidden ...'
+                '</pre></td></tr>'
+            )
+        return (
+            f'<table width="100%" cellspacing="0" cellpadding="8" '
+            f'bgcolor="{self._get_style("CODE_BG")}" '
+            f'style="border: 1px solid {self._get_style("CODE_BORDER")}; '
+            'margin-top: 2px;"><tr><td>'
+            '<table width="100%" cellspacing="0" cellpadding="0">'
+            f'{rows}</table>'
+            '</td></tr></table>'
+        )
 
     def format_list_content(self, items, ordered: bool = False,
                             empty_text: str = "(no items)") -> str:

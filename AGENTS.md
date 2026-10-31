@@ -129,7 +129,11 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `tool_call` opens a step, `tool_result` fills its title from
   `display_title`, output from `display` (falling back to the model-facing
   `output.text`) and expands errors and denials, and `job_result` updates the
-  launch step. Journals written before those fields existed still group with
+  launch step. A `write_file` step rebuilds its code box from the recorded
+  `content`, and `replace` / `replace_many` steps rebuild the live diff block
+  from the recorded strings; since the edit already happened, line numbers
+  are anchored on the new text (or omitted when it is no longer in the file).
+  Journals written before those fields existed still group with
   the old grammar (step title from the action, output stripped of its
   `**Tool Result:**` markers). Vision and Chat keep the per-event card grammar
   (`AppController._replay_tool_event`). Replayed blocks and steps carry no

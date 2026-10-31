@@ -72,7 +72,7 @@ def read_files(self, paths: list[str], offset: int | None = None, limit: int | N
                     continue
                 last = total if limit is None else min(total, first - 1 + limit)
                 body = "".join(
-                    f"{i}: {lines[i - 1].rstrip(chr(10) + chr(13))}\n"
+                    f"{i}\t{lines[i - 1].rstrip(chr(10) + chr(13))}\n"
                     for i in range(first, last + 1))
                 all_content.append(
                     f"--- START OF FILE: {path} (lines {first}-{last} of {total}) ---\n"

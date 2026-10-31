@@ -212,7 +212,9 @@ class TerminalHandler(BaseAgentHandler):
         self.computer = Computer(mode='terminal', working_directory=working_directory,
                                  settings_manager=getattr(controller, 'settings_manager', None))
         self.theme_manager = theme_manager
-        self.html_formatter = TerminalHtmlFormatter(self.theme_manager)
+        self.html_formatter = TerminalHtmlFormatter(
+            self.theme_manager,
+            base_dir=lambda: self.computer.working_directory)
         self.os_info = f"{platform.system()} {platform.release()}"
         self.web_thread = None
 
@@ -251,7 +253,9 @@ class TerminalHandler(BaseAgentHandler):
 
     def _on_theme_changed(self):
         """Re-initializes the HTML formatter with the new theme."""
-        self.html_formatter = TerminalHtmlFormatter(self.theme_manager)
+        self.html_formatter = TerminalHtmlFormatter(
+            self.theme_manager,
+            base_dir=lambda: self.computer.working_directory)
 
     def build_prompts(self):
         # Live jobs are appended transiently (never stored): every planning
@@ -346,14 +350,70 @@ class TerminalHandler(BaseAgentHandler):
             _clip_replay_value(args), ensure_ascii=False, indent=2)
 
     def _replay_step_detail(self, action_name: str, action_args: dict):
-        """Written file bodies render as the same code box as live."""
+        """Written file bodies and edit diffs render as they did live."""
         if action_name == 'write_file':
             content = action_args.get('content')
             path = action_args.get('path') or 'file.txt'
             if content:
                 return self.html_formatter.format_code_content(
                     str(content), str(path))
+        if action_name in ('replace', 'replace_many'):
+            return self._edit_detail_html(action_name, action_args)
         return None
+
+    def _edit_target_path(self, action_name: str, action_args: dict) -> str:
+        key = 'file_path' if action_name == 'replace' else 'path'
+        return str(action_args.get(key) or '')
+
+    def _read_edit_target(self, action_name: str, action_args: dict) -> str:
+        path = self._edit_target_path(action_name, action_args)
+        if not path:
+            return ""
+        resolver = getattr(self.computer, '_resolve_path', None)
+        absolute_path = resolver(path) if callable(resolver) else path
+        try:
+            with open(absolute_path, encoding='utf-8') as handle:
+                return handle.read()
+        except (OSError, ValueError):
+            return ""
+
+    def _edit_detail_html(self, action_name: str, action_args: dict):
+        """Diff block of a replace/replace_many step, live and replayed.
+
+        Live runs before the edit, so the original text anchors the line
+        number. A replay runs after it, when old_string is gone from disk;
+        new_string sits on the same line there because the text before the
+        edit is unchanged.
+        """
+        if action_name == 'replace':
+            replacements = [action_args]
+        elif action_name == 'replace_many':
+            replacements = action_args.get('replacements') or []
+        else:
+            return None
+        if not isinstance(replacements, list) or not replacements:
+            return None
+        full_content = self._read_edit_target(action_name, action_args)
+        chunks = []
+        for replacement in replacements:
+            if not isinstance(replacement, dict):
+                continue
+            old_string = str(replacement.get('old_string') or '')
+            new_string = str(replacement.get('new_string') or '')
+            old_lines, new_lines = old_string.split('\n'), new_string.split('\n')
+            dedented_all = self._dedent_lines(old_lines + new_lines)
+            dedented_old = dedented_all[:len(old_lines)]
+            dedented_new = dedented_all[len(old_lines):]
+            index = full_content.find(old_string)
+            if index == -1 and new_string:
+                index = full_content.find(new_string)
+            start_line = full_content.count('\n', 0, index) + 1 if index != -1 else -1
+            chunks.append(self.html_formatter.format_diff_content(
+                dedented_old, dedented_new, start_line))
+        if not chunks:
+            return None
+        return (f'<div style="margin-bottom: 4px;">Changed '
+                f'{len(chunks)} replacement(s)</div>' + "".join(chunks))
 
     def _access_mode(self) -> str:
         settings = getattr(self.controller, "settings", None) or {}
@@ -450,33 +510,10 @@ class TerminalHandler(BaseAgentHandler):
                     content or '', str(path or ''))
                 self._update_activity_step(self._active_step, detail_html=detail)
             elif action_name in ['replace', 'replace_many']:
-                replacements = ([action_args] if action_name == 'replace'
-                                else action_args.get('replacements', []))
-                try:
-                    with open(path, encoding='utf-8') as f:
-                        full_content = f.read()
-                except Exception:
-                    full_content = ""
-
-                diff_html_chunks = []
-                for replacement in replacements:
-                    old_string = replacement.get('old_string', '')
-                    new_string = replacement.get('new_string', '')
-                    old_lines, new_lines = old_string.split('\n'), new_string.split('\n')
-                    dedented_all = self._dedent_lines(old_lines + new_lines)
-                    dedented_old = dedented_all[:len(old_lines)]
-                    dedented_new = dedented_all[len(old_lines):]
-                    index = full_content.find(old_string)
-                    start_line = full_content.count('\n', 0, index) + 1 if index != -1 else -1
-                    diff_html_chunks.append(self.html_formatter.format_diff_content(
-                        dedented_old, dedented_new, start_line))
-
-                if diff_html_chunks:
-                    note = (f'<div style="margin-bottom: 4px;">Changed '
-                            f'{len(diff_html_chunks)} replacement(s)</div>')
+                detail = self._edit_detail_html(action_name, action_args)
+                if detail:
                     self._update_activity_step(
-                        self._active_step,
-                        detail_html=note + "".join(diff_html_chunks))
+                        self._active_step, detail_html=detail)
 
         self._ensure_exec_thread()
         self._pending_action_name = action_name
