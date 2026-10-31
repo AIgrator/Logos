@@ -1968,8 +1968,9 @@ class UIManager(QWidget):
         return self.chat_widget.activity_update_step(msg, row, **fields)
 
     def finish_activity(self, msg, title: str | None = None,
-                        status: str = "ok") -> bool:
-        return self.chat_widget.finish_activity(msg, title=title, status=status)
+                        status: str = "ok", collapse: str | None = None) -> bool:
+        return self.chat_widget.finish_activity(
+            msg, title=title, status=status, collapse=collapse)
 
     def add_image_to_history(self, image_bytes: bytes):
         if not image_bytes:

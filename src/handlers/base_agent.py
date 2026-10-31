@@ -809,7 +809,8 @@ class BaseAgentHandler:
             detail_html=detail_html, job_id=job_id, log_path=log_path,
             title=title, expanded=expanded)
 
-    def _activity_finalize(self, title=None, status: str = "ok"):
+    def _activity_finalize(self, title=None, status: str = "ok",
+                           collapse: str | None = None):
         """Closes the current block so the next turn starts a fresh one."""
         # The plan is live progress: it must not outlive the turn that made it.
         try:
@@ -825,7 +826,7 @@ class BaseAgentHandler:
         if not callable(finish):
             return
         try:
-            finish(msg, title=title, status=status)
+            finish(msg, title=title, status=status, collapse=collapse)
         except Exception as e:
             logging.warning(f"{type(self).__name__} activity finish failed: {e}")
 
@@ -905,12 +906,12 @@ class BaseAgentHandler:
             self._batch_queue = []
             arguments = action.get('arguments') or {}
             message = arguments.get('message', 'Task completed successfully.')
-            self._activity_finalize("Done", "ok")
+            # The result is in: fold the work away. finish_activity keeps it
+            # open when the user opened it by hand, when a failure was never
+            # followed by a success, or while a background job still runs.
+            self._activity_finalize("Done", "ok", collapse="auto")
             self._record_assistant_message(message)
             self.ui.add_formatted_message(message)
-            success = self.controller.theme_manager.get_style("SUCCESS_COLOR")
-            self.ui.add_message(
-                f'<p style="margin: 2px 0; color: {success};"><i>✓ Done</i></p>')
             self._publish_suggestions(arguments.get('suggestions'))
             self.stop()
             return
@@ -1298,10 +1299,11 @@ class BaseAgentHandler:
             return
         # A failed step is not a failed turn: the model often retries and
         # succeeds, so the header never derives the turn outcome from steps.
+        # A restored session shows its work folded away by default.
         finish = getattr(self.ui, "finish_activity", None)
         if callable(finish):
             try:
-                finish(msg, title="Done", status="ok")
+                finish(msg, title="Done", status="ok", collapse="always")
             except Exception as e:
                 logging.warning(f"{type(self).__name__} replay close failed: {e}")
 

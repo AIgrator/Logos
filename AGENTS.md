@@ -169,7 +169,15 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   no status-colored card edge, and the outcome never derives from step results:
   replay closes every block as `Done`, because a failed step is not a failed
   turn (the model often retries and succeeds); the red ✗ and expanded output
-  stay on the step row alone.
+  stay on the step row alone. When the turn ends with `finish`, the block
+  folds to its header (`collapse="auto"` in `ChatWidget.finish_activity`):
+  the answer stays open below, the work does not. Auto-fold is skipped when the
+  user toggled the block by hand during the turn (`msg['user_toggled']`), when
+  a step failed or was denied with no successful step after it
+  (`_has_unresolved_failure`), or while a background job is still running;
+  `Request failed`, `Stopped` and `Waiting for you` keep their block open.
+  Replay always folds (`collapse="always"`), so a restored session shows all
+  work collapsed. There is no green `✓ Done` line under the answer.
   The plan lives outside the transcript: a live turn
   shows a compact `Step N / M` pill above the composer
   (`src/ui/widgets/plan_panel.py::PlanPanel`, mounted first in

@@ -901,8 +901,15 @@ class ChatWidget(QAbstractScrollArea):
         return True
 
     def finish_activity(self, msg, title: str | None = None,
-                        status: str = "ok") -> bool:
-        """Freezes the block header: final title and status."""
+                        status: str = "ok", collapse: str | None = None) -> bool:
+        """Freezes the block header: final title and status.
+
+        ``collapse`` picks the transcript treatment. ``"auto"`` folds the
+        finished turn away unless the user opened the block by hand, a step
+        failed without a later success, or a background job still runs;
+        ``"always"`` folds regardless (session restore); None leaves the
+        current open/closed state alone.
+        """
         if not self._has_message(msg):
             return False
         msg['finished_at'] = time.monotonic()
@@ -918,9 +925,38 @@ class ChatWidget(QAbstractScrollArea):
                     and row.get('job_id') is None):
                 row['status'] = 'stopped'
                 row['finished_at'] = msg['finished_at']
+        if collapse == 'always' or (
+                collapse == 'auto' and self._can_auto_collapse(msg)):
+            msg['expanded'] = False
         self._render_activity(msg)
         self._stop_activity_timer_if_idle()
         return True
+
+    def _can_auto_collapse(self, msg: dict) -> bool:
+        """Whether a just-finished turn may fold itself away.
+
+        The user's manual open/close wins, a real failure with no later
+        success stays visible, and work still in flight (a background job)
+        keeps waiting for its result on screen.
+        """
+        if msg.get('user_toggled'):
+            return False
+        if self._has_running_step(msg):
+            return False
+        return not self._has_unresolved_failure(msg)
+
+    @staticmethod
+    def _has_unresolved_failure(msg: dict) -> bool:
+        """True when the last failed step has no successful step after it."""
+        failed = False
+        for row in msg.get('rows') or []:
+            if row.get('kind') != 'step':
+                continue
+            if row.get('status') in ('error', 'denied'):
+                failed = True
+            elif row.get('status') == 'ok':
+                failed = False
+        return failed
 
     def seal_live_activity(self) -> bool:
         """Closes live turn blocks at a transcript boundary (a user message).
@@ -1009,6 +1045,9 @@ class ChatWidget(QAbstractScrollArea):
             return False
         if kind == 'toggle':
             msg['expanded'] = not bool(msg.get('expanded', True))
+            # The user's own open/close choice outranks auto-collapse: a block
+            # they opened by hand must not fold under their cursor later.
+            msg['user_toggled'] = True
             self._render_activity(msg)
             return True
         if kind == 'row':
