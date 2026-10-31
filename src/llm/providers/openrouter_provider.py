@@ -10,6 +10,14 @@ from PIL import Image
 from ..base_provider import BaseLLMProvider
 from ..exceptions import FatalError, RetryableError, extract_retry_after, is_transient_error, is_transient_throttle
 
+
+def _rejects_forced_tool_choice_in_thinking_mode(body: str) -> bool:
+    """OpenRouter wraps the upstream 400; Alibaba/Qwen words it this way when
+    an image pushes the request into thinking mode."""
+    body = body or ""
+    return "tool_choice" in body and "thinking mode" in body
+
+
 class OpenRouterProvider(BaseLLMProvider):
     """
     LLM provider for OpenRouter. This version implements robust error handling
@@ -65,6 +73,7 @@ class OpenRouterProvider(BaseLLMProvider):
         super().__init__(provider_config)
         self.base_url = self.get_provider_config().get("api_url")
         self._tools_cache = None
+        self._images_need_auto_tool_choice = False
         self.session = requests.Session()
         self.current_generation_id = None
 
@@ -270,7 +279,11 @@ class OpenRouterProvider(BaseLLMProvider):
                     tool_to_send["function"]["parameters"] = corrected_parameters
 
                 request_body["tools"] = [tool_to_send]
-                request_body["tool_choice"] = "required"
+                # Alibaba's Qwen route rejects forced tool_choice in thinking
+                # mode once an image is attached (text-only calls are fine).
+                request_body["tool_choice"] = (
+                    "auto" if attachments and self._images_need_auto_tool_choice
+                    else "required")
             else:
                 logging.warning(f"Schema '{schema_name}' requested but not found. Falling back to 'auto'.")
                 use_forced_tool = False
@@ -299,6 +312,17 @@ class OpenRouterProvider(BaseLLMProvider):
 
         try:
             response = self.session.post(f"{self.base_url}/chat/completions", headers=headers, json=request_body, timeout=120)
+
+            if (use_forced_tool and response.status_code == 400
+                    and _rejects_forced_tool_choice_in_thinking_mode(response.text)):
+                # The upstream (Alibaba/Qwen) refuses tool_choice=required as
+                # soon as an image puts the model into thinking mode. Auto still
+                # returns the tool call, so retry without the forcing and skip
+                # the doomed attempt for later image-carrying requests.
+                self._images_need_auto_tool_choice = True
+                request_body["tool_choice"] = "auto"
+                logging.info("OpenRouter: forced tool_choice rejected in thinking mode; retrying with 'auto'.")
+                response = self.session.post(f"{self.base_url}/chat/completions", headers=headers, json=request_body, timeout=120)
 
             # Log the full response for debugging purposes
             llm_comms_logger.debug(f"OpenRouter Response (get_response):\nStatus: {response.status_code}\nBody: {response.text}")
