@@ -512,7 +512,7 @@ class BrowserHandler(BaseAgentHandler):
                     error_msg, f"{action_name} · error", "error")
             self.record_tool_result(
                 error_msg, status="denied" if denied else "error", name=action_name)
-            self._continue_loop(error_msg)
+            self._after_action_result(error_msg, abort=True)
             return
         output = text or "(ok, no output)"
         if self._active_step is not None:
@@ -524,11 +524,11 @@ class BrowserHandler(BaseAgentHandler):
                 "**Tool Result:**\n<untrusted_page_content>\n"
                 f"{output}\n</untrusted_page_content>")
             self.record_tool_result(result_text, name=action_name, display=output)
-            self._continue_loop(result_text)
+            self._after_action_result(result_text)
             return
         result_text = f"**Tool Result:**\n```\n{output}\n```"
         self.record_tool_result(result_text, name=action_name, display=output)
-        self._continue_loop(result_text)
+        self._after_action_result(result_text)
 
     @Slot(int, str)
     def _on_browser_error(self, ticket: int, error_message: str):
@@ -547,4 +547,4 @@ class BrowserHandler(BaseAgentHandler):
                 error_msg, f"{self._pending_action_name} · error", "error")
         self.record_tool_result(
             error_msg, status="error", name=self._pending_action_name)
-        self._continue_loop(error_msg)
+        self._after_action_result(error_msg, abort=True)

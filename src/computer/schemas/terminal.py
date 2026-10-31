@@ -11,11 +11,20 @@ class TerminalToolCodePayload(BaseModel):
     commentary: str | None = Field(
         default=None,
         description=(
-            "Optional one-sentence note to the user about this step, in their "
-            "language. Shown as narration in the activity block. Leave null "
-            "when the step needs no explanation."),
+            "Optional one-sentence note to the user about this batch of "
+            "steps, in their language. Shown as narration in the activity "
+            "block. Leave null when the steps need no explanation."),
         example="Looking at the project layout first.")
-    action: ToolCall = Field(..., description="The tool call to be executed in the terminal.")
+    actions: list[ToolCall] = Field(
+        ...,
+        min_length=1,
+        max_length=8,
+        description=(
+            "One to eight independent tool calls, executed in order. Only "
+            "include calls whose arguments you already know: a later call "
+            "never sees an earlier call's output. finish and "
+            "communicate_to_user must be alone."),
+        example=[{"name": "list_directory", "arguments": {"path": "."}}])
 
 class TerminalToolCode(BaseModel):
     """A direct tool call for the terminal mode."""

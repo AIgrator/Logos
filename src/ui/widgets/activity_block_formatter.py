@@ -50,21 +50,22 @@ def step_category(row: dict) -> str:
 def run_extent(rows: list, start: int) -> int:
     """Last row index of the tool run beginning at ``start``.
 
-    Thoughts and notes between steps belong to the run: one reasoning block
-    and one narration line per tool call is the norm, and letting them break
-    the group would leave every tool on its own line. A step of another
-    category ends the run; trailing thoughts/notes stay outside it.
+    Only consecutive steps of the same category form a run. A thought or a
+    narration line ends it: those rows belong to the response that produced
+    the following steps, so folding them into the previous group would hide
+    the model's thinking inside a collapsed "Ran N tools" line.
     """
     if not 0 <= start < len(rows):
         return start
     category = step_category(rows[start])
     last = start
-    index = start
-    while index < len(rows) and rows[index].get("kind") in ("thought", "note", "step"):
-        if rows[index].get("kind") == "step":
-            if step_category(rows[index]) != category:
-                break
-            last = index
+    index = start + 1
+    while index < len(rows):
+        if rows[index].get("kind") != "step":
+            break
+        if step_category(rows[index]) != category:
+            break
+        last = index
         index += 1
     return last
 
@@ -195,11 +196,12 @@ class ActivityBlockFormatter:
         return format_duration(seconds)
 
     def _format_body(self, msg: dict, rows: list, meta: str, now: float) -> str:
-        """Rows in order, with each tool run folded into one summary row.
+        """Rows in order, with each run of consecutive tool steps folded.
 
-        The narration line before the first step stays visible above the run:
-        that is the model's commentary for this piece of work. Narration for
-        the run's later steps lives inside the expanded run.
+        A run is exactly the set of steps one response issued: a thought or a
+        narration line between steps belongs to the next response and stays
+        visible, so the model's reasoning is never swallowed by a folded
+        "Ran N tools" row.
         """
         parts = []
         index = 0

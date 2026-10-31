@@ -469,7 +469,10 @@ class AnthropicProvider(BaseLLMProvider):
     @classmethod
     def _strict_grammar_fits(cls, strict_schema: dict) -> bool:
         try:
-            branches = strict_schema["properties"]["payload"]["properties"]["action"]["anyOf"]
+            branches = (
+                strict_schema["properties"]["payload"]["properties"]
+                ["actions"]["items"]["anyOf"]
+            )
             return len(branches) <= cls.ANTHROPIC_STRICT_MAX_BRANCHES
         except Exception:
             return False

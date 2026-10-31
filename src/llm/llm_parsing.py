@@ -132,7 +132,9 @@ def _normalize_payload_strings(data_object: Any) -> Any:
     the decoded value is structured (dict/list), so genuine string payloads of
     other schemas are left untouched.
     """
-    if not isinstance(data_object, dict):
+    if not isinstance(data_object, dict) or 'payload' not in data_object:
+        # Adding 'payload': None here would make validate_object treat a bare
+        # tool call as an envelope with an empty payload instead of wrapping it.
         return data_object
 
     result = dict(data_object)
@@ -155,6 +157,30 @@ def _normalize_payload_strings(data_object: Any) -> Any:
         break
     result['payload'] = payload
     return result
+
+def _normalize_actions_envelope(envelope: dict) -> dict:
+    """Fold the legacy single `action` into the batched `actions` list.
+
+    The envelope used to carry one `action` object; it now carries up to eight
+    independent calls in `actions`. Models keep producing the old shape from
+    habit and old cached examples, so both are accepted here.
+    """
+    payload = envelope.get('payload')
+    if not isinstance(payload, dict):
+        return envelope
+    actions = payload.get('actions')
+    legacy = payload.get('action')
+    if actions is None and isinstance(legacy, dict):
+        logging.warning("Detected a legacy single 'action' payload. Wrapping it into 'actions'.")
+        fixed = {key: value for key, value in payload.items() if key != 'action'}
+        fixed['actions'] = [legacy]
+    elif isinstance(actions, dict):
+        logging.warning("Detected a single action object in 'actions'. Wrapping it into a list.")
+        fixed = {**payload, 'actions': [actions]}
+    else:
+        return envelope
+    return {**envelope, 'payload': fixed}
+
 
 def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, str | None]:
     """
@@ -188,14 +214,14 @@ def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, st
             if isinstance(args, dict):
                 logging.warning(f"Detected naked tool call with type='{type_value}'. Reconstructing envelope.")
                 data_object = {'type': schema_name,
-                               'payload': {'action': {'name': type_value, 'arguments': args}}}
+                               'payload': {'actions': [{'name': type_value, 'arguments': args}]}}
             elif isinstance(data_object.get('payload'), dict):
                 logging.warning(f"Detected wrong envelope type '{type_value}'. Fixing to '{schema_name}'.")
                 data_object = dict(data_object)
                 data_object['type'] = schema_name
-        if 'name' in data_object and 'arguments' in data_object and 'action' not in data_object:
+        if 'name' in data_object and 'arguments' in data_object and 'actions' not in data_object:
             logging.warning("Detected a naked tool call for terminal_tool_code. Wrapping it.")
-            data_object = {'action': data_object}
+            data_object = {'actions': [data_object]}
         else:
             tool_name = data_object.get('action') or data_object.get('tool_name') or data_object.get('tool_code')
             args = data_object.get('arguments') or data_object.get('command_arguments') or data_object.get('parameters')
@@ -203,25 +229,30 @@ def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, st
             if tool_name and isinstance(tool_name, str) and args is not None and isinstance(args, dict):
                 logging.warning(f"Detected a malformed/flattened tool call ('{tool_name}'). Reconstructing it.")
                 reconstructed_call = {'name': tool_name, 'arguments': args}
-                data_object = {'action': reconstructed_call}
+                data_object = {'actions': [reconstructed_call]}
 
             # Hoist: models sometimes bury "name" one level too deep, inside
-            # "arguments" ({"action": {"arguments": {"name": ..., ...}}}) —
+            # "arguments" ({"actions": [{"arguments": {"name": ..., ...}}]}) —
             # lift it up to the action level instead of failing validation.
             holders = [data_object]
             payload = data_object.get('payload')
             if isinstance(payload, dict):
                 holders.append(payload)
             for holder in holders:
+                targets = []
                 action_obj = holder.get('action')
-                if (isinstance(action_obj, dict) and 'name' not in action_obj
-                        and isinstance(action_obj.get('arguments'), dict)
-                        and isinstance(action_obj['arguments'].get('name'), str)):
-                    nested_name = action_obj['arguments']['name']
-                    logging.warning(f"Detected 'name' nested inside arguments ('{nested_name}'). Hoisting it.")
-                    fixed_action = dict(action_obj)
-                    fixed_action['name'] = nested_name
-                    holder['action'] = fixed_action
+                if isinstance(action_obj, dict):
+                    targets.append(action_obj)
+                actions_list = holder.get('actions')
+                if isinstance(actions_list, list):
+                    targets.extend(item for item in actions_list if isinstance(item, dict))
+                for action_obj in targets:
+                    if ('name' not in action_obj
+                            and isinstance(action_obj.get('arguments'), dict)
+                            and isinstance(action_obj['arguments'].get('name'), str)):
+                        nested_name = action_obj['arguments']['name']
+                        logging.warning(f"Detected 'name' nested inside arguments ('{nested_name}'). Hoisting it.")
+                        action_obj['name'] = nested_name
 
     if isinstance(data_object, dict):
         # Case 1: Already well-formed.
@@ -239,6 +270,9 @@ def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, st
         error_msg = f"Cannot validate data of type {type(data_object).__name__} for schema '{schema_name}'."
         logging.error(error_msg)
         return None, error_msg
+
+    if schema_name in ('terminal_tool_code', 'browser_tool_code'):
+        object_to_validate = _normalize_actions_envelope(object_to_validate)
 
     try:
         validated_model = pydantic_model.model_validate(object_to_validate)

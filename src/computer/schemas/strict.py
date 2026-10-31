@@ -23,7 +23,7 @@ letting the provider constrain the name and the arguments together.
 
 The produced schema describes exactly the same *output shape* as before::
 
-    {"type": "<envelope>", "payload": {"action": {"name": ..., "arguments": {...}}}}
+    {"type": "<envelope>", "payload": {"actions": [{"name": ..., "arguments": {...}}]}}
 """
 
 from __future__ import annotations
@@ -171,14 +171,14 @@ def build_flat_action_schema(metadata: dict) -> dict:
     }
 
 
-# Optional narration inside the payload, next to the action. It lives at the
+# Optional narration inside the payload, next to the actions. It lives at the
 # envelope level (not per tool) so the tool union/grammar stays unchanged.
 COMMENTARY_SCHEMA = {
     "type": ["string", "null"],
     "description": (
-        "Optional one-sentence note to the user about this step, in their "
-        "language. Shown as narration in the activity block. null when no "
-        "explanation is needed."),
+        "Optional one-sentence note to the user about this batch of steps, in "
+        "their language. Shown as narration in the activity block. null when "
+        "no explanation is needed."),
 }
 
 
@@ -195,9 +195,15 @@ def build_strict_schema_flat(name: str, metadata: dict, description: str | None 
                 "type": "object",
                 "properties": {
                     "commentary": COMMENTARY_SCHEMA,
-                    "action": build_flat_action_schema(metadata),
+                    "actions": {
+                        "type": "array",
+                        "items": build_flat_action_schema(metadata),
+                        "description": (
+                            "One to eight independent tool calls, executed in "
+                            "order. finish and communicate_to_user must be alone."),
+                    },
                 },
-                "required": ["commentary", "action"],
+                "required": ["commentary", "actions"],
                 "additionalProperties": False,
             },
         },
@@ -210,7 +216,7 @@ def build_strict_schema_flat(name: str, metadata: dict, description: str | None 
 
 
 def build_strict_schema(name: str, metadata: dict, description: str | None = None) -> dict:
-    """Build a strict, single-tool-call envelope schema for one mode."""
+    """Build a strict, batched tool-call envelope schema for one mode."""
     envelope: dict[str, Any] = {
         "type": "object",
         "properties": {
@@ -219,9 +225,15 @@ def build_strict_schema(name: str, metadata: dict, description: str | None = Non
                 "type": "object",
                 "properties": {
                     "commentary": COMMENTARY_SCHEMA,
-                    "action": {"anyOf": build_action_union(metadata)},
+                    "actions": {
+                        "type": "array",
+                        "items": {"anyOf": build_action_union(metadata)},
+                        "description": (
+                            "One to eight independent tool calls, executed in "
+                            "order. finish and communicate_to_user must be alone."),
+                    },
                 },
-                "required": ["commentary", "action"],
+                "required": ["commentary", "actions"],
                 "additionalProperties": False,
             },
         },

@@ -471,7 +471,7 @@ class TerminalHandler(BaseAgentHandler):
         else:
             self._add_result_card(text, f"{action_name} · denied", "denied")
         self.record_tool_result(text, status="denied", name=action_name)
-        self._continue_loop(text)
+        self._after_action_result(text, abort=True)
 
     def execute_action(self, action: dict) -> str | None:
         """
@@ -572,7 +572,7 @@ class TerminalHandler(BaseAgentHandler):
             self._add_result_card(
                 error_msg_for_llm, f"{action_name} · error", "error")
         self.record_tool_result(error_msg_for_llm, status="error", name=action_name)
-        self._continue_loop(error_msg_for_llm)
+        self._after_action_result(error_msg_for_llm, abort=True)
         self.web_thread = None
 
     def _handle_final_response(self, action_name: str, response_text: str, original_args: dict):
@@ -605,7 +605,7 @@ class TerminalHandler(BaseAgentHandler):
 
         output_for_llm = f"**Tool Result:**\n```\n{response_text}\n```"
         self.record_tool_result(output_for_llm, name=action_name)
-        self._continue_loop(output_for_llm)
+        self._after_action_result(output_for_llm)
 
     def _format_result_for_llm_and_ui(self, tool_name: str, result: any, args: dict) -> (str, any):
         """
@@ -1209,11 +1209,11 @@ class TerminalHandler(BaseAgentHandler):
             # so waiting again here only stalls the model by 10 seconds.
             self.command_history.append(output_for_llm)
             if isinstance(result, dict) and result.get('readiness_checked'):
-                self._continue_loop(output_for_llm)
+                self._after_action_result(output_for_llm)
                 return
             self._arm_job_wait(job_id)
             return
-        self._continue_loop(output_for_llm)
+        self._after_action_result(output_for_llm)
 
     @staticmethod
     def _ui_result_fields(output_for_ui):
@@ -1306,7 +1306,7 @@ class TerminalHandler(BaseAgentHandler):
                 error_msg, f"{self._pending_action_name} · error", "error")
         self.record_tool_result(
             error_msg, status="error", name=self._pending_action_name)
-        self._continue_loop(error_msg)
+        self._after_action_result(error_msg, abort=True)
 
     def cancel_job_wait(self):
         try:
@@ -1398,7 +1398,7 @@ class TerminalHandler(BaseAgentHandler):
                 and not self._tool_in_flight):
             self.cancel_job_wait()
             logging.info(f"TerminalHandler: job #{job_id} finished; waking loop.")
-            self._continue_loop(output_for_llm, from_job_wait=True)
+            self._after_action_result(output_for_llm, from_job_wait=True)
             return
 
         if output_for_llm:
@@ -1459,7 +1459,7 @@ class TerminalHandler(BaseAgentHandler):
             if output_for_ui:
                 self._apply_job_ui(
                     job_id_arg, output_for_ui, self._job_outcome(final))
-            self._continue_loop(output_for_llm, from_job_wait=True)
+            self._after_action_result(output_for_llm, from_job_wait=True)
             return
         self._job_wait_rounds += 1
         if self._job_wait_rounds >= JOB_WAIT_MAX_ROUNDS:
@@ -1476,7 +1476,7 @@ class TerminalHandler(BaseAgentHandler):
             )
             # The launch step already shows the job and its Stop link; a
             # second snapshot block would just repeat it in chat.
-            self._continue_loop(output_for_llm, from_job_wait=True)
+            self._after_action_result(output_for_llm, from_job_wait=True)
             return
         try:
             self._job_wait_timer.start(JOB_WAIT_INTERVAL_MS)

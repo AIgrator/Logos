@@ -238,6 +238,8 @@ def _is_neutral_output(text) -> bool:
 class BaseAgentHandler:
     MODE_NAME = "agent"
     SCHEMA_NAME = None
+    # Hard ceiling on one response's batch; the prompt asks for fewer.
+    MAX_BATCH_ACTIONS = 8
 
     def __init__(self, controller):
         self.controller = controller
@@ -265,6 +267,9 @@ class BaseAgentHandler:
         # The block that owns the current step. A user message mid-task seals
         # the block, and the step's late result must still land in it.
         self._active_step_block = None
+        # Remaining actions of the current response. They run in order before
+        # the model is asked again; asking the model ends the batch.
+        self._batch_queue = []
         self._job_steps = {}  # job_id -> (activity msg, step row)
         # NOTE: there is deliberately NO timeout counter. Timeouts count as
         # ordinary failures; significance is the model's call (assessment
@@ -359,6 +364,9 @@ class BaseAgentHandler:
         if self._step_in_flight():
             # Record it; the step's own completion continues the loop and the
             # planning turn then sees both the guidance and the fresh result.
+            # Queued actions of the current batch are dropped: they were
+            # planned before the guidance existed.
+            self._batch_queue = []
             self.command_history.append(guidance)
             self.ui.add_message(
                 "<i>Noted — I'll take it into account after the current step "
@@ -407,6 +415,9 @@ class BaseAgentHandler:
         if self.state == VisionState.EXECUTING:
             self.pre_pause_state = self.state
             self._set_state(VisionState.PAUSED)
+            # Queued actions of the current batch do not run after Resume:
+            # the next planning turn re-plans with everything that changed.
+            self._batch_queue = []
             # NOTE: in-flight work is deliberately NOT cancelled: a running
             # tool or request finishes on its own, the loop just sends
             # nothing new until Resume. History keeps being recorded.
@@ -430,6 +441,7 @@ class BaseAgentHandler:
         self._stop_thinking_timer()
         self.original_user_request = None
         self.command_history = []
+        self._batch_queue = []
         self._tool_in_flight = False
         self._last_action_sig = None
         self._consecutive_errors = 0
@@ -443,6 +455,7 @@ class BaseAgentHandler:
         ticking after the error card appeared.
         """
         logging.error(f"{type(self).__name__} fatal LLM error: {error_message}")
+        self._batch_queue = []
         self._activity_finalize("Request failed", "error")
 
     def _cleanup_task(self):
@@ -498,25 +511,8 @@ class BaseAgentHandler:
         return ("**System note:** assess via communicate_to_user before acting "
                 "further. One message, then wait.")
 
-    def _continue_loop(self, last_command_output=None, from_job_wait=False):
-        """
-        Plan one action -> execute -> observe -> repeat.
-        Evaluation is implicit: the next planning turn sees the result
-        (plus loop-awareness notes) and corrects course itself.
-        """
-        if not from_job_wait:
-            # Any explicit new turn supersedes a pending background wait.
-            try:
-                self.cancel_job_wait()
-            except Exception:
-                pass
-        # Doctrine: significance is the MODEL's call, never the code's. ONE
-        # counter counts unsuccessful turns (timeout deaths included — they
-        # are ordinary failures). Neutral launches/polls have no outcome yet
-        # and preserve the streak; success/None/stop reset it. Whether a
-        # SyntaxError is a trifle or the wall is judged by her in the
-        # assessment turn, not by marker lists here. The user is only ever
-        # bothered via her communicate_to_user or the second-tripwire pause.
+    def _record_output(self, last_command_output=None):
+        """History and error-streak bookkeeping for one finished step."""
         if last_command_output:
             self.command_history.append(last_command_output)
             if _is_neutral_output(last_command_output):
@@ -531,6 +527,30 @@ class BaseAgentHandler:
         else:
             self._consecutive_errors = 0
             self._assessment_sent = False
+
+    def _continue_loop(self, last_command_output=None, from_job_wait=False):
+        """
+        Plan one action -> execute -> observe -> repeat.
+        Evaluation is implicit: the next planning turn sees the result
+        (plus loop-awareness notes) and corrects course itself.
+        """
+        # Asking the model starts a fresh response, so any actions still
+        # queued from the previous one are obsolete.
+        self._batch_queue = []
+        if not from_job_wait:
+            # Any explicit new turn supersedes a pending background wait.
+            try:
+                self.cancel_job_wait()
+            except Exception:
+                pass
+        # Doctrine: significance is the MODEL's call, never the code's. ONE
+        # counter counts unsuccessful turns (timeout deaths included — they
+        # are ordinary failures). Neutral launches/polls have no outcome yet
+        # and preserve the streak; success/None/stop reset it. Whether a
+        # SyntaxError is a trifle or the wall is judged by her in the
+        # assessment turn, not by marker lists here. The user is only ever
+        # bothered via her communicate_to_user or the second-tripwire pause.
+        self._record_output(last_command_output)
 
         if self.state in (VisionState.IDLE, VisionState.PAUSED):
             return
@@ -835,6 +855,96 @@ class BaseAgentHandler:
             "**Plan updated:** " + "; ".join(
                 f"{marks[s['status']]} {s['text']}" for s in normalized))
 
+    # -- batched actions ---------------------------------------------------
+
+    def _payload_actions(self, payload) -> list:
+        """Actions of one response: the batched list, or a legacy single action."""
+        actions = payload.get('actions')
+        if isinstance(actions, list):
+            candidates = actions
+        elif isinstance(payload.get('action'), dict):
+            candidates = [payload['action']]
+        else:
+            candidates = []
+        return [action for action in candidates
+                if isinstance(action, dict) and action.get('name')]
+
+    def _start_batch(self, actions: list):
+        """Runs the actions of one response in order, without a model turn."""
+        if self._tool_in_flight:
+            # A superseded answer (e.g. a second request while the first
+            # answer's tool still runs). The running tool's result continues
+            # the previous work; queueing this batch too would stall on it.
+            logging.info(f"{type(self).__name__} dropping superseded batch "
+                         f"of {len(actions)} action(s) (a tool is still running).")
+            self._batch_queue = []
+            return
+        self._batch_queue = list(actions[1:])
+        self._dispatch_action(actions[0])
+
+    def _dispatch_action(self, action: dict):
+        """Executes one action: control tools inline, tools as activity steps."""
+        name = action.get('name')
+
+        if name == 'update_plan':
+            arguments = action.get('arguments') or {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            self._apply_plan(arguments.get('steps'))
+            self._after_action_result(
+                "**Tool Result:** Plan shown to the user. Keep it current as "
+                "steps start and finish.")
+            return
+
+        if name == 'finish':
+            self._batch_queue = []
+            arguments = action.get('arguments') or {}
+            message = arguments.get('message', 'Task completed successfully.')
+            self._activity_finalize("Done", "ok")
+            self._record_assistant_message(message)
+            self.ui.add_formatted_message(message)
+            success = self.controller.theme_manager.get_style("SUCCESS_COLOR")
+            self.ui.add_message(
+                f'<p style="margin: 2px 0; color: {success};"><i>✓ Done</i></p>')
+            self._publish_suggestions(arguments.get('suggestions'))
+            self.stop()
+            return
+
+        if name == 'communicate_to_user':
+            self._batch_queue = []
+            arguments = action.get('arguments') or {}
+            message = arguments.get('message', 'The assistant needs your input.')
+            self._activity_finalize("Waiting for you", "waiting")
+            self._record_assistant_message(message)
+            self.ui.add_formatted_message(message)
+            self._publish_suggestions(arguments.get('suggestions'))
+            self._set_state(VisionState.PAUSED_ON_ERROR)
+            self._stop_thinking_timer()
+            return
+
+        if name == 'display_message':
+            message = (action.get('arguments') or {}).get('message', '...')
+            self._record_assistant_message(message)
+            self.ui.add_formatted_message(message)
+            self._after_action_result(
+                f"**Tool Result:** Message displayed to user: {message}")
+            return
+
+        self._run_action(action)
+
+    def _after_action_result(self, output=None, from_job_wait=False, abort=False):
+        """Continues the queued batch or asks the model to plan the next step.
+
+        An error, a denial or a duplicate guard hit aborts the rest of the
+        batch: those calls were planned without knowing this outcome.
+        """
+        if not abort and self._batch_queue and self.state == VisionState.EXECUTING:
+            self._record_output(output)
+            self._dispatch_action(self._batch_queue.pop(0))
+            return
+        self._batch_queue = []
+        self._continue_loop(output, from_job_wait=from_job_wait)
+
     def handle_llm_response(self, reasoning: str, payload: any, schema_name: str,
                             commentary: str = ""):
         """Handles the response from the LLM, which should be a tool call."""
@@ -866,61 +976,27 @@ class BaseAgentHandler:
                 text=commentary,
             )
 
-        if schema_name != self.SCHEMA_NAME or not payload or 'action' not in payload:
+        if schema_name != self.SCHEMA_NAME or not payload:
             self._activity_finalize("Unexpected response", "error")
             self.ui.add_message("<i>Received an unexpected response from the model. Cannot proceed.</i>")
             self.stop()
             return
 
-        action = payload.get('action')
-        if not action or 'name' not in action:
+        actions = self._payload_actions(payload)
+        if not actions:
             self._activity_finalize("Invalid plan", "error")
             self.ui.add_message("<i>The model's plan was invalid. Cannot proceed.</i>")
             self.stop()
             return
 
-        if action.get('name') == 'update_plan':
-            arguments = action.get('arguments') or {}
-            if not isinstance(arguments, dict):
-                arguments = {}
-            self._apply_plan(arguments.get('steps'))
-            self._continue_loop(
-                "**Tool Result:** Plan shown to the user. Keep it current as "
-                "steps start and finish.")
-            return
-
-        if action.get('name') == 'finish':
-            arguments = action.get('arguments') or {}
-            message = arguments.get('message', 'Task completed successfully.')
-            self._activity_finalize("Done", "ok")
-            self._record_assistant_message(message)
-            self.ui.add_formatted_message(message)
-            success = self.controller.theme_manager.get_style("SUCCESS_COLOR")
-            self.ui.add_message(
-                f'<p style="margin: 2px 0; color: {success};"><i>✓ Done</i></p>')
-            self._publish_suggestions(arguments.get('suggestions'))
-            self.stop()
-            return
-
-        if action.get('name') == 'communicate_to_user':
-            arguments = action.get('arguments') or {}
-            message = arguments.get('message', 'The assistant needs your input.')
-            self._activity_finalize("Waiting for you", "waiting")
-            self._record_assistant_message(message)
-            self.ui.add_formatted_message(message)
-            self._publish_suggestions(arguments.get('suggestions'))
-            self._set_state(VisionState.PAUSED_ON_ERROR)
-            self._stop_thinking_timer()
-            return
-
-        if action.get('name') == 'display_message':
-            message = (action.get('arguments') or {}).get('message', '...')
-            self._record_assistant_message(message)
-            self.ui.add_formatted_message(message)
-            self._continue_loop(f"**Tool Result:** Message displayed to user: {message}")
-            return
-
-        self._run_action(action)
+        extra = len(actions) - self.MAX_BATCH_ACTIONS
+        if extra > 0:
+            actions = actions[:self.MAX_BATCH_ACTIONS]
+            self.command_history.append(
+                f"**Tool Result:** Dropped {extra} extra action(s): one response "
+                f"carries at most {self.MAX_BATCH_ACTIONS}. Issue them in your "
+                "next response.")
+        self._start_batch(actions)
 
     def handle_response_chunk(self, chunk):
         # Agent modes are non-streaming; stray chunks (e.g. a chat stream
@@ -1253,11 +1329,11 @@ class BaseAgentHandler:
             # NOTE: "Blocked", not "Error" — guardrail hits must NOT count
             # toward the escalation streak (a healthy job with busy-looped
             # polls once paged the user while everything worked).
-            self._continue_loop(
+            self._after_action_result(
                 "**Tool Result:** Blocked: this action is identical to the previous one "
                 "(see its result above). Do not repeat it — vary the approach, check the "
-                "current state first, or report to the user."
-            )
+                "current state first, or report to the user.",
+                abort=True)
             return
         self._last_action_sig = sig
         history_action = self._history_action(action)
@@ -1297,7 +1373,7 @@ class BaseAgentHandler:
             self._add_result_card(
                 result_text, f"{action_name} · error", "error")
         self.record_tool_result(result_text)
-        self._continue_loop(result_text)
+        self._after_action_result(result_text, abort=failed)
 
     # -- loop awareness (facts for the model; it decides) ------------------
 

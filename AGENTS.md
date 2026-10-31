@@ -155,15 +155,26 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   category collapse into one run row: read-only exploration (`read_files`,
   `list_directory`, `search_file_content`, `web_search`, `web_fetchs`,
   `mcp_list`, `mcp_get`) groups together and every other tool is an `action`
-  group; thought/note rows between a run's steps are absorbed into it, while
-  the narration before its first step stays visible as the model's commentary.
+  group. A thought or narration row ends a run, so the model's thinking stays
+  visible between groups instead of being hidden inside a folded row; the
+  narration before a run's first step stays visible as its commentary.
   A single-step run stays a plain step row. Runs are open while a step is
   running and when one failed or was denied, and fold to
   `Ran N tools · <tool breakdown>` once finished clean; the row toggles via an
   `activity:<message id>:run:<first step id>` anchor, with the override kept
-  in `msg['run_state']`. The plan always renders last, at the live edge. The
-  model still calls one tool per response, so a run is a pure rendering
-  grouping of sequential steps, not a batched tool call. A user message
+  in `msg['run_state']`. The plan always renders last, at the live edge.
+  Terminal and Browser request one `payload.actions` list per response: up to
+  eight independent calls that `BaseAgentHandler._start_batch` runs in order
+  without asking the model in between, so a run is normally exactly one
+  response's batch. A later action never sees an earlier action's output, so
+  the prompts limit batching to independent work; `finish` and
+  `communicate_to_user` end the batch and drop whatever is queued. An error, a
+  denial, the duplicate guard or a duplicate-response hit aborts the rest of
+  the batch and hands control back to the model; a background-job launch keeps
+  the batch waiting until the job ends (or the wait budget runs out), and a
+  mid-task user steer or a pause drops the remaining queued actions. The
+  single `action` shape of older caches and models is still accepted by
+  `src/llm/llm_parsing.py`, which folds it into `actions`. A user message
   mid-turn seals the live block: `ChatWidget.add_message` with
   `role='user'` calls `seal_live_activity()`, which finishes the block as
   `Done` (`Stopped` when a step was still in flight) and marks that step
