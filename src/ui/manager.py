@@ -1946,9 +1946,9 @@ class UIManager(QWidget):
         return self.chat_widget.activity_set_plan(msg, steps)
 
     def activity_add_step(self, msg, title: str, args: str = "",
-                          detail_html: str | None = None):
+                          detail_html: str | None = None, name: str = ""):
         return self.chat_widget.activity_add_step(
-            msg, title, args=args, detail_html=detail_html)
+            msg, title, args=args, detail_html=detail_html, name=name)
 
     def activity_update_step(self, msg, row, **fields) -> bool:
         return self.chat_widget.activity_update_step(msg, row, **fields)

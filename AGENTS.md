@@ -149,7 +149,29 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   the old grammar (step title from the action, output stripped of its
   `**Tool Result:**` markers). Vision and Chat keep the per-event card grammar
   (`AppController._replay_tool_event`). Replayed blocks and steps carry no
-  elapsed time, so a restored transcript does not show "0s" on every row. After
+  elapsed time, so a restored transcript does not show "0s" on every row.
+  An activity block is one turn card whose rows are rendered by
+  `src/ui/widgets/activity_block_formatter.py`. Consecutive steps of the same
+  category collapse into one run row: read-only exploration (`read_files`,
+  `list_directory`, `search_file_content`, `web_search`, `web_fetchs`,
+  `mcp_list`, `mcp_get`) groups together and every other tool is an `action`
+  group; thought/note rows between a run's steps are absorbed into it, while
+  the narration before its first step stays visible as the model's commentary.
+  A single-step run stays a plain step row. Runs are open while a step is
+  running and when one failed or was denied, and fold to
+  `Ran N tools · <tool breakdown>` once finished clean; the row toggles via an
+  `activity:<message id>:run:<first step id>` anchor, with the override kept
+  in `msg['run_state']`. The plan always renders last, at the live edge. The
+  model still calls one tool per response, so a run is a pure rendering
+  grouping of sequential steps, not a batched tool call. A user message
+  mid-turn seals the live block: `ChatWidget.add_message` with
+  `role='user'` calls `seal_live_activity()`, which finishes the block as
+  `Done` (`Stopped` when a step was still in flight) and marks that step
+  `stopped`, and the handler's next event opens a new block below the message
+  (`_activity_alive` rejects a finished block). A
+  late result still lands in the sealed block that owns its step
+  (`BaseAgentHandler._active_step_block`). Replay splits the same way because
+  `_replay_session` closes the replayed block at every `message` event. After
   a manual or automatic compaction only events after the
   recorded boundary are rebuilt; the summary block stands in for the compacted
   prefix. Automatic compaction runs at idle when the context reaches

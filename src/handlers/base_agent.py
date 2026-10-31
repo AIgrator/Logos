@@ -262,6 +262,9 @@ class BaseAgentHandler:
         # tool steps live there instead of separate Executing/result cards.
         self._activity_msg = None
         self._active_step = None
+        # The block that owns the current step. A user message mid-task seals
+        # the block, and the step's late result must still land in it.
+        self._active_step_block = None
         self._job_steps = {}  # job_id -> (activity msg, step row)
         # NOTE: there is deliberately NO timeout counter. Timeouts count as
         # ordinary failures; significance is the model's call (assessment
@@ -690,6 +693,10 @@ class BaseAgentHandler:
     # -- activity block (plan, narration, thoughts and steps in one card) --
 
     def _activity_alive(self, msg) -> bool:
+        if not isinstance(msg, dict) or msg.get('finished_at') is not None:
+            # A sealed block (e.g. a user message split the turn) must not
+            # grow further: new rows belong below the message.
+            return False
         widget = getattr(self.ui, 'chat_widget', None)
         check = getattr(widget, '_has_message', None)
         try:
@@ -751,15 +758,19 @@ class BaseAgentHandler:
         try:
             args_text = json.dumps(action_args or {}, ensure_ascii=False, indent=2)
             row = self.ui.activity_add_step(
-                msg, self._step_title(action_name, action_args), args=args_text)
+                msg, self._step_title(action_name, action_args),
+                args=args_text, name=action_name)
         except Exception as e:
             logging.warning(f"{type(self).__name__} activity step failed: {e}")
             return None
         self._active_step = row
+        self._active_step_block = msg
         return row
 
     def _update_activity_step(self, step, **fields) -> bool:
         msg = self._activity_msg
+        if step is not None and step is self._active_step:
+            msg = self._active_step_block or msg
         if step is None or msg is None:
             return False
         try:
@@ -780,6 +791,7 @@ class BaseAgentHandler:
         """Closes the current block so the next turn starts a fresh one."""
         msg, self._activity_msg = self._activity_msg, None
         self._active_step = None
+        self._active_step_block = None
         if msg is None:
             return
         finish = getattr(self.ui, 'finish_activity', None)
@@ -1076,6 +1088,7 @@ class BaseAgentHandler:
                 self._step_title(action_name, action_args),
                 args=self._replay_step_args(action_name, action_args),
                 detail_html=self._replay_step_detail(action_name, action_args),
+                name=action_name,
             )
         except Exception as e:
             logging.warning(f"{type(self).__name__} replay step failed: {e}")

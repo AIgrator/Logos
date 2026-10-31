@@ -25,7 +25,11 @@ from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QMenu, QPushBut
 
 from src.ui.text_render import USER_BUBBLE_PADDING, USER_BUBBLE_RADIUS, render_text
 from src.ui.utils import IconHoverFilter
-from src.ui.widgets.activity_block_formatter import ActivityBlockFormatter
+from src.ui.widgets.activity_block_formatter import (
+    ActivityBlockFormatter,
+    run_default_expanded,
+    steps_in_run,
+)
 from src.ui.widgets.collapsible_block_formatter import CollapsibleBlockFormatter
 
 # --- Basic Logging Setup ---
@@ -673,6 +677,12 @@ class ChatWidget(QAbstractScrollArea):
         self.viewport().update()
 
     def add_message(self, data, force_scroll=False, keep_stream=False, role=None):
+        if role == 'user':
+            # A user message splits the turn: the live block stays above it,
+            # and the work that follows starts a new block below. Without the
+            # seal the block kept growing and later steps appeared above the
+            # message that caused them.
+            self.seal_live_activity()
         was_at_bottom = self._is_at_bottom()
         streaming_msg = self._streaming_msg
         if not keep_stream:
@@ -871,12 +881,13 @@ class ChatWidget(QAbstractScrollArea):
         return True
 
     def activity_add_step(self, msg, title: str, args: str = "",
-                          detail_html: str | None = None):
+                          detail_html: str | None = None, name: str = ""):
         """Starts a tool step row; returns the row for later updates."""
         if not self._has_message(msg):
             return None
         row = self._activity_row(
             'step', title=str(title or 'Step'), status='running',
+            name=str(name or ''),
             args=str(args or ''), output='', detail_html=detail_html,
             expanded=False, job_id=None, log_path=None,
             started_at=time.monotonic(), finished_at=None)
@@ -938,6 +949,27 @@ class ChatWidget(QAbstractScrollArea):
         self._render_activity(msg)
         self._stop_activity_timer_if_idle()
         return True
+
+    def seal_live_activity(self) -> bool:
+        """Closes live turn blocks at a transcript boundary (a user message).
+
+        Steps that already happened stay in the sealed card above the message;
+        whatever comes next opens a new card below it. A step still in flight
+        is marked stopped here and gets its real result when it returns. The
+        header must stop saying "Working": the card no longer grows, even
+        though the tool it was waiting for may still finish.
+        """
+        sealed = False
+        for msg in self.messages:
+            if msg.get('type') != 'activity' or not self._activity_is_live(msg):
+                continue
+            running = any(
+                row.get('kind') == 'step' and row.get('status') == 'running'
+                and row.get('job_id') is None for row in msg.get('rows') or [])
+            self.finish_activity(
+                msg, title='Stopped' if running else 'Done', status='ok')
+            sealed = True
+        return sealed
 
     def _activity_is_live(self, msg: dict) -> bool:
         return msg.get('finished_at') is None
@@ -1008,6 +1040,22 @@ class ChatWidget(QAbstractScrollArea):
                     self._render_activity(msg)
                     return True
             return False
+        if kind == 'run':
+            rows = msg.get('rows') or []
+            start = next((i for i, row in enumerate(rows)
+                          if row.get('id') == rest), None)
+            if start is None:
+                return False
+            steps = steps_in_run(rows, start)
+            if not steps:
+                return False
+            state = msg.setdefault('run_state', {})
+            current = state.get(rest)
+            if current is None:
+                current = run_default_expanded(steps)
+            state[rest] = not current
+            self._render_activity(msg)
+            return True
         if kind == 'job':
             try:
                 self.job_stop_requested.emit(int(rest))

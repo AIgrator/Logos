@@ -27,6 +27,58 @@ _PLAN_STATUS = {
     "pending": ("&#9675;", "COLLAPSIBLE_META"),
 }
 
+# Read-only lookups. A turn usually starts with a long survey of the project;
+# folding those steps keeps the transcript readable while edits and commands
+# stay individual rows where their titles matter.
+_EXPLORATION_TOOLS = {
+    "read_files",
+    "list_directory",
+    "search_file_content",
+    "web_search",
+    "web_fetchs",
+    "mcp_list",
+    "mcp_get",
+}
+
+
+def step_category(row: dict) -> str:
+    """Coarse step kind used to decide where a tool run ends."""
+    name = str(row.get("name") or "")
+    return "explore" if name in _EXPLORATION_TOOLS else "action"
+
+
+def run_extent(rows: list, start: int) -> int:
+    """Last row index of the tool run beginning at ``start``.
+
+    Thoughts and notes between steps belong to the run: one reasoning block
+    and one narration line per tool call is the norm, and letting them break
+    the group would leave every tool on its own line. A step of another
+    category ends the run; trailing thoughts/notes stay outside it.
+    """
+    if not 0 <= start < len(rows):
+        return start
+    category = step_category(rows[start])
+    last = start
+    index = start
+    while index < len(rows) and rows[index].get("kind") in ("thought", "note", "step"):
+        if rows[index].get("kind") == "step":
+            if step_category(rows[index]) != category:
+                break
+            last = index
+        index += 1
+    return last
+
+
+def steps_in_run(rows: list, start: int) -> list:
+    end = run_extent(rows, start)
+    return [row for row in rows[start:end + 1] if row.get("kind") == "step"]
+
+
+def run_default_expanded(steps) -> bool:
+    """Live or failed runs stay open; finished clean runs fold into one line."""
+    statuses = [str(row.get("status") or "") for row in steps]
+    return any(status in ("running", "error", "denied") for status in statuses)
+
 
 def format_duration(seconds: float | None) -> str:
     """Compact duration: 8s, 1m 05s, 1h 02m."""
@@ -98,10 +150,11 @@ class ActivityBlockFormatter:
             # bottom of the block where the chat follows: pinned at the top
             # it scrolled out of view in a long turn (same reason as the
             # elapsed footer).
-            ordered = ([r for r in rows if r.get("kind") != "plan"]
-                       + [r for r in rows if r.get("kind") == "plan"])
-            body = "".join(self._format_row(msg, row, meta, now)
-                           for row in ordered)
+            visible = [r for r in rows if r.get("kind") != "plan"]
+            plans = [r for r in rows if r.get("kind") == "plan"]
+            body = self._format_body(msg, visible, meta, now)
+            body += "".join(self._format_row(msg, row, meta, now)
+                            for row in plans)
             if body:
                 # Qt's document height ignores a trailing table's bottom
                 # border/cell padding (and block bottom margins), so a last
@@ -141,6 +194,30 @@ class ActivityBlockFormatter:
             return ""
         return format_duration(seconds)
 
+    def _format_body(self, msg: dict, rows: list, meta: str, now: float) -> str:
+        """Rows in order, with each tool run folded into one summary row.
+
+        The narration line before the first step stays visible above the run:
+        that is the model's commentary for this piece of work. Narration for
+        the run's later steps lives inside the expanded run.
+        """
+        parts = []
+        index = 0
+        while index < len(rows):
+            if rows[index].get("kind") != "step":
+                parts.append(self._format_row(msg, rows[index], meta, now))
+                index += 1
+                continue
+            steps = steps_in_run(rows, index)
+            if len(steps) <= 1:
+                parts.append(self._format_row(msg, rows[index], meta, now))
+                index += 1
+                continue
+            end = run_extent(rows, index)
+            parts.append(self._format_run(msg, rows[index:end + 1], meta, now))
+            index = end + 1
+        return "".join(parts)
+
     def _format_row(self, msg: dict, row: dict, meta: str, now: float) -> str:
         kind = row.get("kind")
         if kind == "plan":
@@ -152,6 +229,87 @@ class ActivityBlockFormatter:
         if kind == "step":
             return self._format_step(msg, row, meta, now)
         return ""
+
+    def _format_run(self, msg: dict, run_rows: list, meta: str,
+                    now: float) -> str:
+        steps = [row for row in run_rows if row.get("kind") == "step"]
+        run_id = str(steps[0].get("id") or "") if steps else ""
+        expanded = self._run_expanded(msg, run_id, steps)
+        caret = "&#9662;" if expanded else "&#9656;"
+        status = self._run_status(steps)
+        icon, color_key = _STATUS_ICONS.get(status, _STATUS_ICONS["running"])
+        color = self._get_style(color_key)
+        if status == "running":
+            icon = "&#9679;"
+            color = self._get_style("COLLAPSIBLE_TITLE")
+        label = ("Running" if status == "running" else "Ran")
+        title = f"{label} {len(steps)} tools"
+        suffix_bits = []
+        breakdown = self._tool_breakdown(steps)
+        if breakdown:
+            suffix_bits.append(breakdown)
+        failed = sum(1 for row in steps if row.get("status") == "error")
+        denied = sum(1 for row in steps if row.get("status") == "denied")
+        if failed:
+            suffix_bits.append(f"{failed} failed")
+        elif denied:
+            suffix_bits.append(f"{denied} denied")
+        suffix = ""
+        if suffix_bits:
+            suffix = (
+                f'&nbsp;<span style="color: {meta}; font-weight: normal;">'
+                f"&middot; {' &middot; '.join(suffix_bits)}</span>")
+        icon_html = (
+            f'&nbsp;<span style="color: {color}; font-weight: 600;">{icon}</span>'
+            if icon else "")
+        detail = ""
+        if expanded:
+            inner = "".join(self._format_row(msg, row, meta, now)
+                            for row in run_rows)
+            detail = f'<div style="margin: 2px 0 0 14px;">{inner}</div>'
+        run_id_html = html.escape(run_id, quote=True)
+        return (
+            f'<div style="margin-top: 6px;">'
+            f'<a href="activity:{msg.get("id")}:run:{run_id_html}" '
+            f'style="text-decoration: none; color: '
+            f'{self._get_style("COLLAPSIBLE_TITLE")};">'
+            f"{caret}&nbsp;<b>{title}</b>{suffix}{icon_html}</a>{detail}</div>")
+
+    @staticmethod
+    def _run_status(steps) -> str:
+        statuses = [str(row.get("status") or "") for row in steps]
+        if "running" in statuses:
+            return "running"
+        if "error" in statuses:
+            return "error"
+        if "denied" in statuses:
+            return "denied"
+        if statuses and all(status == "stopped" for status in statuses):
+            return "stopped"
+        return "ok"
+
+    @staticmethod
+    def _tool_breakdown(steps) -> str:
+        """Counts per tool name: "3 read_files, 2 list_directory"."""
+        counts: dict[str, int] = {}
+        for row in steps:
+            name = str(row.get("name") or "").strip()
+            if name:
+                counts[name] = counts.get(name, 0) + 1
+        if not counts:
+            return ""
+        ordered = sorted(counts.items(), key=lambda item: (-item[1], item[0]))
+        parts = [name if count == 1 else f"{count} {name}"
+                 for name, count in ordered[:4]]
+        if len(ordered) > 4:
+            parts.append("…")
+        return ", ".join(parts)
+
+    def _run_expanded(self, msg: dict, run_id: str, steps) -> bool:
+        state = msg.get("run_state") or {}
+        if run_id and isinstance(state, dict) and run_id in state:
+            return bool(state[run_id])
+        return run_default_expanded(steps)
 
     def _row_toggle(self, msg_id: str, row: dict) -> str:
         row_id = html.escape(str(row.get("id") or ""), quote=True)
