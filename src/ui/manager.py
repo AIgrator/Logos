@@ -37,6 +37,7 @@ from .widgets.image_preview_dialog import ImagePreviewDialog
 from .text_render import render_reasoning, render_text, render_user_message
 from .widgets.chat_widget import ChatWidget
 from .widgets.model_switch_popup import ModelSwitchPopup, build_effort_menu
+from .widgets.plan_panel import PlanPanel
 from .widgets.terminal_access_popup import TerminalAccessPopup
 from .widgets.custom_title_bar import CustomTitleBar
 from .widgets.flow_layout import FlowLayout
@@ -630,6 +631,11 @@ class UIManager(QWidget):
         self.bottom_center_layout = QVBoxLayout(self.bottom_center_column)
         self.bottom_center_layout.setContentsMargins(0, 0, 0, 0)
         self.bottom_center_layout.setSpacing(0)
+        # The live plan belongs to the composer, not the transcript: it sits
+        # directly above the input while a turn runs and vanishes with it.
+        self.plan_panel = PlanPanel(self.controller.theme_manager,
+                                    self.bottom_center_column)
+        self.bottom_center_layout.addWidget(self.plan_panel)
         # Attachments belong to the composer: keep them inside the same
         # centered, width-capped column as the input and chat text instead of
         # stretching across the whole workspace.
@@ -1359,6 +1365,8 @@ class UIManager(QWidget):
         return sections
 
     def set_active_mode(self, mode: str):
+        # A mode switch cancels the running turn, so its live plan is gone.
+        self.plan_panel.clear_plan()
         is_terminal = (mode == 'terminal')
         self.add_folder_action.setVisible(is_terminal)
         self.access_mode_button.setVisible(is_terminal)
@@ -1698,6 +1706,7 @@ class UIManager(QWidget):
         menu.exec(anchor.mapToGlobal(anchor.rect().bottomLeft()))
 
     def clear_chat(self):
+        self.plan_panel.clear_plan()
         self.chat_widget.clear_messages()
 
     def set_assistant_name(self, name: str):
@@ -1942,8 +1951,13 @@ class UIManager(QWidget):
     def activity_add_note(self, msg, text: str) -> bool:
         return self.chat_widget.activity_add_note(msg, text)
 
-    def activity_set_plan(self, msg, steps) -> bool:
-        return self.chat_widget.activity_set_plan(msg, steps)
+    def update_plan_panel(self, steps) -> None:
+        """Shows/refreshes the live plan strip above the composer."""
+        self.plan_panel.set_plan(steps)
+
+    def clear_plan_panel(self) -> None:
+        """Drops the live plan; called whenever the turn ends or the UI resets."""
+        self.plan_panel.clear_plan()
 
     def activity_add_step(self, msg, title: str, args: str = "",
                           detail_html: str | None = None, name: str = ""):
@@ -2157,6 +2171,7 @@ class UIManager(QWidget):
         self.is_compact = True
         self.compact_position = self.settings_manager.get("compact_mode", {}).get("position", "bottom_center")
         self.attachment_scroll_area.setVisible(False)
+        self.plan_panel.set_suppressed(True)
         self.input_container.setVisible(False)
         self.mode_model_container.setVisible(False)
         self.bottom_toolbar_container.setVisible(False)
@@ -2228,6 +2243,7 @@ class UIManager(QWidget):
             self.attachment_scroll_area.setVisible(True)
         left_margin = 0 if self.workspace_container.isVisible() else 11
         self.layout.setContentsMargins(left_margin, 11, 11, 11)
+        self.plan_panel.set_suppressed(False)
         self.input_container.setVisible(True)
         self.bottom_toolbar_container.setVisible(True)
         self._toolbar_single_row = None  # force single/two-row re-evaluation

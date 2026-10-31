@@ -112,8 +112,10 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   rationale and, for agent steps, the provider's thought summary when the API
   exposes one; `progress` events carry the model's short narration line and
   `plan` events the current plan (`steps`, each with `text` and `status`) from
-  the `update_plan` control tool, so a reloaded turn keeps its plan, thoughts
-  and notes in one activity block. `tool_call` events carry `call_id`, `name`
+  the `update_plan` control tool. A plan is live progress, not history: it
+  drives the composer's `Step N / M` pill while the turn runs and is never
+  redrawn into a restored transcript, while thoughts and notes rebuild inside
+  their activity blocks. `tool_call` events carry `call_id`, `name`
   and the model-facing `input`; `tool_result` events carry `call_id`, `name`,
   `status` (`ok`/`error`/`denied`), `output.text` and, when the UI showed more
   than the model needed, `display` (transcript text), `display_title` (the
@@ -136,9 +138,9 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   restored at startup: messages are replayed into the
   chat, and terminal/browser `command_history` plus the whole transcript are
   rebuilt from the same events. Terminal and Browser journals replay into the same activity
-  blocks the turn used live (`BaseAgentHandler.replay_event`): `plan` /
-  `reasoning` / `progress` become the plan, thought and note rows,
-  `tool_call` opens a step, `tool_result` fills its title from
+  blocks the turn used live (`BaseAgentHandler.replay_event`): `reasoning` /
+  `progress` become thought and note rows, `plan` events are skipped (the
+  plan only exists live), `tool_call` opens a step, `tool_result` fills its title from
   `display_title`, output from `display` (falling back to the model-facing
   `output.text`) and expands errors and denials, and `job_result` updates the
   launch step. A `write_file` step rebuilds its code box from the recorded
@@ -162,7 +164,15 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   running and when one failed or was denied, and fold to
   `Ran N tools · <tool breakdown>` once finished clean; the row toggles via an
   `activity:<message id>:run:<first step id>` anchor, with the override kept
-  in `msg['run_state']`. The plan always renders last, at the live edge.
+  in `msg['run_state']`. The plan lives outside the transcript: a live turn
+  shows a compact `Step N / M` pill above the composer
+  (`src/ui/widgets/plan_panel.py::PlanPanel`, mounted first in
+  `UIManager.bottom_center_column`), hovering it opens a themed checklist
+  popover, and the pill disappears when the turn ends
+  (`BaseAgentHandler._activity_finalize`). A mid-turn user message leaves it
+  alone; a mode switch and `clear_chat` clear it, compact mode only hides it
+  (`set_suppressed`). The journal keeps `plan` events for the model and the
+  summary, but replay never shows them.
   Terminal and Browser request one `payload.actions` list per response: up to
   eight independent calls that `BaseAgentHandler._start_batch` runs in order
   without asking the model in between, so a run is normally exactly one

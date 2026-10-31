@@ -1,9 +1,11 @@
 # src/ui/widgets/activity_block_formatter.py
 """HTML renderer for the per-turn activity block.
 
-One block groups a turn's plan, model thoughts, narration and tool steps so
-the transcript reads as a timeline instead of a wall of separate cards.
-Rows keep their own expanded state; the formatter never mutates the message.
+One block groups a turn's model thoughts, narration and tool steps so the
+transcript reads as a timeline instead of a wall of separate cards. The plan
+is not part of it: it lives in the composer's live strip and disappears with
+the turn. Rows keep their own expanded state; the formatter never mutates the
+message.
 """
 from __future__ import annotations
 
@@ -19,12 +21,6 @@ _STATUS_ICONS = {
     "error": ("&#10007;", "ERROR_COLOR"),
     "denied": ("!", "WARNING_COLOR"),
     "stopped": ("&#9632;", "COLLAPSIBLE_META"),
-}
-
-_PLAN_STATUS = {
-    "done": ("&#10003;", "SUCCESS_COLOR"),
-    "in_progress": ("&#9679;", "COLLAPSIBLE_TITLE"),
-    "pending": ("&#9675;", "COLLAPSIBLE_META"),
 }
 
 # Read-only lookups. A turn usually starts with a long survey of the project;
@@ -147,15 +143,7 @@ class ActivityBlockFormatter:
         body = ""
         if expanded:
             rows = msg.get("rows") or []
-            # The plan is the live progress checklist, so it belongs at the
-            # bottom of the block where the chat follows: pinned at the top
-            # it scrolled out of view in a long turn (same reason as the
-            # elapsed footer).
-            visible = [r for r in rows if r.get("kind") != "plan"]
-            plans = [r for r in rows if r.get("kind") == "plan"]
-            body = self._format_body(msg, visible, meta, now)
-            body += "".join(self._format_row(msg, row, meta, now)
-                            for row in plans)
+            body = self._format_body(msg, rows, meta, now)
             if body:
                 # Qt's document height ignores a trailing table's bottom
                 # border/cell padding (and block bottom margins), so a last
@@ -222,8 +210,6 @@ class ActivityBlockFormatter:
 
     def _format_row(self, msg: dict, row: dict, meta: str, now: float) -> str:
         kind = row.get("kind")
-        if kind == "plan":
-            return self._format_plan(msg, row, meta)
         if kind == "thought":
             return self._format_thought(msg, row, meta)
         if kind == "note":
@@ -345,39 +331,6 @@ class ActivityBlockFormatter:
         return (
             f'<div style="margin-top: 6px; white-space: pre-wrap;">'
             f"{text}</div>")
-
-    def _format_plan(self, msg: dict, row: dict, meta: str) -> str:
-        steps = row.get("steps") or []
-        expanded = bool(row.get("expanded", True))
-        caret = "&#9662;" if expanded else "&#9656;"
-        done = sum(1 for s in steps if s.get("status") == "done")
-        counter = (f'&nbsp;<span style="color: {meta}; font-weight: normal;">'
-                   f"&middot; {done}/{len(steps)}</span>" if steps else "")
-        body = ""
-        if expanded and steps:
-            lines = []
-            for step in steps:
-                status = str(step.get("status") or "pending")
-                icon, color_key = _PLAN_STATUS.get(status, _PLAN_STATUS["pending"])
-                color = self._get_style(color_key)
-                strike = "text-decoration: line-through;" if status == "done" else ""
-                text = html.escape(str(step.get("text") or ""))
-                lines.append(
-                    f'<div style="margin-top: 2px; color: {color}; {strike}">'
-                    f"{icon}&nbsp; {text}</div>")
-            body = f'<div style="margin-top: 4px;">{"".join(lines)}</div>'
-        # A one-cell table, not a div: Qt paints a div's background only on
-        # its own line and ignores padding there, so the plan came out as a
-        # striped band. Cell background and padding render solidly.
-        return (
-            f'<table width="100%" cellspacing="0" cellpadding="8" '
-            f'bgcolor="{self._get_style("CODE_BG")}" '
-            f'style="border: 1px solid {self._get_style("COLLAPSIBLE_BORDER")}; '
-            f'margin-top: 6px;"><tr><td>'
-            f'<a href="{self._row_toggle(msg.get("id"), row)}" '
-            f'style="text-decoration: none; color: '
-            f'{self._get_style("COLLAPSIBLE_TITLE")}; font-weight: 600;">'
-            f"{caret}&nbsp;Plan{counter}</a>{body}</td></tr></table>")
 
     def _format_step(self, msg: dict, row: dict, meta: str, now: float) -> str:
         expanded = bool(row.get("expanded"))

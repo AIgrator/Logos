@@ -854,32 +854,6 @@ class ChatWidget(QAbstractScrollArea):
         self._render_activity(msg)
         return True
 
-    def activity_set_plan(self, msg, steps) -> bool:
-        """Stores the plan; the formatter renders it last, below the steps."""
-        if not self._has_message(msg):
-            return False
-        normalized = []
-        for step in steps or []:
-            if isinstance(step, dict):
-                text = str(step.get('text') or '').strip()
-                status = str(step.get('status') or 'pending')
-            else:
-                text, status = str(step or '').strip(), 'pending'
-            if not text:
-                continue
-            if status not in ('done', 'in_progress', 'pending'):
-                status = 'pending'
-            normalized.append({'text': text, 'status': status})
-        for row in msg['rows']:
-            if row.get('kind') == 'plan':
-                row['steps'] = normalized
-                self._render_activity(msg)
-                return True
-        row = self._activity_row('plan', steps=normalized, expanded=True)
-        msg['rows'].append(row)
-        self._render_activity(msg)
-        return True
-
     def activity_add_step(self, msg, title: str, args: str = "",
                           detail_html: str | None = None, name: str = ""):
         """Starts a tool step row; returns the row for later updates."""

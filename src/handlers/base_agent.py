@@ -601,6 +601,8 @@ class BaseAgentHandler:
                     logging.info(f"{type(self).__name__} escalating to user after "
                                  f"consecutive failures.")
                 self.ui.add_text(text)
+                # Waiting for the user ends the running turn's live plan.
+                self.ui.clear_plan_panel()
                 self._set_state(VisionState.PAUSED_ON_ERROR)
                 self._stop_thinking_timer()
                 return
@@ -809,6 +811,11 @@ class BaseAgentHandler:
 
     def _activity_finalize(self, title=None, status: str = "ok"):
         """Closes the current block so the next turn starts a fresh one."""
+        # The plan is live progress: it must not outlive the turn that made it.
+        try:
+            self.ui.clear_plan_panel()
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} plan clear failed: {e}")
         msg, self._activity_msg = self._activity_msg, None
         self._active_step = None
         self._active_step_block = None
@@ -823,7 +830,7 @@ class BaseAgentHandler:
             logging.warning(f"{type(self).__name__} activity finish failed: {e}")
 
     def _apply_plan(self, steps):
-        """Renders the model's plan as the bottom row of the block."""
+        """Shows the model's plan in the live strip above the composer."""
         normalized = []
         for step in steps or []:
             if isinstance(step, str):
@@ -839,12 +846,10 @@ class BaseAgentHandler:
                 normalized.append({"text": text, "status": status})
         if not normalized:
             return
-        msg = self._activity_block()
-        if msg is not None:
-            try:
-                self.ui.activity_set_plan(msg, normalized)
-            except Exception as e:
-                logging.warning(f"{type(self).__name__} plan render failed: {e}")
+        try:
+            self.ui.update_plan_panel(normalized)
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} plan render failed: {e}")
         self._append_session_event(
             "plan",
             turn_id=getattr(self.controller, "session_turn_id", ""),
@@ -1258,7 +1263,11 @@ class BaseAgentHandler:
     def replay_event(self, event: dict) -> bool:
         """Replay one journal event in the live activity grammar."""
         event_type = event.get("type")
-        if event_type in ("reasoning", "progress", "plan"):
+        if event_type == "plan":
+            # Plans are live progress, not history: the journal keeps them for
+            # the model, but a restored transcript never shows a stale checklist.
+            return True
+        if event_type in ("reasoning", "progress"):
             msg = self._replay_block()
             if msg is None:
                 return False
@@ -1266,14 +1275,10 @@ class BaseAgentHandler:
                 text = event_text(event)
                 if text:
                     self.ui.activity_add_thought(msg, text)
-            elif event_type == "progress":
+            else:
                 text = event_text(event)
                 if text:
                     self.ui.activity_add_note(msg, text)
-            else:
-                steps = event.get("steps") or []
-                if steps:
-                    self.ui.activity_set_plan(msg, steps)
             return True
         if event_type == "tool_call":
             name = str(event.get("name") or "action")
