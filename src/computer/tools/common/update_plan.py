@@ -8,7 +8,8 @@ from src.computer.computer import tool_meta
             "Sets or refreshes the short visible plan of the current task. "
             "Call it once near the start with 3-6 steps, then call it again "
             "whenever a step starts or finishes so the plan stays current. "
-            "It is not executed; it only updates the plan shown above the steps."),
+            "It is not executed; it only updates the plan shown at the "
+            "bottom of the turn, below the steps."),
         "arguments": {
             "steps": {
                 "type": "ARRAY",

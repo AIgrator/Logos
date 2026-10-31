@@ -2842,6 +2842,12 @@ class AppController(QObject):
             # the current mode state: dropping to IDLE would orphan the
             # handler loop and break the Retry button (the retried response
             # would arrive "in chat mode" and be ignored).
+            if self.state in (ControllerState.TERMINAL, ControllerState.BROWSER):
+                # The agent handler owns a live activity block; close it so
+                # the elapsed timer stops instead of ticking forever.
+                finalize = getattr(self.current_handler, "handle_fatal_error", None)
+                if callable(finalize):
+                    finalize(error_message)
             self.ui.add_message(
                 f"<b>A critical error occurred:</b> {error_message}<br>"
                 "Please try your request again.",

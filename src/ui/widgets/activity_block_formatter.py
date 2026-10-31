@@ -80,22 +80,39 @@ class ActivityBlockFormatter:
         elapsed_html = (
             f'&nbsp;<span style="color: {meta}; font-weight: normal;">'
             f"&middot; {elapsed}</span>" if elapsed else "")
+        # A live, expanded block moves its elapsed time to a footer: the
+        # header scrolls away in a long turn, while the footer sits at the
+        # live edge the chat follows. Collapsed blocks and finished turns
+        # keep the time in the header.
+        use_footer = msg.get("finished_at") is None and expanded
         header = (
             f'<div style="font-weight: bold;">'
             f'<a href="activity:{msg.get("id")}:toggle" '
             f'style="text-decoration: none; color: {title_color};">'
-            f"{caret}&nbsp;{title}{elapsed_html}</a></div>")
+            f"{caret}&nbsp;{title}{'' if use_footer else elapsed_html}</a></div>")
 
         body = ""
         if expanded:
+            rows = msg.get("rows") or []
+            # The plan is the live progress checklist, so it belongs at the
+            # bottom of the block where the chat follows: pinned at the top
+            # it scrolled out of view in a long turn (same reason as the
+            # elapsed footer).
+            ordered = ([r for r in rows if r.get("kind") != "plan"]
+                       + [r for r in rows if r.get("kind") == "plan"])
             body = "".join(self._format_row(msg, row, meta, now)
-                           for row in msg.get("rows") or [])
+                           for row in ordered)
             if body:
                 # Qt's document height ignores a trailing table's bottom
                 # border/cell padding (and block bottom margins), so a last
                 # step detail used to be clipped by the card edge. The
                 # spacer restores the missing strip plus bottom padding.
                 body += '<div style="font-size: 12px; margin: 0;">&nbsp;</div>'
+        footer = ""
+        if use_footer:
+            footer = (
+                f'<div style="margin-top: 8px; color: {meta}; font-size: 92%;">'
+                f"{title}{elapsed_html}</div>")
 
         # The card's fill, border and accent are painted by ChatWidget:
         # Qt's rich text does not propagate a div background into nested
@@ -105,6 +122,7 @@ class ActivityBlockFormatter:
         <div style="margin: 10px 12px 10px 15px;">
             {header}
             {body}
+            {footer}
         </div>
         """
 

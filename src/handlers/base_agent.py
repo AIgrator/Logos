@@ -432,6 +432,16 @@ class BaseAgentHandler:
         self._consecutive_errors = 0
         self._assessment_sent = False
 
+    def handle_fatal_error(self, error_message: str):
+        """Freezes the live activity block once the request failed for good.
+
+        The controller keeps the mode state so Retry stays usable, which
+        means nothing else closes the block and its timer would keep
+        ticking after the error card appeared.
+        """
+        logging.error(f"{type(self).__name__} fatal LLM error: {error_message}")
+        self._activity_finalize("Request failed", "error")
+
     def _cleanup_task(self):
         """Heir hook: release mode resources (browsers, threads, UI containers)."""
 
@@ -781,7 +791,7 @@ class BaseAgentHandler:
             logging.warning(f"{type(self).__name__} activity finish failed: {e}")
 
     def _apply_plan(self, steps):
-        """Renders the model's plan as the pinned top row of the block."""
+        """Renders the model's plan as the bottom row of the block."""
         normalized = []
         for step in steps or []:
             if isinstance(step, str):
