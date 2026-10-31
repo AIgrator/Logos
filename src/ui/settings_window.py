@@ -8,6 +8,7 @@ page never discards anything.
 """
 import copy
 import os
+import sys
 import logging
 
 import qtawesome as qta
@@ -63,7 +64,8 @@ CONTEXT_SETTINGS_DOC_URL = (
 PROJECT_URL = "https://github.com/AIgrator/Logos"
 ISSUES_URL = f"{PROJECT_URL}/issues"
 LICENSE_FILE = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    getattr(sys, "_MEIPASS", None) or os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
     "LICENSE")
 
 

@@ -22,7 +22,10 @@ if TYPE_CHECKING:
 
 # Add the project root to the Python path
 # This is necessary for the script to be runnable directly, and for the dynamic module loading to work.
-project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
+if getattr(sys, 'frozen', False):
+    project_root = sys._MEIPASS
+else:
+    project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 if project_root not in sys.path:
     sys.path.insert(0, project_root)
 

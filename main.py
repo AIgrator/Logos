@@ -3,16 +3,53 @@ Main entry point of the application.
 """
 import sys
 import os
+import shutil
 import time
 import logging
 
+_BUNDLED_DIRS = ("assets", "prompts")
+
+
+def _materialize_bundle_resources(bundle_dir, app_dir):
+    """Copies read-only resources out of a one-file bundle next to the exe.
+
+    The bundle unpacks to a temp folder that is deleted on exit, while prompts
+    and icons are resolved relative to the working directory. The executable's
+    timestamp and size stamp the copy, so an upgrade refreshes it and a normal
+    launch only reads the stamp.
+    """
+    stamp_path = os.path.join(app_dir, ".logos-resources")
+    try:
+        stat = os.stat(sys.executable)
+        stamp = f"{stat.st_mtime_ns}:{stat.st_size}"
+        try:
+            with open(stamp_path, encoding="utf-8") as f:
+                if f.read().strip() == stamp:
+                    return
+        except OSError:
+            pass
+        for name in _BUNDLED_DIRS:
+            src = os.path.join(bundle_dir, name)
+            if os.path.isdir(src):
+                shutil.copytree(src, os.path.join(app_dir, name), dirs_exist_ok=True)
+        with open(stamp_path, "w", encoding="utf-8") as f:
+            f.write(stamp)
+    except OSError:
+        logging.warning("Could not copy bundled resources next to the executable", exc_info=True)
+
+
 def main():
     """Main function to run the application."""
-    # Set the current working directory to the script's directory.
-    # This ensures that all relative paths for resources (models, icons, etc.)
-    # are resolved correctly, regardless of where the application is launched from.
+    # Set the current working directory: the script's directory from source, or
+    # the executable's folder for a one-file build, whose unpack folder is
+    # temporary. All relative resource and data paths resolve from there.
     script_dir = os.path.dirname(os.path.abspath(__file__))
-    os.chdir(script_dir)
+    if getattr(sys, "frozen", False):
+        app_dir = os.path.dirname(sys.executable)
+        os.chdir(app_dir)
+        _materialize_bundle_resources(script_dir, app_dir)
+    else:
+        os.chdir(script_dir)
 
     # Print an immediate startup message so the user knows the app is loading
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Application starting, please wait for modules to load...")
@@ -107,8 +144,12 @@ def main():
             print(f"qt splash failed: {e}", flush=True)
             qt_splash = None
 
-    # Add the 'src' directory to the Python path
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
+    # Add the 'src' directory to the Python path. A frozen build keeps its
+    # modules in the archive under their canonical names; adding the bundle's
+    # src folder would remap top-level imports to the src.* entries and miss
+    # their submodules.
+    if not getattr(sys, 'frozen', False):
+        sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), 'src')))
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] before ModelConfigManager")
     from llm.model_config_manager import ModelConfigManager
     print(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] after ModelConfigManager")

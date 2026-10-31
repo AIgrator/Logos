@@ -2,6 +2,8 @@
 import json
 import logging
 import os
+import shutil
+import sys
 import time
 import copy
 from settings_manager import SettingsManager
@@ -24,7 +26,10 @@ class ModelConfigManager:
     MODELS_URL = "https://aigrator.github.io/LLM-models/models.json"
     # The old URL, kept for reference or local testing.
     # MODELS_URL = f"file://{os.path.abspath('models.json')}"
-    CACHE_PATH = os.path.abspath('cache/models.json')
+    # A one-file build unpacks to a temp folder, so its cache lives next to the
+    # executable; from source it stays in the project's cache folder.
+    CACHE_PATH = (os.path.join(os.path.dirname(sys.executable), 'cache', 'models.json')
+                  if getattr(sys, 'frozen', False) else os.path.abspath('cache/models.json'))
 
     # Fallback model lists used when the remote cache is missing, incomplete,
     # or over-filtered (e.g. only 1 junk model). Keeps UI dropdowns usable.
@@ -82,9 +87,24 @@ class ModelConfigManager:
         if ModelConfigManager.PROVIDER_CONFIG is None:
             ts = time.perf_counter()
             logger.info("Initializing ModelConfigManager...")
+            ModelConfigManager._seed_cache_from_bundle()
             ModelConfigManager._load_and_merge_configs()
             dur = time.perf_counter() - ts
             logger.info(f"ModelConfigManager.initialize took {dur:.3f}s")
+
+    @staticmethod
+    def _seed_cache_from_bundle():
+        """First frozen run: copy the bundled models.json to the writable cache."""
+        if not getattr(sys, 'frozen', False) or os.path.exists(ModelConfigManager.CACHE_PATH):
+            return
+        bundled = os.path.join(getattr(sys, '_MEIPASS', ''), 'cache', 'models.json')
+        if not os.path.isfile(bundled):
+            return
+        try:
+            os.makedirs(os.path.dirname(ModelConfigManager.CACHE_PATH), exist_ok=True)
+            shutil.copyfile(bundled, ModelConfigManager.CACHE_PATH)
+        except OSError as e:
+            logger.warning(f"Could not seed the model cache: {e}")
 
     @staticmethod
     def update_models_from_source():
@@ -101,7 +121,6 @@ class ModelConfigManager:
 
             if ModelConfigManager.MODELS_URL.startswith('file://'):
                 source_path = ModelConfigManager.MODELS_URL[len('file://'):]
-                import shutil
                 shutil.copy(source_path, ModelConfigManager.CACHE_PATH)
                 message = "Successfully copied models from local source."
             else:

@@ -3,6 +3,7 @@ import json
 import locale
 import logging
 import os
+import sys
 import keyring
 import copy
 import shutil
@@ -238,6 +239,10 @@ class SettingsManager(QObject):
 
     def __init__(self, settings_file='settings.json'):
         super().__init__()
+        if getattr(sys, 'frozen', False) and not os.path.isabs(settings_file):
+            # A one-file build runs from a temp extraction folder; settings must
+            # survive it, so they live next to the executable.
+            settings_file = os.path.join(os.path.dirname(sys.executable), settings_file)
         self.SETTINGS_FILE = settings_file
         self._settings = self._load_settings()
         self._initialize_app_paths()
@@ -333,8 +338,14 @@ class SettingsManager(QObject):
         Defines core application paths and stores them in the settings object.
         These are runtime paths and are not saved to settings.json.
         """
-        # The project root is the parent directory of the 'src' directory where this file is located.
-        project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        # From a source checkout the project root is the parent of 'src'. A
+        # one-file build runs with its writable root next to the executable,
+        # where main.py also copies the bundled prompts and assets, so relative
+        # resource paths and the generated cache share one root like in source.
+        if getattr(sys, 'frozen', False):
+            project_root = os.path.dirname(sys.executable)
+        else:
+            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
         self._settings['APP_PROJECT_ROOT'] = project_root
 
         # Define other paths based on the project root
