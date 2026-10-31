@@ -143,28 +143,48 @@ class TerminalHtmlFormatter:
             f'line-height: 1.35;">{list_items}</{tag}>'
         )
 
+    def _code_box(self, inner_html: str, color: str | None = None) -> str:
+        """Framed code block.
+
+        A one-cell table, not a bare <pre>: Qt's rich text ignores a pre's
+        background, border and padding, so the output used to sit naked on
+        the card. Table cell background and cellpadding render solidly.
+        """
+        return (
+            f'<table width="100%" cellspacing="0" cellpadding="8" '
+            f'bgcolor="{self._get_style("CODE_BG")}" '
+            f'style="border: 1px solid {self._get_style("CODE_BORDER")}; '
+            'margin-top: 2px;"><tr><td>'
+            f'<pre style="margin: 0; color: '
+            f'{color or self._get_style("TERMINAL_PRE_COLOR")}; '
+            'white-space: pre-wrap; word-wrap: break-word;">'
+            f"<code>{inner_html}</code></pre></td></tr></table>"
+        )
+
+    def _callout(self, text_html: str, accent: str, bg: str) -> str:
+        """Left-accent note strip.
+
+        Qt draws no border-left on rich-text blocks and ignores padding, so
+        the strip is a borderless table: accent cell plus tinted text cell.
+        """
+        return (
+            '<table width="100%" cellspacing="0" cellpadding="0" '
+            'style="margin: 0 0 8px 0;"><tr>'
+            f'<td width="3" bgcolor="{accent}">&nbsp;</td>'
+            f'<td bgcolor="{bg}"><div style="color: {accent}; '
+            f'margin: 6px 8px;">{text_html}</div></td></tr></table>'
+        )
+
     def format_code_content(self, content: str, path: str = "",
                             color: str | None = None) -> str:
         """Return syntax-highlighted HTML for file content or a command preview."""
         dark = self.theme_manager.get_current_theme_name() == DARK_THEME
         rendered, _truncated = highlight_code(content, path, dark=dark)
-        return (
-            f'<pre style="background-color: {self._get_style("CODE_BG")}; '
-            f'border: 1px solid {self._get_style("CODE_BORDER")}; '
-            'padding: 10px; margin: 0; color: '
-            f'{color or self._get_style("TERMINAL_PRE_COLOR")}; white-space: pre-wrap; '
-            f'word-wrap: break-word;"><code>{rendered}</code></pre>'
-        )
+        return self._code_box(rendered, color=color)
 
     def format_plain_content(self, content: str, color: str | None = None) -> str:
         """Plain monospace block for logs and shell output (no lexer guessing)."""
-        return (
-            f'<pre style="background-color: {self._get_style("CODE_BG")}; '
-            f'border: 1px solid {self._get_style("CODE_BORDER")}; '
-            'padding: 10px; margin: 0; color: '
-            f'{color or self._get_style("TERMINAL_PRE_COLOR")}; white-space: pre-wrap; '
-            f'word-wrap: break-word;"><code>{html.escape(str(content))}</code></pre>'
-        )
+        return self._code_box(html.escape(str(content)), color=color)
 
     def format_shell_block(self, command: str, stdout: str = "", stderr: str = "",
                            exit_note: str = "", output_file: str = "",
@@ -181,13 +201,10 @@ class TerminalHtmlFormatter:
                 f'Working directory: <code>{html.escape(str(cwd))}</code></div>'
             )
         if exit_note:
-            parts.append(
-                f'<div style="color: {self._get_style("WARNING_COLOR")}; '
-                f'background-color: {self._get_style("ACTION_SUMMARY_BG")}; '
-                f'border-left: 3px solid {self._get_style("WARNING_COLOR")}; '
-                'padding: 6px 8px; '
-                f'margin: 0 0 8px 0;">{html.escape(str(exit_note))}</div>'
-            )
+            parts.append(self._callout(
+                html.escape(str(exit_note)),
+                self._get_style("WARNING_COLOR"),
+                self._get_style("ACTION_SUMMARY_BG")))
         parts.append(f'<div style="{label}">Command</div>')
         parts.append(self.format_code_content(f"$ {command}", "command.sh"))
         if show_output:
@@ -229,13 +246,8 @@ class TerminalHtmlFormatter:
             for line in new_lines:
                 new_lines_html.append(f'<span style="color: {self._get_style("TERMINAL_LINE_NUM_COLOR")}; -webkit-user-select: none; user-select: none;">+&nbsp;</span><span style="background-color: {self._get_style("TERMINAL_DIFF_ADD_BG")};">{html.escape(line)}</span>')
 
-        return (
-            f'<pre style="background-color: {self._get_style("CODE_BG")}; '
-            f'border: 1px solid {self._get_style("CODE_BORDER")}; '
-            'padding: 10px; margin: 0; color: '
-            f'{self._get_style("TERMINAL_PRE_COLOR")}; white-space: pre-wrap; '
-            f'word-wrap: break-word;"><code>{"<br>".join(old_lines_html)}<br>{"<br>".join(new_lines_html)}</code></pre>'
-        )
+        return self._code_box(
+            f'{"<br>".join(old_lines_html)}<br>{"<br>".join(new_lines_html)}')
 
     def format_replace_chunk(self, old_lines: list[str], new_lines: list[str], start_line: int) -> str:
         """Formats the HTML for a file replace (diff) operation."""

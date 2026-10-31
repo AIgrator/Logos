@@ -2036,9 +2036,37 @@ class AppController(QObject):
         except Exception:
             pass
         handler = self._handler_for_mode(self.session_mode)
+        # Terminal and Browser rebuild their turns as activity blocks, the
+        # same grammar the live loop renders. Chat and Vision keep the
+        # per-event cards, so their handlers are not asked to group.
+        activity_replay = (
+            self.session_mode in ("terminal", "browser")
+            and callable(getattr(handler, "replay_event", None)))
+        if activity_replay:
+            reset = getattr(handler, "replay_reset", None)
+            if callable(reset):
+                reset()
+
+        def close_activity():
+            if not activity_replay:
+                return
+            close = getattr(handler, "replay_close", None)
+            if callable(close):
+                close()
+
+        def replay_grouped(event) -> bool:
+            if not activity_replay:
+                return False
+            try:
+                return bool(handler.replay_event(event))
+            except Exception as e:
+                logging.warning(f"Could not replay {event.get('type')}: {e}")
+                return False
+
         for event in events:
             event_type = event.get("type")
             if event_type == "message":
+                close_activity()
                 text = event_text(event)
                 role = event.get("role")
                 if role == "user":
@@ -2056,10 +2084,12 @@ class AppController(QObject):
                     self.ui.add_message(
                         f"<p><i>{html.escape(text)}</i></p>")
             elif event_type == "suggestions":
+                close_activity()
                 add = getattr(self.ui, "add_suggestions", None)
                 if callable(add):
                     add(event.get("items"))
             elif event_type == "compaction":
+                close_activity()
                 try:
                     covered = int(event.get("covered") or 0)
                     total = int(event.get("total") or 0)
@@ -2069,24 +2099,23 @@ class AppController(QObject):
                     str(event.get("trigger") or ""), covered, total)
                 self.ui.add_message(f"<i>{html.escape(notice)}</i>")
             elif event_type == "reasoning":
+                if replay_grouped(event):
+                    continue
                 text = event_text(event)
                 if text:
                     self.ui.add_reasoning(text, force_scroll=False)
+            elif event_type in ("progress", "plan"):
+                replay_grouped(event)
             elif event_type in ("tool_call", "tool_result", "job_result"):
-                replayed = False
-                replay = getattr(handler, "replay_event", None)
-                if callable(replay):
-                    try:
-                        replayed = bool(replay(event))
-                    except Exception as e:
-                        logging.warning(f"Could not replay {event_type}: {e}")
-                if not replayed:
+                if not replay_grouped(event):
                     self._replay_tool_event(event)
             elif event_type == "error":
+                close_activity()
                 message = str(event.get("message") or event_text(event) or "Error")
                 error_style = self.theme_manager.get_style("ERROR_MESSAGE_STYLE")
                 self.ui.add_message(
                     f'<span style="{error_style}">{html.escape(message)}</span>')
+        close_activity()
         try:
             self.ui.chat_widget.scroll_to_bottom()
         except Exception:
@@ -2754,12 +2783,15 @@ class AppController(QObject):
             self.thinking_timer.stop()
             self.ui.show_thinking_ui(False)
 
-    def _handle_structured_response(self, reasoning: str, tool_calls_obj, schema_name: str):
+    def _handle_structured_response(self, reasoning: str, tool_calls_obj, schema_name: str,
+                                    commentary: str = ""):
         # The full response is already logged to the llm_communication.log file.
         if self.state == ControllerState.TERMINAL:
-            self.terminal_handler.handle_llm_response(reasoning, tool_calls_obj, schema_name)
+            self.terminal_handler.handle_llm_response(
+                reasoning, tool_calls_obj, schema_name, commentary)
         elif self.state == ControllerState.BROWSER:
-            self.browser_handler.handle_llm_response(reasoning, tool_calls_obj, schema_name)
+            self.browser_handler.handle_llm_response(
+                reasoning, tool_calls_obj, schema_name, commentary)
         else:
             logging.warning("Received a structured response in an unexpected state. Ignoring.")
             self.thinking_timer.stop()

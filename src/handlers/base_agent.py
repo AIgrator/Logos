@@ -17,7 +17,6 @@ Contract for heirs:
   - _cleanup_task(): heir hook called by stop() (close browsers, kill
     threads, end UI containers). Default does nothing.
 """
-import html
 import json
 import logging
 import os
@@ -101,6 +100,25 @@ def _middle_cut(text: str, limit: int = 140) -> str:
     tail = 40
     head = max(40, limit - tail - 3)
     return text[:head] + " … " + text[-tail:]
+
+
+def _clip_replay_value(value, limit: int = 2000):
+    """Clips long strings inside a replayed tool call's arguments.
+
+    Journals hold the full write_file content and replace strings; showing
+    them in a step's Arguments box would render a wall of text on every
+    reload, so oversized leaves are shortened with an explicit marker.
+    """
+    if isinstance(value, str):
+        if len(value) <= limit:
+            return value
+        return value[:limit] + f"… [{len(value) - limit} chars hidden]"
+    if isinstance(value, dict):
+        return {str(key): _clip_replay_value(item, limit)
+                for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_clip_replay_value(item, limit) for item in value]
+    return value
 
 
 def _strip_shell_wrapper(command: str) -> str:
@@ -240,6 +258,11 @@ class BaseAgentHandler:
         self._active_call_id = None
         self._active_tool_name = ""
         self._active_turn_id = ""
+        # One activity block per task phase: plan, narration, thoughts and
+        # tool steps live there instead of separate Executing/result cards.
+        self._activity_msg = None
+        self._active_step = None
+        self._job_steps = {}  # job_id -> (activity msg, step row)
         # NOTE: there is deliberately NO timeout counter. Timeouts count as
         # ordinary failures; significance is the model's call (assessment
         # turn). Do not reintroduce a second fuse.
@@ -372,9 +395,9 @@ class BaseAgentHandler:
             self.ui.set_paused(False)
             stashed, self._stashed_response = self._stashed_response, None
             if stashed is not None:
-                reasoning, payload, schema_name = stashed
+                reasoning, payload, schema_name, commentary = stashed
                 logging.info(f"{type(self).__name__} resuming with stashed LLM response.")
-                self.handle_llm_response(reasoning, payload, schema_name)
+                self.handle_llm_response(reasoning, payload, schema_name, commentary)
             else:
                 self._continue_loop()
             return
@@ -393,6 +416,7 @@ class BaseAgentHandler:
     def stop(self):
         """Stops the current task and resets state. Heirs clean resources via hook."""
         was_active = self.state != VisionState.IDLE
+        self._activity_finalize("Stopped", "stopped")
         try:
             self._cleanup_task()
         except Exception as e:
@@ -653,17 +677,154 @@ class BaseAgentHandler:
             "compact": stats,
         }
 
-    def handle_llm_response(self, reasoning: str, payload: any, schema_name: str):
+    # -- activity block (plan, narration, thoughts and steps in one card) --
+
+    def _activity_alive(self, msg) -> bool:
+        widget = getattr(self.ui, 'chat_widget', None)
+        check = getattr(widget, '_has_message', None)
+        try:
+            return bool(check(msg)) if callable(check) else True
+        except Exception:
+            return True
+
+    def _activity_block(self):
+        """The current task's activity block, created on first use."""
+        msg = self._activity_msg
+        if msg is not None and self._activity_alive(msg):
+            return msg
+        add = getattr(self.ui, 'add_activity_block', None)
+        if not callable(add):
+            return None
+        try:
+            self._activity_msg = add("Working")
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} activity block failed: {e}")
+            self._activity_msg = None
+        return self._activity_msg
+
+    def _activity_add_thought(self, text):
+        """Model reasoning: muted, excerpted, expandable inside the block."""
+        text = str(text or "").strip()
+        if not text:
+            return
+        msg = self._activity_block()
+        if msg is None:
+            self.ui.add_reasoning(text)
+            return
+        try:
+            self.ui.activity_add_thought(msg, text)
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} activity thought failed: {e}")
+
+    def _activity_add_narration(self, text):
+        """One-line model narration for the upcoming step."""
+        text = str(text or "").strip()
+        if not text:
+            return
+        msg = self._activity_block()
+        if msg is None:
+            return
+        try:
+            self.ui.activity_add_note(msg, text)
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} activity note failed: {e}")
+
+    def _step_title(self, action_name: str, action_args: dict) -> str:
+        """Heir hook: human title of a step (terminal overrides with summaries)."""
+        return _compact_command(
+            f"{action_name}({json.dumps(action_args or {}, ensure_ascii=False)})")
+
+    def _begin_activity_step(self, action_name, action_args):
+        msg = self._activity_block()
+        if msg is None:
+            return None
+        try:
+            args_text = json.dumps(action_args or {}, ensure_ascii=False, indent=2)
+            row = self.ui.activity_add_step(
+                msg, self._step_title(action_name, action_args), args=args_text)
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} activity step failed: {e}")
+            return None
+        self._active_step = row
+        return row
+
+    def _update_activity_step(self, step, **fields) -> bool:
+        msg = self._activity_msg
+        if step is None or msg is None:
+            return False
+        try:
+            return bool(self.ui.activity_update_step(msg, step, **fields))
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} step update failed: {e}")
+            return False
+
+    def _finish_active_step(self, status: str = "ok", output=None,
+                            detail_html=None, job_id=None, log_path=None,
+                            title=None, expanded=None) -> bool:
+        return self._update_activity_step(
+            self._active_step, status=status, output=output,
+            detail_html=detail_html, job_id=job_id, log_path=log_path,
+            title=title, expanded=expanded)
+
+    def _activity_finalize(self, title=None, status: str = "ok"):
+        """Closes the current block so the next turn starts a fresh one."""
+        msg, self._activity_msg = self._activity_msg, None
+        self._active_step = None
+        if msg is None:
+            return
+        finish = getattr(self.ui, 'finish_activity', None)
+        if not callable(finish):
+            return
+        try:
+            finish(msg, title=title, status=status)
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} activity finish failed: {e}")
+
+    def _apply_plan(self, steps):
+        """Renders the model's plan as the pinned top row of the block."""
+        normalized = []
+        for step in steps or []:
+            if isinstance(step, str):
+                normalized.append({"text": step.strip(), "status": "pending"})
+                continue
+            if not isinstance(step, dict):
+                continue
+            text = str(step.get("text") or "").strip()
+            status = str(step.get("status") or "pending").strip().lower()
+            if status not in ("done", "in_progress", "pending"):
+                status = "pending"
+            if text:
+                normalized.append({"text": text, "status": status})
+        if not normalized:
+            return
+        msg = self._activity_block()
+        if msg is not None:
+            try:
+                self.ui.activity_set_plan(msg, normalized)
+            except Exception as e:
+                logging.warning(f"{type(self).__name__} plan render failed: {e}")
+        self._append_session_event(
+            "plan",
+            turn_id=getattr(self.controller, "session_turn_id", ""),
+            steps=normalized,
+        )
+        marks = {"done": "[x]", "in_progress": "[>]", "pending": "[ ]"}
+        self.command_history.append(
+            "**Plan updated:** " + "; ".join(
+                f"{marks[s['status']]} {s['text']}" for s in normalized))
+
+    def handle_llm_response(self, reasoning: str, payload: any, schema_name: str,
+                            commentary: str = ""):
         """Handles the response from the LLM, which should be a tool call."""
         if self.state == VisionState.PAUSED:
             logging.info(f"{type(self).__name__} LLM response arrived while paused; stashing.")
-            self._stashed_response = (reasoning, payload, schema_name)
+            self._stashed_response = (reasoning, payload, schema_name, commentary)
             self._stop_thinking_timer()
             return
         self._stop_thinking_timer()
 
         if reasoning:
-            self.ui.add_reasoning(reasoning)
+            self._activity_add_thought(reasoning)
             # Her own thoughts persist: without this the next turn sees what
             # was DONE but never what was MEANT — stage tracking evaporates.
             self.command_history.append(f"**Model reasoning:** {reasoning}")
@@ -673,20 +834,43 @@ class BaseAgentHandler:
                 text=reasoning,
             )
 
+        if commentary:
+            # Narration is the model's own voice for this step; the block
+            # shows it above the step it introduces.
+            self._activity_add_narration(commentary)
+            self._append_session_event(
+                "progress",
+                turn_id=getattr(self.controller, "session_turn_id", ""),
+                text=commentary,
+            )
+
         if schema_name != self.SCHEMA_NAME or not payload or 'action' not in payload:
+            self._activity_finalize("Unexpected response", "error")
             self.ui.add_message("<i>Received an unexpected response from the model. Cannot proceed.</i>")
             self.stop()
             return
 
         action = payload.get('action')
         if not action or 'name' not in action:
+            self._activity_finalize("Invalid plan", "error")
             self.ui.add_message("<i>The model's plan was invalid. Cannot proceed.</i>")
             self.stop()
+            return
+
+        if action.get('name') == 'update_plan':
+            arguments = action.get('arguments') or {}
+            if not isinstance(arguments, dict):
+                arguments = {}
+            self._apply_plan(arguments.get('steps'))
+            self._continue_loop(
+                "**Tool Result:** Plan shown to the user. Keep it current as "
+                "steps start and finish.")
             return
 
         if action.get('name') == 'finish':
             arguments = action.get('arguments') or {}
             message = arguments.get('message', 'Task completed successfully.')
+            self._activity_finalize("Done", "ok")
             self._record_assistant_message(message)
             self.ui.add_formatted_message(message)
             success = self.controller.theme_manager.get_style("SUCCESS_COLOR")
@@ -699,6 +883,7 @@ class BaseAgentHandler:
         if action.get('name') == 'communicate_to_user':
             arguments = action.get('arguments') or {}
             message = arguments.get('message', 'The assistant needs your input.')
+            self._activity_finalize("Waiting for you", "waiting")
             self._record_assistant_message(message)
             self.ui.add_formatted_message(message)
             self._publish_suggestions(arguments.get('suggestions'))
@@ -731,21 +916,33 @@ class BaseAgentHandler:
             return None
 
     def record_tool_result(self, text, status: str = "", call_id: str = "",
-                           name: str = ""):
+                           name: str = "", display: str = "",
+                           display_title: str = "", job_id=None,
+                           log_path: str = ""):
         call_id = call_id or self._active_call_id
         if not call_id:
             return
         if not status:
             status = "error" if _is_error_output(text) else "ok"
-        self._append_session_event(
-            "tool_result",
-            turn_id=self._active_turn_id or getattr(
+        fields = {
+            "turn_id": self._active_turn_id or getattr(
                 self.controller, "session_turn_id", ""),
-            call_id=call_id,
-            name=name or getattr(self, "_active_tool_name", "") or "",
-            status=status,
-            output={"text": str(text or "")},
-        )
+            "call_id": call_id,
+            "name": name or getattr(self, "_active_tool_name", "") or "",
+            "status": status,
+            "output": {"text": str(text or "")},
+        }
+        # display* mirror what the step row showed, so a replayed transcript
+        # does not have to guess it back from the model-facing text.
+        if display:
+            fields["display"] = str(display)
+        if display_title:
+            fields["display_title"] = str(display_title)
+        if job_id is not None:
+            fields["job_id"] = int(job_id)
+        if log_path:
+            fields["log_path"] = str(log_path)
+        self._append_session_event("tool_result", **fields)
         self._active_call_id = None
         self._active_tool_name = ""
 
@@ -785,12 +982,8 @@ class BaseAgentHandler:
         "**Error:**\n",
     )
 
-    def _add_result_card(self, text, title, status: str = ""):
-        """Render a tool result as the shared collapsible card.
-
-        Live results and replayed journal events use the same grammar so a
-        failure never degrades to raw italic markdown in one mode.
-        """
+    def _strip_result_prefix(self, text) -> str:
+        """Drops the history marker so UI blocks show the payload only."""
         text = str(text or "(no output)")
         for prefix in self._RESULT_PREFIXES:
             if text.startswith(prefix):
@@ -798,6 +991,15 @@ class BaseAgentHandler:
                 break
         if text.startswith("```") and text.endswith("```"):
             text = text[3:-3].strip("\n")
+        return text
+
+    def _add_result_card(self, text, title, status: str = ""):
+        """Render a tool result as the shared collapsible card.
+
+        Live results and replayed journal events use the same grammar so a
+        failure never degrades to raw italic markdown in one mode.
+        """
+        text = self._strip_result_prefix(text)
         shown = text
         if len(shown) > 30000:
             shown = shown[:30000] + (
@@ -817,29 +1019,194 @@ class BaseAgentHandler:
                     "ERROR_COLOR" if status == "error" else "WARNING_COLOR")
         self.ui.add_message(block)
 
+    # -- journal replay (rebuilds the live activity grammar) ------------
+
+    def replay_reset(self):
+        """Drops replay grouping state before a transcript is rebuilt."""
+        self._replay_msg = None
+        self._replay_steps = {}
+        self._replay_jobs = {}
+
+    def _replay_block(self):
+        """The replay activity block, created on first grouped event."""
+        msg = getattr(self, "_replay_msg", None)
+        if msg is not None:
+            return msg
+        add = getattr(self.ui, "add_activity_block", None)
+        if not callable(add):
+            return None
+        try:
+            msg = add("Working")
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} replay block failed: {e}")
+            msg = None
+        if msg is not None:
+            # A replayed turn has no meaningful live duration; without this
+            # the header would measure the replay itself.
+            msg["started_at"] = None
+        self._replay_msg = msg
+        return msg
+
+    def _replay_step_args(self, action_name: str, action_args: dict) -> str:
+        """Arguments text for a replayed step (heirs may trim bulky fields)."""
+        return json.dumps(
+            _clip_replay_value(action_args or {}), ensure_ascii=False, indent=2)
+
+    def _replay_step_detail(self, action_name: str, action_args: dict):
+        """Optional themed detail HTML for a replayed step."""
+        return None
+
+    def _replay_step(self, action_name: str, action_args: dict, call_id):
+        msg = self._replay_block()
+        if msg is None:
+            return None
+        try:
+            row = self.ui.activity_add_step(
+                msg,
+                self._step_title(action_name, action_args),
+                args=self._replay_step_args(action_name, action_args),
+                detail_html=self._replay_step_detail(action_name, action_args),
+            )
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} replay step failed: {e}")
+            return None
+        if row is not None:
+            # Replayed steps have no live duration; showing "0s" for every
+            # restored row would be noise, so the timer starts unset.
+            row["started_at"] = None
+        if row is not None and call_id:
+            self._replay_steps[str(call_id)] = row
+            if len(self._replay_steps) > 400:
+                self._replay_steps.pop(next(iter(self._replay_steps)))
+        return row
+
+    def _replay_tool_result(self, event: dict) -> bool:
+        call_id = str(event.get("call_id") or "")
+        name = str(event.get("name") or "action")
+        row = self._replay_steps.get(call_id) if call_id else None
+        if row is None:
+            row = self._replay_step(name, {}, call_id)
+        if row is None:
+            return False
+        raw_status = str(event.get("status") or "ok")
+        status = raw_status if raw_status in ("ok", "error", "denied") else "ok"
+        text = event.get("display")
+        if not text:
+            text = self._strip_result_prefix(event_text(event))
+        fields = {"status": status,
+                  "expanded": True if status in ("error", "denied") else None}
+        display_title = event.get("display_title")
+        if display_title:
+            fields["title"] = str(display_title)
+        if text:
+            fields["output"] = text
+        try:
+            job_id = int(event.get("job_id"))
+        except (TypeError, ValueError):
+            job_id = None
+        if job_id is not None and name == "execute_shell":
+            row["job_id"] = job_id
+            self._replay_jobs[job_id] = row
+        log_path = event.get("log_path")
+        if log_path:
+            row["log_path"] = str(log_path)
+        try:
+            self.ui.activity_update_step(msg=self._replay_msg, row=row, **fields)
+        except TypeError:
+            self.ui.activity_update_step(self._replay_msg, row, **fields)
+        return True
+
+    def _replay_job_result(self, event: dict) -> bool:
+        try:
+            job_id = int(event.get("job_id"))
+        except (TypeError, ValueError):
+            return False
+        row = self._replay_jobs.get(job_id)
+        if row is None:
+            msg = self._replay_block()
+            if msg is None:
+                return False
+            try:
+                row = self.ui.activity_add_step(
+                    msg, f"Background job #{job_id}", args="")
+            except Exception as e:
+                logging.warning(f"{type(self).__name__} replay job step failed: {e}")
+                return False
+            if row is None:
+                return False
+            row["started_at"] = None
+            row["job_id"] = job_id
+            self._replay_jobs[job_id] = row
+        status = str(event.get("status") or "ok")
+        if status not in ("ok", "error", "stopped"):
+            status = "ok"
+        label = {"ok": "finished", "error": "failed", "stopped": "stopped"}[status]
+        text = event.get("display")
+        if not text:
+            text = self._strip_result_prefix(event_text(event))
+        title = event.get("display_title") or f"Background job #{job_id} · {label}"
+        try:
+            self.ui.activity_update_step(
+                self._replay_msg, row, status=status,
+                title=str(title),
+                output=text or None,
+                expanded=True if status == "error" else None)
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} replay job update failed: {e}")
+            return False
+        return True
+
     def replay_event(self, event: dict) -> bool:
-        """Replay a persisted tool event in the current mode's visual style."""
+        """Replay one journal event in the live activity grammar."""
         event_type = event.get("type")
+        if event_type in ("reasoning", "progress", "plan"):
+            msg = self._replay_block()
+            if msg is None:
+                return False
+            if event_type == "reasoning":
+                text = event_text(event)
+                if text:
+                    self.ui.activity_add_thought(msg, text)
+            elif event_type == "progress":
+                text = event_text(event)
+                if text:
+                    self.ui.activity_add_note(msg, text)
+            else:
+                steps = event.get("steps") or []
+                if steps:
+                    self.ui.activity_set_plan(msg, steps)
+            return True
         if event_type == "tool_call":
             name = str(event.get("name") or "action")
             args = event.get("input") or {}
-            self.ui.add_message(f"<b>Executing:</b> {html.escape(name)}")
-            self.ui.add_message({
-                "type": "collapsible",
-                "title": "Arguments",
-                "content": json.dumps(args, ensure_ascii=False, indent=2),
-            })
-            return True
-        if event_type in ("tool_result", "job_result"):
-            status = str(event.get("status") or "")
-            if event_type == "job_result":
-                title = (f"Background job #{event.get('job_id', '?')} · "
-                         f"{status or 'result'}")
-            else:
-                title = f"{event.get('name') or 'Tool'} · {status or 'result'}"
-            self._add_result_card(event_text(event), title, status)
-            return True
+            if not isinstance(args, dict):
+                args = {}
+            return self._replay_step(name, args, event.get("call_id")) is not None
+        if event_type == "tool_result":
+            return self._replay_tool_result(event)
+        if event_type == "job_result":
+            return self._replay_job_result(event)
         return False
+
+    def replay_close(self):
+        """Finalizes the replayed block before the next transcript item."""
+        msg = getattr(self, "_replay_msg", None)
+        self._replay_msg = None
+        self._replay_steps = {}
+        self._replay_jobs = {}
+        if msg is None:
+            return
+        rows = msg.get("rows") or []
+        failed = any(
+            row.get("kind") == "step" and row.get("status") in ("error", "denied")
+            for row in rows)
+        finish = getattr(self.ui, "finish_activity", None)
+        if callable(finish):
+            try:
+                finish(msg, title="Done with errors" if failed else "Done",
+                       status="error" if failed else "ok")
+            except Exception as e:
+                logging.warning(f"{type(self).__name__} replay close failed: {e}")
 
     def _run_action(self, action: dict):
         if self._tool_in_flight:
@@ -885,6 +1252,8 @@ class BaseAgentHandler:
             name=action_name,
             input=history_action.get("arguments") or {},
         )
+        step = self._begin_activity_step(
+            action_name, history_action.get("arguments") or {})
         try:
             result_text = self.execute_action(action)
         except ValueError as e:
@@ -895,7 +1264,13 @@ class BaseAgentHandler:
             result_text = f"**Tool Result:** Error: {e}"
         if result_text is None:
             return  # async heir continues the loop itself on completion
-        if result_text.startswith("**Tool Result:** Error:"):
+        failed = result_text.startswith("**Tool Result:** Error:")
+        if step is not None:
+            self._finish_active_step(
+                status="error" if failed else "ok",
+                output=self._strip_result_prefix(result_text),
+                expanded=True if failed else None)
+        elif failed:
             self._add_result_card(
                 result_text, f"{action_name} · error", "error")
         self.record_tool_result(result_text)

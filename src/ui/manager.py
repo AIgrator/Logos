@@ -1929,6 +1929,34 @@ class UIManager(QWidget):
     def update_job_block(self, job_id: int, data: dict) -> bool:
         return self.chat_widget.update_job_block(job_id, data)
 
+    # --- Activity blocks ---
+
+    def add_activity_block(self, title: str = "Working", expanded: bool = True):
+        """Starts one turn's activity block; returns its message handle."""
+        return self.chat_widget.add_activity_block(
+            title, expanded=expanded and not self.is_compact)
+
+    def activity_add_thought(self, msg, text: str, expanded: bool = False) -> bool:
+        return self.chat_widget.activity_add_thought(msg, text, expanded)
+
+    def activity_add_note(self, msg, text: str) -> bool:
+        return self.chat_widget.activity_add_note(msg, text)
+
+    def activity_set_plan(self, msg, steps) -> bool:
+        return self.chat_widget.activity_set_plan(msg, steps)
+
+    def activity_add_step(self, msg, title: str, args: str = "",
+                          detail_html: str | None = None):
+        return self.chat_widget.activity_add_step(
+            msg, title, args=args, detail_html=detail_html)
+
+    def activity_update_step(self, msg, row, **fields) -> bool:
+        return self.chat_widget.activity_update_step(msg, row, **fields)
+
+    def finish_activity(self, msg, title: str | None = None,
+                        status: str = "ok") -> bool:
+        return self.chat_widget.finish_activity(msg, title=title, status=status)
+
     def add_image_to_history(self, image_bytes: bytes):
         if not image_bytes:
             return

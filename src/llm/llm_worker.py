@@ -20,7 +20,7 @@ class LLMWorker(QObject):
 
     response_chunk = Signal(str)
     response_finished = Signal(str)
-    structured_response_received = Signal(str, object, str)  # reasoning, tool_calls (object), schema_name
+    structured_response_received = Signal(str, object, str, str)  # reasoning, tool_calls (object), schema_name, commentary
     tool_call_received = Signal(dict)
     plain_text_response_received = Signal(str)  # For when a plan was expected but not received
     retry_attempt = Signal(int, int, str, float)  # attempt_num, max_attempts, error, wait_seconds
@@ -593,9 +593,13 @@ class LLMWorker(QObject):
 
                     payload = validated_payload.get('payload', {}) if final_schema_name in ('terminal_tool_code', 'browser_tool_code') else validated_payload
 
+                    commentary = ""
+                    if isinstance(payload, dict):
+                        commentary = str(payload.get('commentary') or "").strip()
+
                     self.structured_response_received.emit(
                         reasoning_text,
-                        payload, final_schema_name)
+                        payload, final_schema_name, commentary)
                     return
 
                 # --- Streaming for Chat ---

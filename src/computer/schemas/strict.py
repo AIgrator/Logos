@@ -165,6 +165,17 @@ def build_flat_action_schema(metadata: dict) -> dict:
     }
 
 
+# Optional narration inside the payload, next to the action. It lives at the
+# envelope level (not per tool) so the tool union/grammar stays unchanged.
+COMMENTARY_SCHEMA = {
+    "type": ["string", "null"],
+    "description": (
+        "Optional one-sentence note to the user about this step, in their "
+        "language. Shown as narration in the activity block. null when no "
+        "explanation is needed."),
+}
+
+
 def build_strict_schema_flat(name: str, metadata: dict, description: str | None = None) -> dict:
     """Same envelope as :func:`build_strict_schema`, but with a single-branch
     action (see :func:`build_flat_action_schema`) instead of the 10+ branch
@@ -176,8 +187,11 @@ def build_strict_schema_flat(name: str, metadata: dict, description: str | None 
             "type": {"type": "string", "enum": [name]},
             "payload": {
                 "type": "object",
-                "properties": {"action": build_flat_action_schema(metadata)},
-                "required": ["action"],
+                "properties": {
+                    "commentary": COMMENTARY_SCHEMA,
+                    "action": build_flat_action_schema(metadata),
+                },
+                "required": ["commentary", "action"],
                 "additionalProperties": False,
             },
         },
@@ -197,8 +211,11 @@ def build_strict_schema(name: str, metadata: dict, description: str | None = Non
             "type": {"type": "string", "enum": [name]},
             "payload": {
                 "type": "object",
-                "properties": {"action": {"anyOf": build_action_union(metadata)}},
-                "required": ["action"],
+                "properties": {
+                    "commentary": COMMENTARY_SCHEMA,
+                    "action": {"anyOf": build_action_union(metadata)},
+                },
+                "required": ["commentary", "action"],
                 "additionalProperties": False,
             },
         },

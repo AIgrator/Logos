@@ -93,11 +93,22 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
 - `sessions/` - one append-only JSONL file per session; the first line is a
   `session` header (`schema_version`, `id`, `mode`, optional `title`, optional
   `objective`) and later
-  lines are typed events (`message`, `reasoning`, `tool_call`, `tool_result`,
-  `job_result`, `usage`, `compaction`, `error`). `reasoning` events carry the
+  lines are typed events (`message`, `reasoning`, `progress`, `plan`,
+  `tool_call`, `tool_result`, `job_result`, `usage`, `compaction`, `error`,
+  `suggestions`). `reasoning` events carry the
   model's stated
   rationale and, for agent steps, the provider's thought summary when the API
-  exposes one. `message` events may carry an `attachments`
+  exposes one; `progress` events carry the model's short narration line and
+  `plan` events the current plan (`steps`, each with `text` and `status`) from
+  the `update_plan` control tool, so a reloaded turn keeps its plan, thoughts
+  and notes in one activity block. `tool_call` events carry `call_id`, `name`
+  and the model-facing `input`; `tool_result` events carry `call_id`, `name`,
+  `status` (`ok`/`error`/`denied`), `output.text` and, when the UI showed more
+  than the model needed, `display` (transcript text), `display_title` (the
+  live row title) and `log_path`; a background launch also records `job_id`,
+  which the later `job_result` (`job_id`, `name`, `status`, `exit_code`, the
+  same `display*`/`log_path`) updates in place. `message` events may carry an
+  `attachments`
   list (name, kind, path, size, SHA-256, stored flag/status). `usage` events
   carry normalized provider token
   counts
@@ -111,8 +122,19 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   sessions compacted before this event existed) and shows a COMPACTION line.
   The newest is
   restored at startup: messages are replayed into the
-  chat, and terminal/browser `command_history` plus tool cards are rebuilt from
-  the same events. After a manual or automatic compaction only events after the
+  chat, and terminal/browser `command_history` plus the whole transcript are
+  rebuilt from the same events. Terminal and Browser journals replay into the same activity
+  blocks the turn used live (`BaseAgentHandler.replay_event`): `plan` /
+  `reasoning` / `progress` become the plan, thought and note rows,
+  `tool_call` opens a step, `tool_result` fills its title from
+  `display_title`, output from `display` (falling back to the model-facing
+  `output.text`) and expands errors and denials, and `job_result` updates the
+  launch step. Journals written before those fields existed still group with
+  the old grammar (step title from the action, output stripped of its
+  `**Tool Result:**` markers). Vision and Chat keep the per-event card grammar
+  (`AppController._replay_tool_event`). Replayed blocks and steps carry no
+  elapsed time, so a restored transcript does not show "0s" on every row. After
+  a manual or automatic compaction only events after the
   recorded boundary are rebuilt; the summary block stands in for the compacted
   prefix. Automatic compaction runs at idle when the context reaches
   `context.auto_compact_tokens` (default 200k, keeps requests cheap on 1M+

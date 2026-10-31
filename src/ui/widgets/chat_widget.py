@@ -2,10 +2,11 @@
 import html
 import logging
 import sys
+import time
 import uuid
 from urllib.parse import unquote
 
-from PySide6.QtCore import Qt, QPoint, QRect, QSize, QTime, QTimer, QUrl, Signal
+from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import (
     QAbstractTextDocumentLayout,
     QColor,
@@ -14,6 +15,7 @@ from PySide6.QtGui import (
     QFontMetrics,
     QKeySequence,
     QPainter,
+    QPen,
     QTextCharFormat,
     QTextCursor,
     QTextDocument,
@@ -23,6 +25,7 @@ from PySide6.QtWidgets import QAbstractScrollArea, QApplication, QMenu, QPushBut
 
 from src.ui.text_render import USER_BUBBLE_PADDING, USER_BUBBLE_RADIUS, render_text
 from src.ui.utils import IconHoverFilter
+from src.ui.widgets.activity_block_formatter import ActivityBlockFormatter
 from src.ui.widgets.collapsible_block_formatter import CollapsibleBlockFormatter
 
 # --- Basic Logging Setup ---
@@ -72,6 +75,7 @@ class ChatWidget(QAbstractScrollArea):
         super().__init__(parent)
         self.theme_manager = theme_manager
         self.collapsible_formatter = CollapsibleBlockFormatter(self.theme_manager)
+        self.activity_formatter = ActivityBlockFormatter(self.theme_manager)
         self.messages = []
         self.document_margin = 8
         self.chat_font = QFont(QApplication.font())
@@ -89,6 +93,12 @@ class ChatWidget(QAbstractScrollArea):
         self.click_count = 0
         self.last_click_time = 0
         self._retry_countdown_msg_idx = -1
+
+        # Live activity blocks re-render once a second so their running
+        # step's elapsed time ticks without handler-driven updates.
+        self._activity_timer = QTimer(self)
+        self._activity_timer.setInterval(1000)
+        self._activity_timer.timeout.connect(self._activity_tick)
 
         # Autoscroll functionality
         self.autoscroll_timer = QTimer(self)
@@ -253,6 +263,10 @@ class ChatWidget(QAbstractScrollArea):
                     parts = anchor.split(':', 2)
                     if len(parts) == 3:
                         self._select_suggestion(parts[1], parts[2])
+                        return
+
+                if anchor and anchor.startswith("activity:"):
+                    if self._handle_activity_anchor(anchor):
                         return
 
             # --- Standard Text Selection Logic ---
@@ -651,6 +665,7 @@ class ChatWidget(QAbstractScrollArea):
         self.is_streaming = False
         self._streaming_msg = None
         self._retry_countdown_msg_idx = -1
+        self._activity_timer.stop()
         self.selection_start = None
         self.selection_end = None
         self._update_scroll_bar()
@@ -705,6 +720,20 @@ class ChatWidget(QAbstractScrollArea):
                 'doc': doc,
             }
             doc.setHtml(self._format_suggestions(msg))
+        elif isinstance(data, dict) and data.get('type') == 'activity':
+            msg = {
+                'type': 'activity',
+                'id': f"activity-{uuid.uuid4().hex}",
+                'title': data.get('title') or 'Working',
+                'status': data.get('status') or 'running',
+                'expanded': bool(data.get('expanded', True)),
+                'started_at': data.get('started_at') or time.monotonic(),
+                'finished_at': data.get('finished_at'),
+                'rows': data.get('rows') or [],
+                'doc': doc,
+            }
+            doc.setHtml(self.activity_formatter.format_block(msg))
+            self._ensure_activity_timer()
         elif isinstance(data, str):
             html_content = data
             doc.setHtml(html_content)
@@ -764,6 +793,234 @@ class ChatWidget(QAbstractScrollArea):
         self._follow_if_at_bottom(was_at_bottom)
         return True
 
+    # --- Activity blocks (one turn's plan, thoughts, narration and steps) ---
+
+    def _has_message(self, msg) -> bool:
+        return any(m is msg for m in self.messages)
+
+    @staticmethod
+    def _activity_row(kind: str, **fields) -> dict:
+        row = {'id': f"row-{uuid.uuid4().hex}", 'kind': kind}
+        row.update(fields)
+        return row
+
+    def add_activity_block(self, title: str = "Working", expanded: bool = True):
+        """Appends a live turn block; rows are added through the methods below."""
+        was_at_bottom = self._is_at_bottom()
+        doc = self._new_document()
+        msg = {
+            'type': 'activity',
+            'id': f"activity-{uuid.uuid4().hex}",
+            'title': title or "Working",
+            'status': 'running',
+            'expanded': bool(expanded),
+            'started_at': time.monotonic(),
+            'finished_at': None,
+            'rows': [],
+            'doc': doc,
+        }
+        doc.setHtml(self.activity_formatter.format_block(msg))
+        self.messages.append(msg)
+        self._update_scroll_bar()
+        self._ensure_activity_timer()
+        self.viewport().update()
+        self._follow_if_at_bottom(was_at_bottom)
+        return msg
+
+    def activity_add_thought(self, msg, text: str, expanded: bool = False) -> bool:
+        """Model reasoning inside the turn block, collapsed to one line."""
+        if not self._has_message(msg):
+            return False
+        msg['rows'].append(self._activity_row(
+            'thought', text=str(text or ''), expanded=bool(expanded)))
+        self._render_activity(msg)
+        return True
+
+    def activity_add_note(self, msg, text: str) -> bool:
+        """One-line narration that stays visible (not collapsible)."""
+        if not self._has_message(msg):
+            return False
+        msg['rows'].append(self._activity_row('note', text=str(text or '')))
+        self._render_activity(msg)
+        return True
+
+    def activity_set_plan(self, msg, steps) -> bool:
+        """Pins the plan at the top of the block, replacing any previous one."""
+        if not self._has_message(msg):
+            return False
+        normalized = []
+        for step in steps or []:
+            if isinstance(step, dict):
+                text = str(step.get('text') or '').strip()
+                status = str(step.get('status') or 'pending')
+            else:
+                text, status = str(step or '').strip(), 'pending'
+            if not text:
+                continue
+            if status not in ('done', 'in_progress', 'pending'):
+                status = 'pending'
+            normalized.append({'text': text, 'status': status})
+        for row in msg['rows']:
+            if row.get('kind') == 'plan':
+                row['steps'] = normalized
+                self._render_activity(msg)
+                return True
+        row = self._activity_row('plan', steps=normalized, expanded=True)
+        msg['rows'].insert(0, row)
+        self._render_activity(msg)
+        return True
+
+    def activity_add_step(self, msg, title: str, args: str = "",
+                          detail_html: str | None = None):
+        """Starts a tool step row; returns the row for later updates."""
+        if not self._has_message(msg):
+            return None
+        row = self._activity_row(
+            'step', title=str(title or 'Step'), status='running',
+            args=str(args or ''), output='', detail_html=detail_html,
+            expanded=False, job_id=None, log_path=None,
+            started_at=time.monotonic(), finished_at=None)
+        msg['rows'].append(row)
+        self._render_activity(msg)
+        self._ensure_activity_timer()
+        return row
+
+    def activity_update_step(self, msg, row, status: str | None = None,
+                             title: str | None = None, args: str | None = None,
+                             output: str | None = None,
+                             detail_html: str | None = None,
+                             job_id=None, log_path=None,
+                             expanded: bool | None = None) -> bool:
+        """Updates an existing step row, keeping the rest of the block intact."""
+        if not self._has_message(msg) or not isinstance(row, dict):
+            return False
+        if status is not None:
+            status = str(status)
+            row['status'] = status
+            if status != 'running' and row.get('finished_at') is None:
+                row['finished_at'] = time.monotonic()
+        if title is not None:
+            row['title'] = str(title)
+        if args is not None:
+            row['args'] = str(args)
+        if output is not None:
+            row['output'] = str(output)
+        if detail_html is not None:
+            row['detail_html'] = detail_html
+        if job_id is not None:
+            row['job_id'] = job_id
+        if log_path is not None:
+            row['log_path'] = log_path
+        if expanded is not None:
+            row['expanded'] = bool(expanded)
+        self._render_activity(msg)
+        self._stop_activity_timer_if_idle()
+        return True
+
+    def finish_activity(self, msg, title: str | None = None,
+                        status: str = "ok") -> bool:
+        """Freezes the block header: final title, status and elapsed time."""
+        if not self._has_message(msg):
+            return False
+        msg['finished_at'] = time.monotonic()
+        msg['status'] = status
+        if title:
+            msg['title'] = title
+        # A stopped/finished task leaves no step visually running: the 1s
+        # tick must not spin forever on a row whose result never arrives.
+        # Background-job rows stay "running" (the job itself is alive) but
+        # the finalized block no longer ticks.
+        for row in msg.get('rows') or []:
+            if (row.get('kind') == 'step' and row.get('status') == 'running'
+                    and row.get('job_id') is None):
+                row['status'] = 'stopped'
+                row['finished_at'] = msg['finished_at']
+        self._render_activity(msg)
+        self._stop_activity_timer_if_idle()
+        return True
+
+    def _activity_is_live(self, msg: dict) -> bool:
+        return msg.get('finished_at') is None
+
+    def _ensure_activity_timer(self):
+        if not self._activity_timer.isActive():
+            self._activity_timer.start()
+
+    def _stop_activity_timer_if_idle(self):
+        if not any(m.get('type') == 'activity' and self._activity_is_live(m)
+                   for m in self.messages):
+            self._activity_timer.stop()
+
+    def _render_activity(self, msg):
+        """Replaces the block's document with a fresh render of its state."""
+        if not self._has_message(msg):
+            return
+        was_at_bottom = self._is_at_bottom()
+        try:
+            rendered = self.activity_formatter.format_block(msg)
+        except Exception as e:
+            logging.warning(f"Activity block render failed for {msg.get('id')}: {e}")
+            return
+        new_doc = self._new_document()
+        new_doc.setHtml(rendered)
+        msg['doc'] = new_doc
+        self._update_scroll_bar()
+        self.viewport().update()
+        self._follow_if_at_bottom(was_at_bottom)
+
+    def _activity_tick(self):
+        live = [m for m in self.messages
+                if m.get('type') == 'activity' and self._activity_is_live(m)]
+        if not live:
+            self._activity_timer.stop()
+            return
+        was_at_bottom = self._is_at_bottom()
+        for msg in live:
+            try:
+                new_doc = self._new_document()
+                new_doc.setHtml(self.activity_formatter.format_block(msg))
+                msg['doc'] = new_doc
+            except Exception as e:
+                logging.warning(
+                    f"Activity tick render failed for {msg.get('id')}: {e}")
+        self._update_scroll_bar()
+        self.viewport().update()
+        self._follow_if_at_bottom(was_at_bottom)
+
+    def _handle_activity_anchor(self, anchor: str) -> bool:
+        parts = anchor.split(':', 3)
+        if len(parts) < 3:
+            return False
+        msg_id, kind = parts[1], parts[2]
+        rest = parts[3] if len(parts) > 3 else ""
+        msg = next((m for m in self.messages if m.get('type') == 'activity'
+                    and m.get('id') == msg_id), None)
+        if msg is None:
+            return False
+        if kind == 'toggle':
+            msg['expanded'] = not bool(msg.get('expanded', True))
+            self._render_activity(msg)
+            return True
+        if kind == 'row':
+            for row in msg.get('rows') or []:
+                if row.get('id') == rest:
+                    row['expanded'] = not bool(row.get('expanded'))
+                    self._render_activity(msg)
+                    return True
+            return False
+        if kind == 'job':
+            try:
+                self.job_stop_requested.emit(int(rest))
+            except (TypeError, ValueError):
+                return False
+            return True
+        if kind == 'log':
+            path = unquote(rest)
+            if path:
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+                return True
+        return False
+
     def add_queued_message(self, raw_html: str, display_html: str):
         """Appends a user message shown as "queued" (dimmed).
 
@@ -811,6 +1068,8 @@ class ChatWidget(QAbstractScrollArea):
                 if self._streaming_msg is msg:
                     self._streaming_msg = None
                     self.is_streaming = False
+                if msg.get('type') == 'activity':
+                    self._stop_activity_timer_if_idle()
                 self._update_scroll_bar()
                 self.viewport().update()
                 return
@@ -1154,6 +1413,42 @@ class ChatWidget(QAbstractScrollArea):
         pad = USER_BUBBLE_PADDING
         return rect.adjusted(-pad, -pad, pad, pad)
 
+    def _paint_activity_card(self, painter, msg: dict, width: float,
+                             height: float):
+        """Card fill/border/accent for an activity block.
+
+        Painted here instead of in the block's HTML: Qt's rich text does not
+        carry a div background into nested block rows, which left the rows
+        sitting on the chat background.
+        """
+        bg = self.theme_manager.get_style("COLLAPSIBLE_BG")
+        border = self.theme_manager.get_style("COLLAPSIBLE_BORDER")
+        accent = self.theme_manager.get_style("COLLAPSIBLE_TITLE")
+        status = str(msg.get('status') or 'running')
+        if status == 'error':
+            accent = self.theme_manager.get_style("ERROR_COLOR")
+        elif status == 'waiting':
+            accent = self.theme_manager.get_style("WARNING_COLOR")
+        rect = QRectF(0, 0, width, height)
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        painter.setPen(Qt.PenStyle.NoPen)
+        if bg:
+            painter.setBrush(QColor(bg))
+            painter.drawRoundedRect(rect, 6, 6)
+        if accent:
+            painter.setBrush(QColor(accent))
+            painter.drawRoundedRect(
+                QRectF(rect.left() + 1, rect.top() + 4, 3,
+                       max(0.0, rect.height() - 8)), 1.5, 1.5)
+        if border:
+            pen = QPen(QColor(border))
+            pen.setWidthF(1.0)
+            painter.setPen(pen)
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.drawRoundedRect(rect.adjusted(0, 0, -1, -1), 6, 6)
+        painter.restore()
+
     def paintEvent(self, event):
         painter = QPainter(self.viewport())
         bg_color = self.theme_manager.get_style("CHAT_BACKGROUND")
@@ -1171,6 +1466,9 @@ class ChatWidget(QAbstractScrollArea):
             if message_rect.intersects(event.rect()):
                 painter.save()
                 painter.translate(x_offset, current_y)
+                if msg.get('type') == 'activity':
+                    self._paint_activity_card(
+                        painter, msg, text_width, doc_height)
                 if msg.get('role') == 'user' and bubble_color:
                     bubble_rect = self._user_bubble_rect(doc)
                     if bubble_rect is not None:

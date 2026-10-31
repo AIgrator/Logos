@@ -9,7 +9,6 @@ The loop mechanics (states, single-step plan -> execute -> observe cycle,
 pause/resume/stop, user communication) live in BaseAgentHandler; here only
 browser specifics remain: prompts, Playwright manager, result rendering.
 """
-import json
 import logging
 import platform
 import queue
@@ -455,6 +454,14 @@ class BrowserHandler(BaseAgentHandler):
             action.get("name"), action.get("arguments") or {})
         return {**action, "arguments": redacted}
 
+    def _step_title(self, action_name, action_args) -> str:
+        """Browser tools carry a human 'description' argument: use it as the
+        step title, falling back to the generic command compaction."""
+        description = " ".join(str((action_args or {}).get('description') or "").split())
+        if description:
+            return description if len(description) <= 120 else description[:119] + "…"
+        return super()._step_title(action_name, action_args)
+
     def execute_action(self, action: dict) -> str | None:
         """Shows the UI on the GUI thread; the tool itself runs on the exec
         thread. Returns None (async): slots continue the loop on completion."""
@@ -462,14 +469,6 @@ class BrowserHandler(BaseAgentHandler):
         action_args = action.get('arguments') or {}
         if not isinstance(action_args, dict):
             action_args = {}
-        display_args = self._redact_action_args(action_name, action_args)
-
-        self.ui.add_message(f"<b>Executing:</b> {action_name}")
-        self.ui.add_message({
-            'type': 'collapsible',
-            'title': "Arguments",
-            'content': json.dumps(display_args, indent=2, ensure_ascii=False),
-        })
 
         self._pending_action_name = action_name
         self._pending_action_args = action_args
@@ -502,23 +501,33 @@ class BrowserHandler(BaseAgentHandler):
         action_name = self._pending_action_name
         logging.info(f"BrowserHandler: ticket {ticket} ({action_name}) result received, continuing loop.")
         if not ok:
+            denied = str(text or "").lower().startswith("action denied")
             error_msg = f"**Tool Result:** Error: {text}"
-            self._add_result_card(
-                error_msg, f"{action_name} · error", "error")
-            self.record_tool_result(error_msg, status="error", name=action_name)
+            if self._active_step is not None:
+                self._finish_active_step(
+                    status="denied" if denied else "error",
+                    output=self._strip_result_prefix(error_msg), expanded=True)
+            else:
+                self._add_result_card(
+                    error_msg, f"{action_name} · error", "error")
+            self.record_tool_result(
+                error_msg, status="denied" if denied else "error", name=action_name)
             self._continue_loop(error_msg)
             return
         output = text or "(ok, no output)"
-        self._add_result_card(output, f"{action_name} · ok")
+        if self._active_step is not None:
+            self._finish_active_step(output=output)
+        else:
+            self._add_result_card(output, f"{action_name} · ok")
         if action_name in _UNTRUSTED_RESULT_TOOLS:
             result_text = (
                 "**Tool Result:**\n<untrusted_page_content>\n"
                 f"{output}\n</untrusted_page_content>")
-            self.record_tool_result(result_text, name=action_name)
+            self.record_tool_result(result_text, name=action_name, display=output)
             self._continue_loop(result_text)
             return
         result_text = f"**Tool Result:**\n```\n{output}\n```"
-        self.record_tool_result(result_text, name=action_name)
+        self.record_tool_result(result_text, name=action_name, display=output)
         self._continue_loop(result_text)
 
     @Slot(int, str)
@@ -529,8 +538,13 @@ class BrowserHandler(BaseAgentHandler):
         self._tool_in_flight = False
         logging.info(f"BrowserHandler: ticket {ticket} ({self._pending_action_name}) error received, continuing loop.")
         error_msg = f"**Tool Result:** Error: {error_message}"
-        self._add_result_card(
-            error_msg, f"{self._pending_action_name} · error", "error")
+        if self._active_step is not None:
+            self._finish_active_step(
+                status="error", output=self._strip_result_prefix(error_msg),
+                expanded=True)
+        else:
+            self._add_result_card(
+                error_msg, f"{self._pending_action_name} · error", "error")
         self.record_tool_result(
             error_msg, status="error", name=self._pending_action_name)
         self._continue_loop(error_msg)

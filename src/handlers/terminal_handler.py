@@ -17,7 +17,7 @@ from src.computer.terminal_policy import evaluate as evaluate_terminal_access
 from src.computer.terminal_policy import normalize_mode as normalize_access_mode
 from src.computer.tools.terminal.mcp_tools import servers_prompt_block
 
-from .base_agent import BaseAgentHandler
+from .base_agent import BaseAgentHandler, _clip_replay_value, _is_error_output
 from .tool_exec_worker import ToolExecRelay, ToolExecWorker
 
 # Background-job await: after a launch, give the job a short startup window
@@ -132,22 +132,6 @@ def _action_summary(action_name: str, action_args: dict) -> str:
     return f"Running {name.replace('_', ' ')}"
 
 
-def _details_title(action_name: str) -> str:
-    if action_name == 'execute_shell':
-        return "Command details"
-    if action_name in {'write_file', 'replace', 'replace_many'}:
-        return "File operation details"
-    if action_name == 'read_files':
-        return "Files to read"
-    if action_name == 'list_directory':
-        return "Directory details"
-    if action_name == 'search_file_content':
-        return "Search details"
-    if action_name == 'mcp_call':
-        return "MCP call details"
-    return f"Details · {action_name}"
-
-
 class WebTaskThread(QThread):
     """ Thread to handle blocking web requests."""
 
@@ -231,7 +215,6 @@ class TerminalHandler(BaseAgentHandler):
         self.html_formatter = TerminalHtmlFormatter(self.theme_manager)
         self.os_info = f"{platform.system()} {platform.release()}"
         self.web_thread = None
-        self.active_edit_path = None
 
         self._exec_thread = QThread()
         # Relay first: it must live on the GUI thread so worker results
@@ -335,119 +318,42 @@ class TerminalHandler(BaseAgentHandler):
         prefix_len = len(common_prefix)
         return [line[prefix_len:] if line.startswith(common_prefix) else line for line in lines]
 
-    def _format_diff_text(self, old_lines: list[str], new_lines: list[str], start_line: int) -> str:
-        rows = []
-        for i, line in enumerate(old_lines):
-            prefix = f"{start_line + i:>4}" if start_line != -1 else "    "
-            rows.append(f"{prefix} - {line}")
-        for i, line in enumerate(new_lines):
-            prefix = f"{start_line + i:>4}" if start_line != -1 else "    "
-            rows.append(f"{prefix} + {line}")
-        return "\n".join(rows)
-
     def _theme(self, key: str) -> str:
         return self.theme_manager.get_style(key)
 
-    def _action_summary_html(self, label: str) -> str:
-        return (
-            f'<div style="background-color: {self._theme("ACTION_SUMMARY_BG")}; '
-            f'border-left: 3px solid {self._theme("ACTION_SUMMARY_BORDER")}; '
-            'padding: 6px 9px; margin: 6px 0 2px 0;">'
-            f'<span style="color: {self._theme("ACTION_SUMMARY_COLOR")}; '
-            f'font-weight: 600;">{html.escape(label)}</span></div>'
-        )
+    def _step_title(self, action_name: str, action_args: dict) -> str:
+        return _action_summary(action_name, action_args)
 
-    def _details_block(self, action_name: str, action_args: dict) -> dict:
-        if action_name == 'execute_shell' and action_args.get('command'):
-            command = str(action_args.get('command'))
-            extras = {k: v for k, v in action_args.items() if k != 'command'}
-            html_parts = [self.html_formatter.format_code_content(command, 'command.sh')]
-            plain_parts = [f"$ {command}"]
-            if extras:
-                labels = {
-                    'cwd': 'Working directory',
-                    'timeout': 'Timeout',
-                    'run_in_background': 'Run in background',
-                }
-                meta_lines = []
-                for key, value in extras.items():
-                    label = labels.get(key, key.replace('_', ' ').title())
-                    if isinstance(value, bool):
-                        value = 'yes' if value else 'no'
-                    meta_lines.append(f"{label}: {value}")
-                meta_text = "\n".join(meta_lines)
-                html_parts.append(
-                    f'<div style="color: {self._theme("COLLAPSIBLE_META")}; '
-                    f'margin-top: 6px; white-space: pre-wrap;">'
-                    f'{html.escape(meta_text)}</div>'
-                )
-                plain_parts.append(meta_text)
-            return {
-                'type': 'collapsible',
-                'title': _details_title(action_name),
-                'content': "\n".join(html_parts),
-                'plain_content': "\n\n".join(plain_parts),
-                'content_is_html': True,
-            }
+    _BULKY_ARG_KEYS = (
+        'content', 'old_string', 'new_string', 'old_text', 'new_text',
+        'replacements',
+    )
 
-        if action_name == 'read_files':
-            paths = action_args.get('paths') or []
-            if isinstance(paths, str):
-                paths = [paths]
-            content = "\n".join(str(path) for path in paths) or "(no paths)"
-            return {'type': 'collapsible', 'title': _details_title(action_name), 'content': content}
+    def _replay_step_args(self, action_name: str, action_args: dict) -> str:
+        """Replayed arguments stay short: file bodies live in the step detail
+        (write_file) or in the result (execute_shell)."""
+        args = dict(action_args or {})
+        if action_name in {'write_file', 'replace', 'replace_many'}:
+            for key in self._BULKY_ARG_KEYS:
+                if key in args:
+                    size = len(str(args[key]))
+                    args[key] = f"<{size} chars>"
+        if action_name == 'execute_shell':
+            args.pop('command', None)
+        if not args:
+            return ""
+        return json.dumps(
+            _clip_replay_value(args), ensure_ascii=False, indent=2)
 
-        if action_name == 'list_directory':
-            path = action_args.get('path', '.')
-            recursive = action_args.get('recursive')
-            content = f"Path: {path}"
-            if recursive is not None:
-                content += f"\nRecursive: {recursive}"
-            return {'type': 'collapsible', 'title': _details_title(action_name), 'content': content}
-
-        if action_name == 'search_file_content':
-            pattern = action_args.get('pattern', '')
-            path = action_args.get('path') or action_args.get('directory') or '.'
-            content = f"Pattern: {pattern}\nPath: {path}"
-            return {'type': 'collapsible', 'title': _details_title(action_name), 'content': content}
-
-        if action_name == 'mcp_call':
-            server = action_args.get('server', '')
-            tool = action_args.get('tool', '')
-            raw = action_args.get('arguments', '')
-            try:
-                parsed = json.loads(raw) if isinstance(raw, str) and raw.strip() else raw
-            except (TypeError, ValueError):
-                parsed = raw
-            if isinstance(parsed, (dict, list)):
-                rendered = json.dumps(parsed, ensure_ascii=False, indent=2)
-            else:
-                rendered = str(parsed or '(none)')
-            content = f"Server: {server}\nTool: {tool}\nArguments:\n{rendered}"
-            return {'type': 'collapsible', 'title': _details_title(action_name), 'content': content}
-
-        return {
-            'type': 'collapsible',
-            'title': _details_title(action_name),
-            'content': json.dumps(action_args, ensure_ascii=False, indent=2),
-        }
-
-    def replay_event(self, event: dict) -> bool:
-        """Rebuild terminal action summaries/details from the session log."""
-        if event.get("type") == "tool_call":
-            name = str(event.get("name") or "action")
-            args = event.get("input") or {}
-            if not isinstance(args, dict):
-                args = {}
-            label = _action_summary(name, args)
-            self.ui.add_message(self._action_summary_html(label))
-            if args and name not in {
-                    'execute_shell', 'poll_shell_job', 'stop_shell_job',
-                    'read_files', 'list_directory', 'search_file_content',
-                    'use_skill', 'mcp_list', 'mcp_get'}:
-                self.ui.add_message(self._details_block(name, args))
-            return True
-        return super().replay_event(event)
+    def _replay_step_detail(self, action_name: str, action_args: dict):
+        """Written file bodies render as the same code box as live."""
+        if action_name == 'write_file':
+            content = action_args.get('content')
+            path = action_args.get('path') or 'file.txt'
+            if content:
+                return self.html_formatter.format_code_content(
+                    str(content), str(path))
+        return None
 
     def _access_mode(self) -> str:
         settings = getattr(self.controller, "settings", None) or {}
@@ -499,7 +405,11 @@ class TerminalHandler(BaseAgentHandler):
         label = _action_summary(action_name, action_args)
         text = (f"**Tool Result:** Denied: the user rejected '{label}'. "
                 "Do not retry this action; ask the user how to proceed or stop.")
-        self._add_result_card(text, f"{action_name} · denied", "denied")
+        if self._active_step is not None:
+            self._finish_active_step(
+                status="denied", output=self._strip_result_prefix(text), expanded=True)
+        else:
+            self._add_result_card(text, f"{action_name} · denied", "denied")
         self.record_tool_result(text, status="denied", name=action_name)
         self._continue_loop(text)
 
@@ -529,69 +439,44 @@ class TerminalHandler(BaseAgentHandler):
         is_file_op = action_name in ['write_file', 'replace', 'replace_many']
         action_label = _action_summary(action_name, action_args)
         self._pending_action_label = action_label
-
-        if self.active_edit_path and (not is_file_op or path != self.active_edit_path):
-            self.ui.add_message(self.html_formatter.format_container_end())
-            self.active_edit_path = None
+        self._update_activity_step(self._active_step, title=action_label)
 
         if is_file_op:
-            if not self.active_edit_path:
-                self.active_edit_path = path
-                self.ui.add_message(self.html_formatter.format_container_start(path))
-
+            # The step row is the file-edit container now: its expanded body
+            # carries the written content or the diff instead of a second card.
             if action_name == 'write_file':
                 content = action_args.get('content', '')
-                line_count = len(content.splitlines())
-                self.ui.add_text(f"Writing {line_count} line(s)")
-                self.ui.add_message({
-                    'type': 'collapsible',
-                    'title': f'File content · {path}',
-                    'content': self.html_formatter.format_code_content(content or '', str(path or '')),
-                    'plain_content': content or '(empty)',
-                    'content_is_html': True,
-                })
-
+                detail = self.html_formatter.format_code_content(
+                    content or '', str(path or ''))
+                self._update_activity_step(self._active_step, detail_html=detail)
             elif action_name in ['replace', 'replace_many']:
-                replacements = [action_args] if action_name == 'replace' else action_args.get('replacements', [])
+                replacements = ([action_args] if action_name == 'replace'
+                                else action_args.get('replacements', []))
                 try:
                     with open(path, encoding='utf-8') as f:
                         full_content = f.read()
                 except Exception:
                     full_content = ""
 
-                diff_chunks = []
                 diff_html_chunks = []
                 for replacement in replacements:
                     old_string = replacement.get('old_string', '')
                     new_string = replacement.get('new_string', '')
                     old_lines, new_lines = old_string.split('\n'), new_string.split('\n')
                     dedented_all = self._dedent_lines(old_lines + new_lines)
-                    dedented_old, dedented_new = dedented_all[:len(old_lines)], dedented_all[len(old_lines):]
+                    dedented_old = dedented_all[:len(old_lines)]
+                    dedented_new = dedented_all[len(old_lines):]
                     index = full_content.find(old_string)
                     start_line = full_content.count('\n', 0, index) + 1 if index != -1 else -1
-                    diff_chunks.append(self._format_diff_text(dedented_old, dedented_new, start_line))
-                    diff_html_chunks.append(self.html_formatter.format_diff_content(dedented_old, dedented_new, start_line))
+                    diff_html_chunks.append(self.html_formatter.format_diff_content(
+                        dedented_old, dedented_new, start_line))
 
-                if diff_chunks:
-                    self.ui.add_text(f"Changed {len(diff_chunks)} replacement(s)")
-                    self.ui.add_message({
-                        'type': 'collapsible',
-                        'title': f'Diff · {action_name} · {path}',
-                        'content': "\n".join(diff_html_chunks),
-                        'plain_content': "\n\n".join(diff_chunks),
-                        'content_is_html': True,
-                    })
-        else:
-            self.ui.add_message(self._action_summary_html(action_label))
-            # Shell commands and self-describing file results get one combined
-            # block when their result arrives. A separate pre-execution details
-            # block only duplicated the command/path/pattern.
-            if action_args and action_name not in {
-                    'execute_shell', 'poll_shell_job', 'stop_shell_job',
-                    'read_files', 'list_directory', 'search_file_content',
-                    'use_skill', 'mcp_list', 'mcp_get'}:
-                self.ui.add_message(self._details_block(action_name, action_args))
-        # ---------------------------------------------
+                if diff_html_chunks:
+                    note = (f'<div style="margin-bottom: 4px;">Changed '
+                            f'{len(diff_html_chunks)} replacement(s)</div>')
+                    self._update_activity_step(
+                        self._active_step,
+                        detail_html=note + "".join(diff_html_chunks))
 
         self._ensure_exec_thread()
         self._pending_action_name = action_name
@@ -642,8 +527,13 @@ class TerminalHandler(BaseAgentHandler):
         self._tool_in_flight = False
         self._stop_thinking_timer()
         error_msg_for_llm = f"**Error:** Local fallback for {action_name} also failed: {error_message}"
-        self._add_result_card(
-            error_msg_for_llm, f"{action_name} · error", "error")
+        if self._active_step is not None:
+            self._finish_active_step(
+                status="error", output=self._strip_result_prefix(error_msg_for_llm),
+                expanded=True)
+        else:
+            self._add_result_card(
+                error_msg_for_llm, f"{action_name} · error", "error")
         self.record_tool_result(error_msg_for_llm, status="error", name=action_name)
         self._continue_loop(error_msg_for_llm)
         self.web_thread = None
@@ -661,13 +551,17 @@ class TerminalHandler(BaseAgentHandler):
             elif len(urls) > 1:
                 title = f"Content from {len(urls)} URLs"
 
-        # Use the new collapsible block for the UI
-        output_for_ui = {
-            'type': 'collapsible',
-            'title': title,
-            'content': response_text
-        }
-        self.ui.add_message(output_for_ui)
+        # The step row carries the fetched content in its expanded body; a
+        # separate "Web Content" card only repeated what the step already says.
+        if self._active_step is not None:
+            self._finish_active_step(
+                title=title, output=response_text, expanded=False)
+        else:
+            self.ui.add_message({
+                'type': 'collapsible',
+                'title': title,
+                'content': response_text
+            })
 
         if hasattr(self.controller.llm_worker, 'log_tool_response'):
             self.controller.llm_worker.log_tool_response(action_name, response_text)
@@ -1256,15 +1150,20 @@ class TerminalHandler(BaseAgentHandler):
         output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
             self._pending_action_name, result, self._pending_action_args
         )
-        self.record_tool_result(output_for_llm, name=self._pending_action_name)
         job_id = _running_job_id(result)
-        if output_for_ui:
-            if (isinstance(result, dict) and result.get('status') == 'done'
-                    and result.get('job_id') is not None):
-                self._show_job_result(result.get('job_id'), output_for_ui)
-            else:
-                self.ui.add_message(output_for_ui)
+        title, _detail, plain, log_path = self._ui_result_fields(output_for_ui)
+        self.record_tool_result(
+            output_for_llm, name=self._pending_action_name,
+            display=plain or '', display_title=title or '',
+            job_id=(job_id if self._pending_action_name == 'execute_shell'
+                    else None),
+            log_path=log_path or '')
+        self._show_activity_result(output_for_llm, output_for_ui, launch_job_id=job_id)
         if job_id is not None and self._pending_action_name == 'execute_shell':
+            if self._active_step is not None and self._activity_msg is not None:
+                self._job_steps[int(job_id)] = (self._activity_msg, self._active_step)
+                if len(self._job_steps) > 200:
+                    self._job_steps.pop(next(iter(self._job_steps)))
             # Background launch: do NOT ask the model immediately (it acts
             # NOW — e.g. relaunches). Record the launch, wait handler-side.
             # A readiness probe already spent the startup window, so its
@@ -1279,6 +1178,76 @@ class TerminalHandler(BaseAgentHandler):
             return
         self._continue_loop(output_for_llm)
 
+    @staticmethod
+    def _ui_result_fields(output_for_ui):
+        """Step-row fields of a formatted UI result.
+
+        Returns (title, detail_html, plain_text, log_path). plain_text is what
+        the journal keeps for replay: it is human-facing and never contains
+        the model-facing wrapper markers.
+        """
+        if not isinstance(output_for_ui, dict):
+            return None, None, None, None
+        title = output_for_ui.get('title') or None
+        detail_html = None
+        if output_for_ui.get('content_is_html'):
+            detail_html = output_for_ui.get('content')
+        plain = output_for_ui.get('plain_content')
+        if plain is None and detail_html is None:
+            content = output_for_ui.get('content')
+            plain = None if content is None else str(content)
+        return title, detail_html, plain, output_for_ui.get('open_log_path')
+
+    def _show_activity_result(self, output_for_llm, output_for_ui, launch_job_id=None):
+        """Folds a finished tool result into the active step row."""
+        step = self._active_step
+        if step is None:
+            if output_for_ui:
+                self.ui.add_message(output_for_ui)
+            return
+        title, detail_html, _plain, log_path = self._ui_result_fields(output_for_ui)
+        failed = _is_error_output(output_for_llm)
+        # Only a launching execute_shell keeps its step live until the job
+        # ends (stop link + elapsed); polls and foreground steps finish now.
+        running_job = launch_job_id is not None and not failed
+        status = 'running' if running_job else ('error' if failed else 'ok')
+        output_text = None
+        if detail_html is None:
+            output_text = self._strip_result_prefix(output_for_llm)
+        self._update_activity_step(
+            step, status=status, output=output_text, detail_html=detail_html,
+            title=title, job_id=launch_job_id, log_path=log_path,
+            expanded=True if failed else None)
+
+    @staticmethod
+    def _job_outcome(final: dict, stopped: bool = False) -> str:
+        if stopped or final.get('cancelled'):
+            return 'stopped'
+        if final.get('timed_out') or final.get('exit_code') not in (0, None):
+            return 'error'
+        return 'ok'
+
+    def _apply_job_ui(self, job_id, output_for_ui, status: str = "ok"):
+        """Updates the job's launch step; falls back to a result card when
+        the step is unknown (e.g. a job launched before a restart)."""
+        try:
+            entry = self._job_steps.get(int(job_id))
+        except (TypeError, ValueError):
+            entry = None
+        if entry is None:
+            self._show_job_result(job_id, output_for_ui)
+            return
+        msg, row = entry
+        title, detail_html, _plain, log_path = self._ui_result_fields(output_for_ui)
+        try:
+            self.ui.activity_update_step(
+                msg, row, status=status, title=title,
+                detail_html=detail_html, log_path=log_path,
+                expanded=True if status == 'error' else None)
+        except Exception as e:
+            logging.warning(f"Job step update failed for #{job_id}: {e}")
+            self._show_job_result(job_id, output_for_ui)
+
     @Slot(int, str)
     def _on_tool_error(self, ticket: int, error_message: str):
         if ticket != self._exec_ticket:
@@ -1291,8 +1260,13 @@ class TerminalHandler(BaseAgentHandler):
             pass
         logging.info(f"TerminalHandler: ticket {ticket} ({self._pending_action_name}) error received, continuing loop.")
         error_msg = f"**Error:** {error_message}"
-        self._add_result_card(
-            error_msg, f"{self._pending_action_name} · error", "error")
+        if self._active_step is not None:
+            self._finish_active_step(
+                status="error", output=self._strip_result_prefix(error_msg),
+                expanded=True)
+        else:
+            self._add_result_card(
+                error_msg, f"{self._pending_action_name} · error", "error")
         self.record_tool_result(
             error_msg, status="error", name=self._pending_action_name)
         self._continue_loop(error_msg)
@@ -1320,6 +1294,12 @@ class TerminalHandler(BaseAgentHandler):
         try:
             job_id = int(event.get('job_id'))
         except (TypeError, ValueError):
+            return
+        if job_id not in self._job_steps and job_id not in self._job_commands:
+            # Foreground execute_shell calls also run as ShellJobManager jobs.
+            # Their result already folds into the step row in _on_tool_finished;
+            # treating this event as a background job would add a duplicate
+            # "Background job #N" card and a stale history note.
             return
 
         res = dict(event.get('result') or {})
@@ -1353,18 +1333,16 @@ class TerminalHandler(BaseAgentHandler):
                 f"**Tool Result:** Background job #{job_id} finished "
                 f"(exit {final['exit_code']}).")
 
+        job_status = self._job_outcome(
+            final, stopped=(event.get("type") == "stopped"))
+
         if output_for_ui:
-            self._show_job_result(job_id, output_for_ui)
+            self._apply_job_ui(job_id, output_for_ui, job_status)
 
         if job_id in self._handled_job_ids:
             return
         self._mark_job_handled(job_id)
-        if final.get("cancelled") or event.get("type") == "stopped":
-            job_status = "stopped"
-        elif final.get("timed_out") or final.get("exit_code") not in (0, None):
-            job_status = "error"
-        else:
-            job_status = "ok"
+        title, _detail, plain, log_path = self._ui_result_fields(output_for_ui)
         self._append_session_event(
             "job_result",
             turn_id=getattr(self.controller, "session_turn_id", ""),
@@ -1373,6 +1351,9 @@ class TerminalHandler(BaseAgentHandler):
             status=job_status,
             exit_code=final.get("exit_code"),
             output={"text": str(output_for_llm or "")},
+            display=plain or "",
+            display_title=title or "",
+            log_path=log_path or "",
         )
 
         if (self._awaiting_job_id == job_id
@@ -1439,7 +1420,8 @@ class TerminalHandler(BaseAgentHandler):
                 "poll_shell_job", final, {"job_id": job_id_arg}
             )
             if output_for_ui:
-                self._show_job_result(job_id_arg, output_for_ui)
+                self._apply_job_ui(
+                    job_id_arg, output_for_ui, self._job_outcome(final))
             self._continue_loop(output_for_llm, from_job_wait=True)
             return
         self._job_wait_rounds += 1
@@ -1452,11 +1434,11 @@ class TerminalHandler(BaseAgentHandler):
             except Exception as e:
                 logging.warning(f"Job poll failed: {e}")
                 return
-            output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
+            output_for_llm, _ = self._format_result_for_llm_and_ui(
                 "poll_shell_job", current, {"job_id": job_id}
             )
-            if output_for_ui:
-                self.ui.add_message(output_for_ui)
+            # The launch step already shows the job and its Stop link; a
+            # second snapshot block would just repeat it in chat.
             self._continue_loop(output_for_llm, from_job_wait=True)
             return
         try:
@@ -1484,9 +1466,6 @@ class TerminalHandler(BaseAgentHandler):
             if not self._exec_thread.wait(2000):
                 logging.warning("Terminal exec thread did not stop in 2000ms.")
                 self._exec_thread_restart_pending = True
-        if self.active_edit_path:
-            self.ui.add_message(self.html_formatter.format_container_end())
-            self.active_edit_path = None
 
         if self.web_thread and self.web_thread.isRunning():
             self.web_thread.cancel()

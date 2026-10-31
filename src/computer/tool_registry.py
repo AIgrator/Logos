@@ -33,7 +33,8 @@ if project_root not in sys.path:
 # Bump when the shape of the generated response-format files changes so that
 # stale caches (which are otherwise only invalidated by manifest changes) are
 # rebuilt. v2: added `strict_schema`. v3: added `strict_schema_flat` (browser).
-SCHEMA_GEN_VERSION = 3
+# v4: payload.commentary narration + update_plan.
+SCHEMA_GEN_VERSION = 4
 
 
 class ToolRegistry:

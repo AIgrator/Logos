@@ -22,6 +22,7 @@ from src.computer.tools.common.communicate_to_user import communicate_to_user
 from src.computer.tools.common.display_message import display_message
 from src.computer.tools.common.finish import finish
 from src.computer.tools.common.get_clipboard_content import get_clipboard_content
+from src.computer.tools.common.update_plan import update_plan
 from src.computer.tools.common.use_skill import use_skill
 
 TOOLS_METADATA = {
@@ -48,6 +49,7 @@ TOOLS_METADATA = {
     "display_message": display_message,
     "finish": finish,
     "get_clipboard_content": get_clipboard_content,
+    "update_plan": update_plan,
     "use_skill": use_skill,
     "mcp_list": mcp_list,
     "mcp_get": mcp_get,
