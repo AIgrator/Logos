@@ -8,6 +8,15 @@ Notes for AI coding agents working in this repository.
 - Lint: `uv run ruff check <paths>` (config in `pyproject.toml`, line-length 500).
 - Entry point: `main.py`. There is no automated test suite (no pytest); changes are verified manually.
 
+## Packaging
+
+Both builders are ephemeral tools, never dependencies: do not add PyInstaller or Inno Setup to `pyproject.toml` / `requirements.txt`.
+
+- One-file executable: `uv run --with pyinstaller pyinstaller logos.spec --noconfirm --clean` -> `dist/Logos.exe` (about 6 minutes, ~204 MB).
+- Installer: `"$LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe" installer/logos.iss` -> `dist/LogosSetup.exe`. Per-user only (`PrivilegesRequired=lowest`, default `%LOCALAPPDATA%\Programs\Logos`), user picks the folder, Start Menu shortcut, optional desktop icon, HKCU uninstall entry for Settings > Installed apps, and the uninstaller deletes the whole data folder below.
+
+`build/` and `dist/` are packaging artifacts and git-ignored. A frozen build keeps settings, logs, cache and the materialized `prompts/` + `assets/` in `%LOCALAPPDATA%\Logos` (see `src/app_paths.py`), because the one-file unpack folder is temporary and the install folder may be read-only. Compilation success alone is not proof: launch the built exe and, for installer changes, run install -> launch -> uninstall.
+
 ## Dependency manifests — keep in sync (DO NOT FORGET)
 
 There are two dependency manifests, and they are **manually kept in sync**:

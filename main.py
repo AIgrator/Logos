@@ -11,7 +11,7 @@ _BUNDLED_DIRS = ("assets", "prompts")
 
 
 def _materialize_bundle_resources(bundle_dir, app_dir):
-    """Copies read-only resources out of a one-file bundle next to the exe.
+    """Copies read-only resources out of a one-file bundle into the data folder.
 
     The bundle unpacks to a temp folder that is deleted on exit, while prompts
     and icons are resolved relative to the working directory. The executable's
@@ -41,12 +41,19 @@ def _materialize_bundle_resources(bundle_dir, app_dir):
 def main():
     """Main function to run the application."""
     # Set the current working directory: the script's directory from source, or
-    # the executable's folder for a one-file build, whose unpack folder is
-    # temporary. All relative resource and data paths resolve from there.
+    # the writable per-user data folder for a one-file build (its install
+    # folder may be read-only and its unpack folder is temporary). All relative
+    # resource and data paths resolve from there.
     script_dir = os.path.dirname(os.path.abspath(__file__))
     if getattr(sys, "frozen", False):
-        app_dir = os.path.dirname(sys.executable)
-        os.chdir(app_dir)
+        from app_paths import data_root
+        app_dir = data_root()
+        try:
+            os.makedirs(app_dir, exist_ok=True)
+            os.chdir(app_dir)
+        except OSError:
+            app_dir = os.path.dirname(sys.executable)
+            os.chdir(app_dir)
         _materialize_bundle_resources(script_dir, app_dir)
     else:
         os.chdir(script_dir)

@@ -2,10 +2,11 @@
 #
 # Notes:
 # - One-file: a single dist/Logos.exe. It unpacks to a temp folder per launch
-#   (sys._MEIPASS). On first launch main.py copies prompts/ and assets/ next
-#   to the EXE (refreshed when the EXE changes), and settings.json, logs,
-#   cache and screenshots live there too (see SettingsManager and
-#   ModelConfigManager frozen branches), so the temp folder can vanish.
+#   (sys._MEIPASS). On first launch main.py copies prompts/ and assets/ into
+#   the per-user data folder (%LOCALAPPDATA%\Logos), refreshed when the EXE
+#   changes; settings.json, logs, cache and screenshots live there too (see
+#   app_paths and the SettingsManager/ModelConfigManager frozen branches), so
+#   the temp folder and a read-only install folder can vanish.
 # - Splash: assets/ico.png placeholder until the animated GIF lands. Only
 #   one-file mode supports the bootloader splash.
 # - Browsers (Playwright Chromium, ~170MB) are NOT bundled: on first

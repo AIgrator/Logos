@@ -14,6 +14,7 @@ from PySide6.QtCore import QObject, Signal as pyqtSignal
 # This import will trigger the dynamic discovery in src/llm/__init__.py
 from llm import PROVIDERS, PROVIDER_METADATA
 from context.secrets import hydrate_mcp_servers, sanitize_mcp_servers
+from app_paths import data_root
 
 logger = logging.getLogger(__name__)
 
@@ -240,9 +241,10 @@ class SettingsManager(QObject):
     def __init__(self, settings_file='settings.json'):
         super().__init__()
         if getattr(sys, 'frozen', False) and not os.path.isabs(settings_file):
-            # A one-file build runs from a temp extraction folder; settings must
-            # survive it, so they live next to the executable.
-            settings_file = os.path.join(os.path.dirname(sys.executable), settings_file)
+            # A one-file build runs from a temp extraction folder and may be
+            # installed in a read-only location; settings live in the per-user
+            # data folder (see app_paths.data_root).
+            settings_file = os.path.join(data_root(), settings_file)
         self.SETTINGS_FILE = settings_file
         self._settings = self._load_settings()
         self._initialize_app_paths()
@@ -338,14 +340,11 @@ class SettingsManager(QObject):
         Defines core application paths and stores them in the settings object.
         These are runtime paths and are not saved to settings.json.
         """
-        # From a source checkout the project root is the parent of 'src'. A
-        # one-file build runs with its writable root next to the executable,
-        # where main.py also copies the bundled prompts and assets, so relative
-        # resource paths and the generated cache share one root like in source.
-        if getattr(sys, 'frozen', False):
-            project_root = os.path.dirname(sys.executable)
-        else:
-            project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..'))
+        # From a source checkout the project root is the repository root; a
+        # one-file build uses its per-user data folder, where main.py also
+        # copies the bundled prompts and assets, so relative resource paths and
+        # the generated cache share one root like in source.
+        project_root = data_root()
         self._settings['APP_PROJECT_ROOT'] = project_root
 
         # Define other paths based on the project root

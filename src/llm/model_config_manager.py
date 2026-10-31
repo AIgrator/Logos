@@ -9,6 +9,7 @@ import copy
 from settings_manager import SettingsManager
 from llm.mode_capabilities import ModeCapabilities
 from context.tokens import ModelMetadata
+from app_paths import data_root
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +27,9 @@ class ModelConfigManager:
     MODELS_URL = "https://aigrator.github.io/LLM-models/models.json"
     # The old URL, kept for reference or local testing.
     # MODELS_URL = f"file://{os.path.abspath('models.json')}"
-    # A one-file build unpacks to a temp folder, so its cache lives next to the
-    # executable; from source it stays in the project's cache folder.
-    CACHE_PATH = (os.path.join(os.path.dirname(sys.executable), 'cache', 'models.json')
-                  if getattr(sys, 'frozen', False) else os.path.abspath('cache/models.json'))
+    # The models cache belongs to the writable data root (see app_paths), not
+    # to the temporary one-file bundle or a possibly read-only install folder.
+    CACHE_PATH = os.path.join(data_root(), 'cache', 'models.json')
 
     # Fallback model lists used when the remote cache is missing, incomplete,
     # or over-filtered (e.g. only 1 junk model). Keeps UI dropdowns usable.

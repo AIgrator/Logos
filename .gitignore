@@ -7,6 +7,10 @@ __pycache__/
 # Linter caches (rewritten on every ruff run — must not trigger reindex)
 .ruff_cache/
 
+# Packaging artifacts (PyInstaller work dir, Logos.exe, LogosSetup.exe)
+build/
+dist/
+
 # Virtual Environments
 .venv/
 venv/
