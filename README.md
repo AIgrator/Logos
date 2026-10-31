@@ -46,11 +46,13 @@ When you launch the application for the first time, if the `settings.json` file 
 **Step 1: Configure AI Provider**
 In this step, you will select your preferred AI provider from a list and paste the API key you obtained earlier.
 
-**Step 2: Final Setup**
+**Step 2: Final Setup (source checkouts only)**
 In the final step, you can choose additional integration options, such as:
 * 1. Creating a global `logos` command.
 * 2. Creating a desktop shortcut. 
 * 3. Adding an item to the context menu to open a folder in the application's context, which is convenient for terminal mode.
+
+The Windows installer offers the same integrations as tasks (checked by default), so an installed build goes straight from the provider step to the application.
 
 ## Launching the Application
 
@@ -68,7 +70,7 @@ logos
 
 The program accepts a folder path as an argument and opens that folder as the active project. The project root is the working directory for **Terminal** and **Browser** modes, the root for `@`-file search and indexing, and the place where project data is stored in `.logos/`.
 
-If you have integrated the application with the Windows context menu (an option available during the first setup), you can right-click any folder and select "Open with Logos" to launch the assistant in that directory.
+If you have integrated the application with the Windows context menu (an option during installation or in the first setup of a source checkout), you can right-click any folder and select "Open with Logos" to launch the assistant in that directory.
 
 **Linux/macOS:**
 ```bash

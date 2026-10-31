@@ -13,7 +13,7 @@ Notes for AI coding agents working in this repository.
 Both builders are ephemeral tools, never dependencies: do not add PyInstaller or Inno Setup to `pyproject.toml` / `requirements.txt`.
 
 - One-file executable: `uv run --with pyinstaller pyinstaller logos.spec --noconfirm --clean` -> `dist/Logos.exe` (about 6 minutes, ~204 MB).
-- Installer: `"$LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe" installer/logos.iss` -> `dist/LogosSetup.exe`. Per-user only (`PrivilegesRequired=lowest`, default `%LOCALAPPDATA%\Programs\Logos`), user picks the folder, Start Menu shortcut, optional desktop icon, HKCU uninstall entry for Settings > Installed apps, and the uninstaller deletes the whole data folder below.
+- Installer: `"$LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe" installer/logos.iss` -> `dist/LogosSetup.exe`. Per-user only (`PrivilegesRequired=lowest`, default `%LOCALAPPDATA%\Programs\Logos`), user picks the folder, Start Menu shortcut, HKCU uninstall entry for Settings > Installed apps, and the uninstaller deletes the whole data folder below. Its optional Tasks (all checked by default) carry the Windows integration the source setup script does: `logos.cmd` in `{app}` plus an append to the user PATH (`ChangesEnvironment`, removed on uninstall), the HKCU `Directory\shell\Logos` "Open with Logos" folder menu, and the desktop shortcut. Because the installer owns these, a frozen build skips step 2 of `src/initial_setup.py`; source setups keep it because `setup_windows.ps1` reads `setup_choices.json`.
 
 `build/` and `dist/` are packaging artifacts and git-ignored. A frozen build keeps settings, logs, cache and the materialized `prompts/` + `assets/` in `%LOCALAPPDATA%\Logos` (see `src/app_paths.py`), because the one-file unpack folder is temporary and the install folder may be read-only. Compilation success alone is not proof: launch the built exe and, for installer changes, run install -> launch -> uninstall.
 
@@ -38,7 +38,10 @@ etc. as dependencies.
 
 The app runs inside a selected project directory. Startup resolves the remembered
 `active_project` from `settings.json`; if it is missing or gone, the UI opens the
-full-screen `HomePage` (`src/ui/navigation.py`) instead of a modal picker. In the
+full-screen `HomePage` (`src/ui/navigation.py`) instead of a modal picker. The
+installation folder and the application data folder are never projects: an empty
+or app-owned remembered path is treated as missing, so a fresh install starts on
+the home screen. In the
 workspace, projects and sessions are reached through the collapsible left sidebar;
 its footer keeps only Home, New session and Settings. The session context menu
 (shared by the sidebar and the home screen) carries Rename, Show journal, Show in

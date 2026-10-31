@@ -27,6 +27,12 @@ class InitialSetupWizard(QDialog):
         self.setModal(True)
         self.setMinimumWidth(500)
 
+        # An installed build gets the global command, desktop shortcut and
+        # context menu from the Windows installer's tasks, so only the provider
+        # step remains. Source setups keep the second page because
+        # setup_windows.ps1 / setup_ubuntu.sh read setup_choices.json after it.
+        self._includes_final_options = not getattr(sys, "frozen", False)
+
         # --- Pre-UI Setup: Load latest models into cache ---
         # This is done synchronously before the UI is built to ensure the
         # LLMProviderWidget is populated with the most up-to-date model list.
@@ -62,7 +68,8 @@ class InitialSetupWizard(QDialog):
         # --- End Button Creation ---
 
         self.create_llm_page()
-        self.create_final_choices_page()
+        if self._includes_final_options:
+            self.create_final_choices_page()
 
         self.layout.addWidget(self.stacked_widget)
 
@@ -77,7 +84,9 @@ class InitialSetupWizard(QDialog):
     def create_llm_page(self):
         page = QWidget()
         layout = QVBoxLayout(page)
-        label = QLabel("<h3>Step 1 of 2: Configure AI Provider</h3>"
+        heading = ("Step 1 of 2: Configure AI Provider" if self._includes_final_options
+                   else "Configure AI Provider")
+        label = QLabel(f"<h3>{heading}</h3>"
                        "Welcome! Please select your preferred AI provider and enter your API key to begin.")
         label.setWordWrap(True)
         layout.addWidget(label)
@@ -148,11 +157,15 @@ class InitialSetupWizard(QDialog):
 
     def go_to_next_page(self):
         current_index = self.stacked_widget.currentIndex()
+        last_index = self.stacked_widget.count() - 1
 
-        if current_index == 0: # After LLM page, go to Final Choices
+        if current_index < last_index:
             self.stacked_widget.setCurrentIndex(current_index + 1)
-        elif current_index == 1: # After Final Choices page, finish setup
-            self._save_setup_choices()
+        else:
+            # setup_choices.json exists only for source setups; an installed
+            # build gets its integrations from the Windows installer.
+            if self._includes_final_options:
+                self._save_setup_choices()
             self.accept() # Close the wizard successfully
 
         self.update_button_states()

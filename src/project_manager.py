@@ -15,6 +15,7 @@ import time
 import uuid
 from datetime import UTC, datetime
 
+from app_paths import data_root
 from context.secrets import redact_value
 
 
@@ -34,8 +35,13 @@ def _now_iso() -> str:
 
 
 def _clean_path(path) -> str:
+    # abspath("") is the process working directory, and a frozen build runs
+    # inside its own data folder, so an absent path must stay absent.
+    text = str(path or "").strip()
+    if not text:
+        return ""
     try:
-        return os.path.abspath(os.path.expanduser(str(path)))
+        return os.path.abspath(os.path.expanduser(text))
     except Exception:
         return ""
 
@@ -180,8 +186,10 @@ class ProjectManager:
 
     @staticmethod
     def is_app_dir(path: str) -> bool:
-        """The Logos installation folder is an application, never a project."""
-        return bool(path) and _same_path(path, APP_DIR)
+        """The Logos installation and data folders are application-owned."""
+        if not path:
+            return False
+        return _same_path(path, APP_DIR) or _same_path(path, data_root())
 
     def get_active_name(self) -> str:
         return self.project_display_name(self._active_root)
@@ -244,7 +252,7 @@ class ProjectManager:
         if not root or not os.path.isdir(root):
             raise ValueError(f"Not a directory: {path}")
         if self.is_app_dir(root):
-            raise ValueError("The Logos installation folder cannot be used as a project. "
+            raise ValueError("The Logos installation or data folder cannot be used as a project. "
                              "Choose another folder.")
 
         logos_dir = self.project_dir(root)
