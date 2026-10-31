@@ -1143,10 +1143,6 @@ class BaseAgentHandler:
         except Exception as e:
             logging.warning(f"{type(self).__name__} replay block failed: {e}")
             msg = None
-        if msg is not None:
-            # A replayed turn has no meaningful live duration; without this
-            # the header would measure the replay itself.
-            msg["started_at"] = None
         self._replay_msg = msg
         return msg
 
@@ -1300,15 +1296,12 @@ class BaseAgentHandler:
         self._replay_jobs = {}
         if msg is None:
             return
-        rows = msg.get("rows") or []
-        failed = any(
-            row.get("kind") == "step" and row.get("status") in ("error", "denied")
-            for row in rows)
+        # A failed step is not a failed turn: the model often retries and
+        # succeeds, so the header never derives the turn outcome from steps.
         finish = getattr(self.ui, "finish_activity", None)
         if callable(finish):
             try:
-                finish(msg, title="Done with errors" if failed else "Done",
-                       status="error" if failed else "ok")
+                finish(msg, title="Done", status="ok")
             except Exception as e:
                 logging.warning(f"{type(self).__name__} replay close failed: {e}")
 

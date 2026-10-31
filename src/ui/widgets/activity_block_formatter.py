@@ -125,20 +125,11 @@ class ActivityBlockFormatter:
         expanded = bool(msg.get("expanded", True))
         caret = "&#9662;" if expanded else "&#9656;"
         title = html.escape(str(msg.get("title") or "Working"))
-        elapsed = self._elapsed(msg, now)
-        elapsed_html = (
-            f'&nbsp;<span style="color: {meta}; font-weight: normal;">'
-            f"&middot; {elapsed}</span>" if elapsed else "")
-        # A live, expanded block moves its elapsed time to a footer: the
-        # header scrolls away in a long turn, while the footer sits at the
-        # live edge the chat follows. Collapsed blocks and finished turns
-        # keep the time in the header.
-        use_footer = msg.get("finished_at") is None and expanded
         header = (
             f'<div style="font-weight: bold;">'
             f'<a href="activity:{msg.get("id")}:toggle" '
             f'style="text-decoration: none; color: {title_color};">'
-            f"{caret}&nbsp;{title}{'' if use_footer else elapsed_html}</a></div>")
+            f"{caret}&nbsp;{title}</a></div>")
 
         body = ""
         if expanded:
@@ -150,13 +141,8 @@ class ActivityBlockFormatter:
                 # step detail used to be clipped by the card edge. The
                 # spacer restores the missing strip plus bottom padding.
                 body += '<div style="font-size: 12px; margin: 0;">&nbsp;</div>'
-        footer = ""
-        if use_footer:
-            footer = (
-                f'<div style="margin-top: 8px; color: {meta}; font-size: 92%;">'
-                f"{title}{elapsed_html}</div>")
 
-        # The card's fill, border and accent are painted by ChatWidget:
+        # The card's fill and border are painted by ChatWidget:
         # Qt's rich text does not propagate a div background into nested
         # block rows, which left striped gaps under anchors. Outer spacing
         # must be margins: Qt ignores CSS padding on blocks.
@@ -164,24 +150,8 @@ class ActivityBlockFormatter:
         <div style="margin: 10px 12px 10px 15px;">
             {header}
             {body}
-            {footer}
         </div>
         """
-
-
-    def _elapsed(self, msg: dict, now: float) -> str:
-        started = msg.get("started_at")
-        if started is None:
-            return ""
-        finished = msg.get("finished_at")
-        end = finished if finished is not None else now
-        try:
-            seconds = end - float(started)
-        except (TypeError, ValueError):
-            return ""
-        if seconds < 1 and finished is not None:
-            return ""
-        return format_duration(seconds)
 
     def _format_body(self, msg: dict, rows: list, meta: str, now: float) -> str:
         """Rows in order, with each run of consecutive tool steps folded.

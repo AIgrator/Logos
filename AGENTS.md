@@ -150,8 +150,8 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   Journals written before those fields existed still group with
   the old grammar (step title from the action, output stripped of its
   `**Tool Result:**` markers). Vision and Chat keep the per-event card grammar
-  (`AppController._replay_tool_event`). Replayed blocks and steps carry no
-  elapsed time, so a restored transcript does not show "0s" on every row.
+  (`AppController._replay_tool_event`). Replayed steps carry no elapsed time,
+  so a restored transcript does not show "0s" on every row.
   An activity block is one turn card whose rows are rendered by
   `src/ui/widgets/activity_block_formatter.py`. Consecutive steps of the same
   category collapse into one run row: read-only exploration (`read_files`,
@@ -164,7 +164,13 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   running and when one failed or was denied, and fold to
   `Ran N tools · <tool breakdown>` once finished clean; the row toggles via an
   `activity:<message id>:run:<first step id>` anchor, with the override kept
-  in `msg['run_state']`. The plan lives outside the transcript: a live turn
+  in `msg['run_state']`. The block header is only the caret and the title
+  (`Working` while live, then the outcome): there is no overall turn timer and
+  no status-colored card edge, and the outcome never derives from step results:
+  replay closes every block as `Done`, because a failed step is not a failed
+  turn (the model often retries and succeeds); the red ✗ and expanded output
+  stay on the step row alone.
+  The plan lives outside the transcript: a live turn
   shows a compact `Step N / M` pill above the composer
   (`src/ui/widgets/plan_panel.py::PlanPanel`, mounted first in
   `UIManager.bottom_center_column`), hovering it opens a themed checklist

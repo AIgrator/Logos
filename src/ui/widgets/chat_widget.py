@@ -737,7 +737,6 @@ class ChatWidget(QAbstractScrollArea):
                 'title': data.get('title') or 'Working',
                 'status': data.get('status') or 'running',
                 'expanded': bool(data.get('expanded', True)),
-                'started_at': data.get('started_at') or time.monotonic(),
                 'finished_at': data.get('finished_at'),
                 'rows': data.get('rows') or [],
                 'doc': doc,
@@ -824,7 +823,6 @@ class ChatWidget(QAbstractScrollArea):
             'title': title or "Working",
             'status': 'running',
             'expanded': bool(expanded),
-            'started_at': time.monotonic(),
             'finished_at': None,
             'rows': [],
             'doc': doc,
@@ -904,7 +902,7 @@ class ChatWidget(QAbstractScrollArea):
 
     def finish_activity(self, msg, title: str | None = None,
                         status: str = "ok") -> bool:
-        """Freezes the block header: final title, status and elapsed time."""
+        """Freezes the block header: final title and status."""
         if not self._has_message(msg):
             return False
         msg['finished_at'] = time.monotonic()
@@ -948,13 +946,18 @@ class ChatWidget(QAbstractScrollArea):
     def _activity_is_live(self, msg: dict) -> bool:
         return msg.get('finished_at') is None
 
+    @staticmethod
+    def _has_running_step(msg: dict) -> bool:
+        return any(row.get('kind') == 'step' and row.get('status') == 'running'
+                   for row in msg.get('rows') or [])
+
     def _ensure_activity_timer(self):
         if not self._activity_timer.isActive():
             self._activity_timer.start()
 
     def _stop_activity_timer_if_idle(self):
         if not any(m.get('type') == 'activity' and self._activity_is_live(m)
-                   for m in self.messages):
+                   and self._has_running_step(m) for m in self.messages):
             self._activity_timer.stop()
 
     def _render_activity(self, msg):
@@ -976,7 +979,8 @@ class ChatWidget(QAbstractScrollArea):
 
     def _activity_tick(self):
         live = [m for m in self.messages
-                if m.get('type') == 'activity' and self._activity_is_live(m)]
+                if m.get('type') == 'activity' and self._activity_is_live(m)
+                and self._has_running_step(m)]
         if not live:
             self._activity_timer.stop()
             return
@@ -1435,9 +1439,8 @@ class ChatWidget(QAbstractScrollArea):
         pad = USER_BUBBLE_PADDING
         return rect.adjusted(-pad, -pad, pad, pad)
 
-    def _paint_activity_card(self, painter, msg: dict, width: float,
-                             height: float):
-        """Card fill/border/accent for an activity block.
+    def _paint_activity_card(self, painter, width: float, height: float):
+        """Card fill and border for an activity block.
 
         Painted here instead of in the block's HTML: Qt's rich text does not
         carry a div background into nested block rows, which left the rows
@@ -1445,12 +1448,6 @@ class ChatWidget(QAbstractScrollArea):
         """
         bg = self.theme_manager.get_style("COLLAPSIBLE_BG")
         border = self.theme_manager.get_style("COLLAPSIBLE_BORDER")
-        accent = self.theme_manager.get_style("COLLAPSIBLE_TITLE")
-        status = str(msg.get('status') or 'running')
-        if status == 'error':
-            accent = self.theme_manager.get_style("ERROR_COLOR")
-        elif status == 'waiting':
-            accent = self.theme_manager.get_style("WARNING_COLOR")
         rect = QRectF(0, 0, width, height)
         painter.save()
         painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
@@ -1458,11 +1455,6 @@ class ChatWidget(QAbstractScrollArea):
         if bg:
             painter.setBrush(QColor(bg))
             painter.drawRoundedRect(rect, 6, 6)
-        if accent:
-            painter.setBrush(QColor(accent))
-            painter.drawRoundedRect(
-                QRectF(rect.left() + 1, rect.top() + 4, 3,
-                       max(0.0, rect.height() - 8)), 1.5, 1.5)
         if border:
             pen = QPen(QColor(border))
             pen.setWidthF(1.0)
@@ -1489,8 +1481,7 @@ class ChatWidget(QAbstractScrollArea):
                 painter.save()
                 painter.translate(x_offset, current_y)
                 if msg.get('type') == 'activity':
-                    self._paint_activity_card(
-                        painter, msg, text_width, doc_height)
+                    self._paint_activity_card(painter, text_width, doc_height)
                 if msg.get('role') == 'user' and bubble_color:
                     bubble_rect = self._user_bubble_rect(doc)
                     if bubble_rect is not None:
