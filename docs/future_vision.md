@@ -155,8 +155,8 @@ are referenced by path, pasted images are copied into
   starts as the first request. Browser and Vision need it because the live
   page/desktop is gone.
 - **Journal.** Append-only typed events: messages, reasoning, tool calls and
-  results, job results, usage, errors. It is the source of truth for replay and
-  for rebuilding the model-facing agent history.
+  results, job results, usage, model switches, errors. It is the source of truth
+  for replay and for rebuilding the model-facing agent history.
 - **Session summary.** A rolling summary with fixed sections (Objective, Done,
   Decisions, Constraints, Checks, Current, Next, Unfinished, Files, Blockers)
   stored next to the journal. It is scoped to one session; a Browser or Vision

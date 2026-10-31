@@ -282,7 +282,7 @@ class UIManager(QWidget):
     terminal_mode_selected = Signal()
     vision_mode_selected = Signal()
     browser_mode_selected = Signal()
-    model_selected = Signal(str, str)  # provider_id, model_id (session-only switch)
+    model_selected = Signal(str, str)  # provider_id, model_id (remembered per session)
     reasoning_effort_changed = Signal(str, str, str)  # provider_id, model_id, level
     continue_requested = Signal()
     retry_requested = Signal()
@@ -533,7 +533,7 @@ class UIManager(QWidget):
         self.model_button = QPushButton("⚡ ...")
         self.model_button.setMinimumSize(140, 36)
         self.model_button.setMaximumWidth(420)
-        self.tooltip_manager.install(self.model_button, "Switch model (this session only)")
+        self.tooltip_manager.install(self.model_button, "Switch model (saved for this session)")
         self.model_button.clicked.connect(self._show_model_switch_popup)
         self.model_switch_popup = None
 

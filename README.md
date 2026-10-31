@@ -70,7 +70,7 @@ logos
 
 The program accepts a folder path as an argument and opens that folder as the active project. The project root is the working directory for **Terminal** and **Browser** modes, the root for `@`-file search and indexing, and the place where project data is stored in `.logos/`.
 
-If you have integrated the application with the Windows context menu (an option during installation or in the first setup of a source checkout), you can right-click any folder and select "Open with Logos" to launch the assistant in that directory.
+If you have integrated the application with the Windows context menu (an option during installation or in the first setup of a source checkout), you can right-click any folder and select "Open with Logos" to launch the assistant in that directory. If Logos is already running, the folder opens in the existing window instead of starting a second copy.
 
 **Linux/macOS:**
 ```bash
@@ -97,11 +97,14 @@ The application has four main modes, each designed for different types of tasks:
 
 ### Transcript
 
-Terminal and Browser turns render as one compact activity timeline instead of a stream of separate cards. While the model works it says one short line about each step and, when a task needs it, shows a 3–6 step plan as a `Step N / M` pill above the composer (hover it for the whole checklist) and marks steps as it goes; the pill vanishes when the turn ends and is not restored from the journal. Every tool call becomes a row with its own status and duration; arguments, written file contents and output expand on click, while errors and denied actions open automatically. A background job merges into the step that launched it and keeps an **Open log** link. A finished turn stays as one **Done** block folded down to its header (the answer below stays open), and reopening the session restores the same blocks collapsed from its journal. Chat keeps a plain message stream, and Vision keeps its Computer-use card.
+Terminal and Browser turns render as one compact activity timeline instead of a stream of separate cards. While the model works it says one short line about each step and, when a task needs it, shows a 3–6 step plan as a `Step N / M` pill above the composer (hover it for the whole checklist) and marks steps as it goes; the pill vanishes when the turn ends and is not restored from the journal. Every tool call becomes a step row with its own status and duration; arguments, written file contents and output expand on click, while errors and denied actions open automatically. Consecutive read-only or action steps fold into one `Ran N tools` line once they finish clean; a thought or note breaks the fold. A background job merges into the step that launched it and keeps an **Open log** link. A finished turn stays as one **Done** block folded down to its header (the answer below stays open), and reopening the session restores the same blocks collapsed from its journal. Chat keeps a plain message stream, and Vision keeps its Computer-use card.
 
 ### Supported LLM Providers
 
 Logos supports a wide range of models from leading AI providers. You can easily switch between them in the settings.
+
+> [!NOTE]
+> **Models and sessions.** The toolbar model switcher changes the model for the current session and records it in that session's journal. Reopening a session applies its model silently, and a new session starts on the model you last used; Settings → Providers shows and changes that default. If the saved provider or model is no longer available, Logos keeps the current model and says so once.
 
 *   **OpenRouter**
 *   **Anthropic**

@@ -424,7 +424,11 @@ class ProjectManager:
             return None
 
     def set_session_mode(self, path: str, mode: str) -> bool:
-        """Change the mode of an empty JSONL session (rewrites only the header)."""
+        """Change the mode of a JSONL session with no conversation events yet.
+
+        Only the header is rewritten; ``model`` bookkeeping records already
+        written by model switches are kept, since they are not conversation.
+        """
         if not path or not os.path.exists(path) or not path.endswith(SESSION_EXT):
             return False
         try:
@@ -433,14 +437,18 @@ class ProjectManager:
         except Exception as exc:
             logging.warning(f"Could not read session header {path}: {exc}")
             return False
-        if len(records) != 1 or not isinstance(records[0], dict):
+        if not records or not isinstance(records[0], dict):
             return False
         header = records[0]
         if header.get("type") != "session":
             return False
+        trailing = records[1:]
+        if any(not (isinstance(row, dict) and row.get("type") == "model")
+               for row in trailing):
+            return False
         header["mode"] = mode or "chat"
         try:
-            self._write_jsonl_atomic(path, [header])
+            self._write_jsonl_atomic(path, [header] + trailing)
         except Exception as exc:
             logging.warning(f"Could not update session mode {path}: {exc}")
             return False

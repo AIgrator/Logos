@@ -41,7 +41,12 @@ The app runs inside a selected project directory. Startup resolves the remembere
 full-screen `HomePage` (`src/ui/navigation.py`) instead of a modal picker. The
 installation folder and the application data folder are never projects: an empty
 or app-owned remembered path is treated as missing, so a fresh install starts on
-the home screen. In the
+the home screen. A folder argument (`Logos.exe <folder>`, used by the "Open with
+Logos" context menu) wins over the remembered project and registers the folder as
+a project. When another instance already runs, the new process sends
+`open_project:<folder>` over the `Logos-Assistant-Lock` local socket and exits,
+and the running window switches to that project as if it had been picked in the
+app (`prevent_multiple_instances` controls the single-instance check). In the
 workspace, projects and sessions are reached through the collapsible left sidebar;
 its footer keeps only Home, New session and Settings. The session context menu
 (shared by the sidebar and the home screen) carries Rename, Show journal, Show in
@@ -107,7 +112,7 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `objective`) and later
   lines are typed events (`message`, `reasoning`, `progress`, `plan`,
   `tool_call`, `tool_result`, `job_result`, `usage`, `compaction`, `error`,
-  `suggestions`). `reasoning` events carry the
+  `suggestions`, `model`). `reasoning` events carry the
   model's stated
   rationale and, for agent steps, the provider's thought summary when the API
   exposes one; `progress` events carry the model's short narration line and
@@ -128,7 +133,19 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   counts
   (input/output/reasoning/cache/total); they are counted in context statistics
   but never replayed as chat text. No prices are stored or computed. Credentials
-  are redacted before events are written. A `compaction` event records each
+  are redacted before events are written. A `model` event (`provider`, `model`)
+  is written on every model switch inside a session (writes are skipped when no
+  session is open). Opening a session silently applies its latest `model` event
+  (`AppController._restore_session_model`, after the replay): no chat notice, no
+  summary handoff, no new journal event. A saved provider that is no longer
+  configured, a model missing from the merged catalogue or one that cannot run
+  the session's mode keeps the current model and adds one italic warning.
+  `model` events are never rendered, and they do not make an empty session
+  non-empty: a mode switch there still rewrites only the header and keeps them.
+  A new session inherits the current model,
+  and Settings → Providers holds the default; a switch stays in memory until
+  the next settings save (window state on close), so the last used model
+  deliberately becomes the starting model and is persisted as such. A `compaction` event records each
   applied boundary (`trigger` auto/manual, `covered`, `total`,
   `summary_source`, provider, model) and is replayed as an italic notice, so a
   reloaded transcript shows why older history disappeared; the right panel's

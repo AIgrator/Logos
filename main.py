@@ -292,8 +292,12 @@ def main():
 
         if socket.waitForConnected(250):
             logging.info("Another instance is already running. Signaling it to show and exiting.")
-            # Send a signal to the running instance to show its window
-            socket.write(b'show_window')
+            # "Open with Logos" on a folder must reach the running window, not
+            # just raise it: forward the folder so it becomes the active project.
+            message = 'show_window'
+            if project_arg and os.path.isdir(project_arg):
+                message = 'open_project:' + os.path.abspath(project_arg)
+            socket.write(message.encode('utf-8'))
             socket.waitForBytesWritten(500)
             socket.disconnectFromServer()
             sys.exit(0)

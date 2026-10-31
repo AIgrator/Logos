@@ -165,6 +165,9 @@ class AppController(QObject):
         self.thinking_timer = QTimer(self)
         self.thinking_time = 0
         self._shutting_down = False
+        # (provider, model) journaled by the loaded session; applied once the
+        # handlers exist (run() / switch_project), never at load time.
+        self._session_model_choice = None
         self._load_project_session()
         self._load_handoff_state()
 
@@ -474,8 +477,10 @@ class AppController(QObject):
 
     def run(self):
         has_project = bool(self.project_root)
+        model_warning = ""
         if has_project:
             self._restore_session_mode(self.session_mode)
+            model_warning = self._restore_session_model()
             self.ui.set_project_name(self.project_manager.get_active_name(), self.project_root)
             self.ui.show_workspace()
         else:
@@ -490,6 +495,8 @@ class AppController(QObject):
         if has_project:
             self._restore_agent_history()
             self._replay_session()
+            if model_warning:
+                self.ui.add_message(f"<i>{html.escape(model_warning)}</i>", force_scroll=True)
             self._schedule_summary_refresh()
         self._start_vision_initialization()
         if self.indexer is not None:
@@ -566,7 +573,14 @@ class AppController(QObject):
             logging.warning(f"Could not restore UI mode {mode}: {e}")
 
     def _session_has_content(self) -> bool:
-        return bool(self._session_event_count or self.conversation_history)
+        if self.conversation_history:
+            return True
+        # A model switch journals bookkeeping, not conversation: a session
+        # that only remembers its model still counts as empty, so a mode
+        # switch keeps rewriting the header instead of starting a new file.
+        return any(
+            isinstance(event, dict) and event.get("type") != "model"
+            for event in (self.session_events or []))
 
     def _create_new_session(self, mode: str = ""):
         mode = self._valid_mode(mode or self._current_mode())
@@ -584,6 +598,8 @@ class AppController(QObject):
         self._manual_compact_pending = False
         self._compaction_trigger = ""
         self._manual_compact_focus = ""
+        # A fresh session has no model event: it inherits the current model.
+        self._session_model_choice = None
         self._schedule_context_indicator_update()
         return self.session_file
 
@@ -674,6 +690,18 @@ class AppController(QObject):
         except Exception as e:
             logging.warning(f"Could not restore project session: {e}")
 
+    @staticmethod
+    def _latest_model_choice(events: list):
+        """Last (provider, model) a session journaled, or None."""
+        for event in reversed(events or []):
+            if not isinstance(event, dict) or event.get("type") != "model":
+                continue
+            provider_id = str(event.get("provider") or "").strip()
+            model_id = str(event.get("model") or "").strip()
+            if provider_id and model_id:
+                return (provider_id, model_id)
+        return None
+
     def _load_session_file(self, path: str):
         """Loads a specific session file into the shared conversation list."""
         if self.project_manager is None or not path:
@@ -699,6 +727,9 @@ class AppController(QObject):
         self._manual_compact_pending = False
         self._compaction_trigger = ""
         self._manual_compact_focus = ""
+        # Handlers and the worker do not exist yet during __init__; the chosen
+        # model is applied later by _restore_session_model().
+        self._session_model_choice = self._latest_model_choice(events)
         self.conversation_history.clear()
         self.conversation_history.extend(messages)
         if getattr(self, "chat_handler", None) is not None:
@@ -2277,12 +2308,19 @@ class AppController(QObject):
         else:
             self.ui.add_message(f"<i>{message}</i>", force_scroll=True)
 
+    def _dismiss_settings_page(self):
+        """Leaves Settings when a project switch has to become visible."""
+        page = getattr(self.ui, "settings_page", None)
+        if page is not None and page.isVisible():
+            self.ui.hide_settings_page()
+
     def switch_project(self, path: str, session_file: str = "", announce: bool = True):
         """Switches the active project and optionally opens one of its sessions."""
         if self.project_manager is None or not path:
             return
         target = os.path.abspath(path)
         if target == self.project_root and not session_file:
+            self._dismiss_settings_page()
             self.ui.show_workspace()
             return
         if not os.path.isdir(target):
@@ -2315,6 +2353,7 @@ class AppController(QObject):
         else:
             self._load_project_session()
         self._load_handoff_state()
+        model_warning = self._restore_session_model()
         try:
             self.ui.clear_chat()
         except Exception:
@@ -2322,10 +2361,13 @@ class AppController(QObject):
         name = self.project_manager.get_active_name()
         self.ui.set_project_name(name, self.project_root)
         self._persist_session()
+        self._dismiss_settings_page()
         self.ui.show_workspace()
         self.ui.refresh_project_views()
         self._restore_agent_history()
         self._replay_session()
+        if model_warning:
+            self.ui.add_message(f"<i>{html.escape(model_warning)}</i>", force_scroll=True)
         if announce:
             self.ui.add_message(f"<i>Project switched to <b>{name}</b>.</i>", force_scroll=True)
 
@@ -2449,6 +2491,7 @@ class AppController(QObject):
             self._manual_compact_pending = False
             self._compaction_trigger = ""
             self._manual_compact_focus = ""
+            self._session_model_choice = None
             self.conversation_history.clear()
             self.pending_attachments.clear()
             try:
@@ -3287,12 +3330,15 @@ class AppController(QObject):
             provider_id, model_id, effort, is_active)
 
     def switch_model(self, provider_id: str, model_id: str, custom_notice: str | None = None):
-        """Switches the active provider/model for this session only.
+        """Switches the active provider/model and records it in the session.
 
-        The change is kept in memory (no settings.json write). Any in-flight
-        request is left to finish on the model that started it; the new model
-        takes over from the next turn (same behaviour as opencode). Histories
-        and handler states are preserved.
+        The choice is journaled as a ``model`` event and applied silently the
+        next time this session is opened. It reaches settings.json only through
+        the usual save on close, so the last used model also becomes the
+        starting model for new sessions (Settings → Providers still sets the
+        default). Any in-flight request is left to finish on the model that
+        started it; the new model takes over from the next turn (same
+        behaviour as opencode). Histories and handler states are preserved.
         Provider tool schemas are per-mode static files loaded fresh by the
         new provider instance — no regeneration needed on switch.
 
@@ -3311,24 +3357,16 @@ class AppController(QObject):
         if (provider_id == all_settings.get("active_provider")
                 and target.get("model") == model_id):
             return
-        logging.info(f"Switching model (session-only): {all_settings.get('active_provider')} -> {provider_id} / {model_id}")
+        logging.info(f"Switching model for this session: {all_settings.get('active_provider')} -> {provider_id} / {model_id}")
         # Never abort the in-flight request: a running reply/step finishes on
         # the model that started it, and the new model takes over on the next
         # turn (same behaviour as opencode). This avoids stranding the worker
         # on providers whose streaming cannot be cancelled (e.g. Google).
-        self.settings_manager.set_many({"active_provider": provider_id}, save=False)
-        target["model"] = model_id
-        self.settings = self.settings_manager.all()
-        self.llm_worker.update_settings_and_provider(self.settings)
-        self.chat_handler.settings = self.settings
-        self.vision_handler.settings = self.settings
-        logging.info("Settings have been updated and providers reloaded (session-only switch).")
-        title_string = self._get_llm_title_string()
-        window_title = self._get_llm_window_title()
-        self.ui.set_main_window_title(window_title)
-        self.ui.set_title_bar_text(window_title)
-        self.ui.refresh_model_button(title_string)
-        self.ui.set_assistant_name(self._get_current_model_name())
+        title_string = self._activate_model(provider_id, model_id)
+        # Without an open session there is nothing to remember yet: the next
+        # session inherits this model and journals its own switches.
+        if self.session_file:
+            self.append_session_event("model", provider=provider_id, model=model_id)
         meta = self.theme_manager.get_style("COLLAPSIBLE_META")
         if custom_notice:
             notice = (f'<p style="margin: 0; color: {meta};"><i>'
@@ -3338,15 +3376,14 @@ class AppController(QObject):
             notice += '</p>'
         elif self._can_continue():
             notice = (f'<p style="margin: 0; color: {meta};"><i>Switched to '
-                      f'{html.escape(title_string)} (this session only). '
+                      f'{html.escape(title_string)} (saved for this session). '
                       f'Context preserved.</i>{CONTINUE_LINK}</p>')
         else:
             notice = (f'<p style="margin: 0; color: {meta};"><i>Switched to '
-                      f'{html.escape(title_string)} (this session only). '
+                      f'{html.escape(title_string)} (saved for this session). '
                       f'The new model takes over from your next '
                       f'message.</i></p>')
         self.ui.add_message(notice, force_scroll=True, keep_stream=True)
-        self._schedule_context_indicator_update()
         if self._summary_settings().get("handoff_on_model_switch", True):
             self._schedule_summary_refresh(force=True)
         self._schedule_auto_compact_check()
@@ -3355,13 +3392,86 @@ class AppController(QObject):
         if not self.thinking_timer.isActive():
             self._drain_chat_queue()
 
+    def _activate_model(self, provider_id: str, model_id: str) -> str:
+        """Applies provider/model in memory and refreshes the UI chrome."""
+        self.settings_manager.set_many({"active_provider": provider_id}, save=False)
+        providers = self.settings_manager.all().setdefault("llm_providers", {})
+        target = providers.get(provider_id)
+        if not isinstance(target, dict):
+            target = {}
+            providers[provider_id] = target
+        target["model"] = model_id
+        self.settings = self.settings_manager.all()
+        self.llm_worker.update_settings_and_provider(self.settings)
+        self.chat_handler.settings = self.settings
+        self.vision_handler.settings = self.settings
+        logging.info("Settings have been updated and providers reloaded.")
+        title_string = self._get_llm_title_string()
+        window_title = self._get_llm_window_title()
+        self.ui.set_main_window_title(window_title)
+        self.ui.set_title_bar_text(window_title)
+        self.ui.refresh_model_button(title_string)
+        self.ui.set_assistant_name(self._get_current_model_name())
+        self._schedule_context_indicator_update()
+        return title_string
+
+    def _session_model_usable(self, provider_id: str, model_id: str) -> bool:
+        """Whether a journaled (provider, model) pair can be applied now."""
+        all_settings = self.settings_manager.all()
+        if not provider_is_configured(all_settings, provider_id):
+            return False
+        if not ModeCapabilities.supports(provider_id, model_id, self.session_mode):
+            return False
+        # The merged catalog is what the model picker offers, so a pair that
+        # is no longer in it is unavailable to the user as well.
+        from llm.model_config_manager import ModelConfigManager
+        config = (ModelConfigManager.PROVIDER_CONFIG or {}).get(provider_id) or {}
+        if provider_id == "openrouter":
+            groups = config.get("models_by_provider") or {}
+            return any(
+                f"{group.lower()}/{name.lower().replace(' ', '-')}" == model_id
+                for group, names in groups.items()
+                for name in (names or []))
+        models = config.get("models") or []
+        return not models or model_id in models
+
+    def _restore_session_model(self) -> str:
+        """Applies the model a reopened session last used.
+
+        Silent by design: no chat notice, no summary handoff and no new
+        journal event. Returns a warning text when the saved provider or model
+        is gone, in which case the current model is kept.
+        """
+        choice = self._session_model_choice
+        self._session_model_choice = None
+        if not choice:
+            return ""
+        provider_id, model_id = choice
+        all_settings = self.settings_manager.all()
+        active_provider = all_settings.get("active_provider")
+        current = (all_settings.get("llm_providers") or {}).get(active_provider) or {}
+        if active_provider == provider_id and current.get("model") == model_id:
+            return ""
+        if not self._session_model_usable(provider_id, model_id):
+            config = (getattr(self.settings_manager, "PROVIDER_CONFIG", {}) or {}).get(provider_id) or {}
+            label = config.get("display_name") or provider_id.replace("_", " ").replace("-", " ").title()
+            logging.warning(
+                "Session model %s / %s is not available; keeping the current model.",
+                provider_id, model_id)
+            return (f"The model saved in this session ({label} / {model_id}) is not "
+                    f"available anymore. Staying on the current model.")
+        self._activate_model(provider_id, model_id)
+        logging.info("Restored session model: %s / %s", provider_id, model_id)
+        return ""
+
     def _apply_mode_default_model(self, subsection: str):
-        """Session-only fallback to the per-mode default model.
+        """Fallback to the per-mode default model.
 
         If the active model already meets the target modes' requirements it is
         left untouched (a capable model like gpt-6-luna is never swapped out).
         Only when it does not, we switch to the model the user configured for
-        this mode (the Vision model), without writing settings.json.
+        this mode (the Vision model); the switch is journaled for the session
+        like any other model change.
         """
         try:
             modes = SUBSECTIONS.get(subsection, ())
@@ -4381,16 +4491,43 @@ class AppController(QObject):
             logging.warning("Cannot cancel request: No active request.")
 
     def _handle_new_instance_connection(self):
-        """
-        Called when another instance of the app tries to start.
-        Brings the main window to the front.
+        """A second process connected: raise the window and honor its request.
+
+        The request is ``show_window`` or ``open_project:<folder>`` (sent by
+        "Open with Logos" in the folder context menu); the folder becomes the
+        active project exactly as if it had been picked in the app.
         """
         logging.info("New instance connection detected. Activating main window.")
         socket = self.local_server.nextPendingConnection()
         if socket:
-            # Clean up the socket to prevent resource leaks
-            socket.readyRead.connect(socket.deleteLater)
+            socket.readyRead.connect(lambda: self._read_instance_request(socket))
+            # A client that writes and disconnects at once may lose its
+            # readyRead, so drain whatever is still buffered before cleanup.
+            socket.disconnected.connect(lambda: self._finish_instance_socket(socket))
+            if socket.bytesAvailable():
+                self._read_instance_request(socket)
 
         self.ui.main_window.showNormal() # Ensure it's not minimized
         self.ui.main_window.raise_()
         self.ui.main_window.activateWindow()
+
+    def _read_instance_request(self, socket):
+        """Opens the project a second process asked for, if it asked for one."""
+        try:
+            data = bytes(socket.readAll()).decode('utf-8', 'replace').strip()
+        except Exception as e:
+            logging.warning(f"Could not read the second instance request: {e}")
+            return
+        if not data.startswith('open_project:'):
+            return
+        path = data[len('open_project:'):].strip()
+        if not path:
+            return
+        logging.info(f"Opening project requested by another instance: {path}")
+        self.switch_project(path)
+
+    def _finish_instance_socket(self, socket):
+        """Reads a last-minute request and releases the client socket."""
+        self._read_instance_request(socket)
+        socket.deleteLater()
+

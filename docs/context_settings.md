@@ -103,7 +103,7 @@ Python tracebacks longer than 10 lines are cut to their first 3 and last 5 lines
 The rolling summary is what lets a session continue without replaying its entire journal: when switching mode, after compaction, and when resuming a Browser or Vision session.
 
 - Before a session is left behind (mode or project switch), Logos writes a deterministic fallback summary immediately, so the handoff does not depend on an LLM call.
-- The LLM refresh runs in the background and updates the same file. Failures keep the previous version (or the fallback) and are retried with a growing delay (15–300 seconds).
+- The LLM refresh runs in the background and updates the same file. Failures keep the previous version (or the fallback) and are retried with a growing delay (15, 30, 60, 120, then 240 seconds).
 - Summaries never mix between sessions: each session reads and updates only its own pair of files.
 - A summary is not a chat message and is not sent on every request. The model sees it only through a handoff seed or a compaction block.
 
