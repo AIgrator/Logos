@@ -41,6 +41,7 @@ logs/
 cache/
 
 tests/
+agent_test/
 
 # OmniParser model files
 models/
