@@ -4,7 +4,21 @@ This is a desktop assistant application that uses Large Language Models (LLMs) t
 
 For detailed technical information about the system architecture, please refer to the [**System Architecture Overview for Developers**](./docs/system_architecture.md).
 
-## Installation
+## Download
+
+Ready-to-run Windows builds are published in [**Releases**](https://github.com/AIgrator/Logos/releases/latest). You do not need Python or any dependencies for them.
+
+| Asset | What it is |
+| --- | --- |
+| `LogosSetup.exe` | **Recommended.** Per-user installer (no administrator rights). Adds the Start Menu shortcut and, as optional tasks, the `logos` command, the Explorer "Open with Logos" folder menu and a desktop shortcut. Uninstalls from Settings → Installed apps. |
+| `Logos.exe` | Portable single file. Nothing to install; just run it. |
+
+Both builds keep settings, logs, cache and project data in `%LOCALAPPDATA%\Logos`, not next to the executable. On first launch you pick a provider and paste its API key, so no extra files are needed.
+
+> [!NOTE]
+> Builds are published for Windows. On Linux, run from source (see below).
+
+## Installation (from source)
 
 To automatically install dependencies:
 
@@ -28,6 +42,30 @@ If you prefer to install dependencies manually, sync the environment from the lo
 ```bash
 uv sync
 ```
+
+## Building the Windows Executable and Installer
+
+The release assets are built from a source checkout on Windows. Both tools are fetched on demand (`uv run --with ...`) and are deliberately **not** project dependencies.
+
+**1. Single-file executable** (takes about six minutes):
+
+```powershell
+uv run --with pyinstaller pyinstaller logos.spec --noconfirm --clean
+```
+
+This produces `dist/Logos.exe`. The one-file build unpacks itself to a temporary folder at launch, so settings and data live in `%LOCALAPPDATA%\Logos`.
+
+**2. Installer** (wraps that executable, needs [Inno Setup 6](https://jrsoftware.org/isdl.php)):
+
+```powershell
+& "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe" installer\logos.iss
+```
+
+This produces `dist/LogosSetup.exe` (per-user install into `%LOCALAPPDATA%\Programs\Logos`, Start Menu shortcut, optional `PATH` entry, Explorer folder menu and desktop shortcut, and an uninstaller).
+
+Compilation alone is not proof: launch the built file and make sure it starts, since the frozen app uses `%LOCALAPPDATA%\Logos` for settings, logs, cache and the materialized `prompts/` + `assets/`.
+
+`build/` and `dist/` are git-ignored. Release binaries are attached to GitHub Releases, never committed to the repository (GitHub also rejects files above 100 MB, and each build is about 200 MB).
 
 ## Getting a Free API Key (Google Gemini Example)
 
