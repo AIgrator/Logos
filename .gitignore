@@ -43,6 +43,9 @@ cache/
 tests/
 agent_test/
 
+# Scratch data for manual skill tests
+examples/
+
 # OmniParser model files
 models/
 

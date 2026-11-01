@@ -49,16 +49,14 @@ The catalogue needs an internet connection. Only ClawHub is connected; skills fr
 
 ## Try it
 
-A small dataset ships with the repository at `examples/skills-demo/sales.csv` (12 sales rows). The agents resolve relative paths against the active project, so open the repository as the active project (or use the absolute path to the CSV, or copy it into the active project). Then switch to **Terminal** and ask:
+Use any CSV, TSV or JSON file you already have — for example `sales.csv` in your own folder. The agents resolve relative paths against the active project, so open the folder that contains the file as the project, or pass the absolute path. Then switch to **Terminal** and ask:
 
-> Analyze examples/skills-demo/sales.csv and show revenue by region, the best month and the best product.
+> Analyze sales.csv and show revenue by region, the best month and the best product.
 
 Expected result:
 
 - a `Loading skill · data-analysis` card appears while the agent loads the built-in skill;
-- total revenue is 29,400;
-- regions: East 7,350, North 7,100, South 6,900, West 8,050;
-- best month: 2026-02 (16,450); best product: Widget (15,900).
+- the answer profiles the columns (names, types, row count) and reports totals, the best group and the top entries for your file.
 
 If the skill card does not appear, repeat the request with "Use the data-analysis skill" to verify the loading path directly. The visible card and the numbers are the actual check.
 
