@@ -130,6 +130,14 @@ class BrowserManager:
     # -- lifecycle ------------------------------------------------------
 
     def launch(self) -> None:
+        from .runtime import is_chromium_installed, pin_environment
+        # Pin the browser folder before the Playwright driver starts, otherwise
+        # it looks inside the (temporary, per-launch) bundled driver package.
+        pin_environment()
+        if not is_chromium_installed():
+            raise RuntimeError(
+                "The browser engine (Chromium) is not installed yet. Open "
+                "Settings → Browser → Download… (about 150 MB) and retry.")
         from playwright.sync_api import sync_playwright
         import os
         os.makedirs(self.profile_dir, exist_ok=True)

@@ -3570,7 +3570,35 @@ class AppController(QObject):
         if self.indexer is not None:
             self.indexer.schedule_reindex(force=True)
 
+    def _ensure_browser_engine(self) -> bool:
+        """Makes sure Chromium exists before Browser mode takes a task.
+
+        The engine is a ~150 MB download that is not shipped with Logos, so the
+        first switch to Browser mode explains it and installs it on request
+        instead of failing later with Playwright's raw "Executable doesn't
+        exist" error.
+        """
+        from src.browser import runtime
+        if runtime.is_chromium_installed():
+            return True
+        from ui.browser_engine_dialog import BrowserEngineDialog
+        dialog = BrowserEngineDialog(self.ui.main_window)
+        dialog.exec()
+        if runtime.is_chromium_installed():
+            self.ui.add_message(
+                f"<i>Browser engine ready: Chromium is installed in "
+                f"{html.escape(str(runtime.browsers_dir()))}.</i>", force_scroll=True)
+            return True
+        self.ui.add_message(
+            "<i>Browser mode needs Chromium, which is not installed yet. Pick "
+            "Browser mode again to download it, or use Settings → Browser → "
+            "Download…</i>", force_scroll=True)
+        return False
+
     def _activate_browser_mode(self):
+        if not self._ensure_browser_engine():
+            self.ui.set_active_mode(self._current_mode())
+            return
         self._cleanup_and_switch_handler(self.browser_handler, ControllerState.BROWSER)
         self.ui.set_active_mode('browser')
         self.ui.add_message("<i>Browser mode enabled. Describe the web task you want me to perform.</i>", force_scroll=True)

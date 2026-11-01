@@ -9,10 +9,12 @@
 #   the temp folder and a read-only install folder can vanish.
 # - Splash: assets/ico.png placeholder until the animated GIF lands. Only
 #   one-file mode supports the bootloader splash.
-# - Browsers (Playwright Chromium, ~170MB) are NOT bundled: on first
-#   Browser-mode use the app reports how to install them
-#   (`playwright install chromium` or bundled ms-playwright dir next
-#   to the EXE via PLAYWRIGHT_BROWSERS_PATH). Keeps the base build lean.
+# - Browsers (Playwright Chromium, ~150MB) are NOT bundled: the first switch
+#   to Browser mode (and Settings -> Browser) offers a one-time download into
+#   %LOCALAPPDATA%\ms-playwright (src/browser/runtime.py pins
+#   PLAYWRIGHT_BROWSERS_PATH, because the Python package would otherwise point
+#   the driver at its own folder inside the temporary _MEI unpack dir).
+#   Keeps the base build lean. A pre-installed cache is reused as-is.
 # - keyring uses the ctypes-based Windows backend (no pywin32 needed).
 # - Heavy ML stack (torch/OCR/YOLO) was removed from dependencies, which
 #   is what makes this build viable at all (was ~9GB unstartable).

@@ -426,6 +426,26 @@ through `on_settings_changed` and Settings → Terminal shows the same value.
 The chip is hidden outside Terminal mode and participates in both toolbar
 layouts (`_reflow_toolbar`).
 
+## Browser engine
+
+Browser mode drives a real Chromium through Playwright, and that binary is not
+packaged (about 150 MB). `src/browser/runtime.py` owns the runtime decisions:
+`PLAYWRIGHT_BROWSERS_PATH` is pinned to a stable per-user folder
+(`%LOCALAPPDATA%\ms-playwright`; `~/.cache/ms-playwright` or
+`~/Library/Caches/ms-playwright` elsewhere; an explicit environment value wins),
+because the Python package otherwise starts its driver with
+`PLAYWRIGHT_BROWSERS_PATH=0`, meaning "inside the driver package" — the
+temporary PyInstaller `_MEI` folder of a frozen build, which changes on every
+launch and disappears on exit. `pin_environment()` runs before
+`sync_playwright().start()` and before any install, so lookup and download
+agree. `is_chromium_installed()` matches the exact revision from the bundled
+`browsers.json`; when it is missing, switching to Browser mode opens
+`src/ui/browser_engine_dialog.py`, which explains the download and shows
+progress while `install_chromium()` runs the bundled driver
+(`node cli.js install chromium`) on a thread. Settings → Browser shows the same
+status and button. `BrowserManager.launch()` refuses with a readable message
+instead of Playwright's "Executable doesn't exist at …_MEI…" error.
+
 ## MCP servers
 
 Terminal mode reaches user-configured MCP servers through three meta-tools

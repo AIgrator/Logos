@@ -1441,7 +1441,50 @@ class SettingsPage(QWidget):
         browser_layout.addWidget(self._create_help_label(timeout_tooltip), 2, 1, Qt.AlignLeft)
         browser_layout.addWidget(self.browser_timeout_spinbox, 2, 3)
 
+        from src.browser import runtime as browser_runtime
+        engine_tooltip = (
+            "Chromium is the real browser that Browser mode drives. It is not "
+            "packaged with Logos because of its size, so it is downloaded once "
+            f"({browser_runtime.DOWNLOAD_SIZE}) into a per-user folder and reused "
+            "by every later Browser-mode session. Downloading needs an internet "
+            "connection; Browser mode offers the same download on first use."
+        )
+        self.browser_engine_label = QLabel()
+        self.browser_engine_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
+        self.browser_engine_button = QPushButton("Download…")
+        self.browser_engine_button.setFixedWidth(140)
+        self.browser_engine_button.clicked.connect(self._download_browser_engine)
+        engine_row = QHBoxLayout()
+        engine_row.setContentsMargins(0, 0, 0, 0)
+        engine_row.addWidget(self.browser_engine_label)
+        engine_row.addStretch(1)
+        engine_row.addWidget(self.browser_engine_button)
+        browser_layout.addWidget(QLabel("Browser engine:"), 3, 0)
+        browser_layout.addWidget(self._create_help_label(engine_tooltip), 3, 1, Qt.AlignLeft)
+        browser_layout.addLayout(engine_row, 3, 2, 1, 2)
+        self._refresh_browser_engine_row()
+
         return self._page(group)
+
+    def _refresh_browser_engine_row(self):
+        """Shows whether the Chromium build Browser mode needs is installed."""
+        from src.browser import runtime as browser_runtime
+        revision = browser_runtime.chromium_revision() or "?"
+        if browser_runtime.is_chromium_installed():
+            self.browser_engine_label.setText(f"Chromium {revision} · installed")
+            self.browser_engine_label.setToolTip(str(browser_runtime.chromium_executable() or ""))
+            self.browser_engine_button.setText("Reinstall…")
+        else:
+            self.browser_engine_label.setText(f"Chromium {revision} · not installed")
+            self.browser_engine_label.setToolTip(str(browser_runtime.browsers_dir()))
+            self.browser_engine_button.setText("Download…")
+
+    def _download_browser_engine(self):
+        """Runs the one-time Chromium download from Settings → Browser."""
+        from ui.browser_engine_dialog import BrowserEngineDialog
+        dialog = BrowserEngineDialog(self.window())
+        dialog.exec()
+        self._refresh_browser_engine_row()
 
     def _create_terminal_section(self):
         """Creates the Terminal settings section."""
