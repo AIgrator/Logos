@@ -30,6 +30,10 @@ Thumbs.db
 # Temporary files
 screenshots/
 
+# Local user data (created on first run; holds machine-specific paths)
+settings.json
+settings.json.bak
+
 # Ignore all files in logs directory
 logs/
 
