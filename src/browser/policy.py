@@ -10,7 +10,6 @@ targets and masks secrets in logs/prompts. User-facing approvals for risky
 actions live in ``browser_handler`` / ``src/handlers/tool_exec_worker.py``.
 """
 import ipaddress
-import os
 import socket
 import threading
 from pathlib import Path
@@ -67,6 +66,45 @@ def _resolve(host: str) -> tuple[str, ...]:
 
 _NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
 
+# How far the controlled browser may reach. The default is `any`: this is the
+# user's own browser on their own machine, and a dev server on
+# 127.0.0.1:3000 or a page opened through the LAN address is a normal way to
+# work. The two stricter modes exist because the agent reads page text, and a
+# page can contain instructions ("open the router admin page", "read this
+# file"); a user who hands the browser to such a page can narrow access here.
+NETWORK_ACCESS_MODES = ("any", "local", "public")
+NETWORK_ACCESS_LABELS = {
+    "any": "Any address",
+    "local": "Internet and this computer",
+    "public": "Internet only",
+}
+DEFAULT_NETWORK_ACCESS = "any"
+
+
+def normalize_network_access(value, default: str = DEFAULT_NETWORK_ACCESS) -> str:
+    """Maps a stored setting value to one of NETWORK_ACCESS_MODES."""
+    if isinstance(value, bool):
+        # The older `block_private_networks` flag was never shown in the UI, so
+        # `True` (its shipped default) meant "nobody chose anything": fall back
+        # to the default. An explicit `False` still means unrestricted.
+        return DEFAULT_NETWORK_ACCESS if value else "any"
+    text = str(value or "").strip().lower()
+    return text if text in NETWORK_ACCESS_MODES else default
+
+
+def resolve_network_access(settings: dict | None) -> str:
+    """Reads browser settings into a network-access mode.
+
+    ``network_access`` wins; ``block_private_networks`` is the pre-0.2 boolean
+    form and is still honoured so an existing settings.json is not ignored.
+    """
+    data = settings if isinstance(settings, dict) else {}
+    if str(data.get("network_access") or "").strip():
+        return normalize_network_access(data.get("network_access"))
+    if "block_private_networks" in data:
+        return normalize_network_access(data.get("block_private_networks"))
+    return DEFAULT_NETWORK_ACCESS
+
 
 def _embedded_ipv4(ip):
     """Returns the IPv4 address an IPv6 address only wraps, or None.
@@ -87,19 +125,37 @@ def _embedded_ipv4(ip):
     return None
 
 
-def _is_blocked_ip(address: str) -> bool:
-    try:
-        ip = ipaddress.ip_address(address)
-    except ValueError:
-        return True
+def _address_kind(ip) -> str | None:
+    """Classifies one address: 'loopback', 'local', or None for the internet.
+
+    0.0.0.0 and :: count as loopback because browsers treat them as this
+    machine. Any IPv6 address wrapping an IPv4 one is classified by the wrapped
+    address (see _embedded_ipv4).
+    """
     embedded = _embedded_ipv4(ip)
     if embedded is not None:
         ip = embedded
-    return bool(
-        ip.is_loopback or ip.is_private or ip.is_link_local
-        or ip.is_multicast or ip.is_reserved or ip.is_unspecified
-        or not ip.is_global
-    )
+    if ip.is_loopback or ip.is_unspecified:
+        return "loopback"
+    if (ip.is_private or ip.is_link_local or ip.is_multicast
+            or ip.is_reserved or not ip.is_global):
+        return "local"
+    return None
+
+
+def _is_blocked_ip(address: str, network_access: str = DEFAULT_NETWORK_ACCESS) -> bool:
+    mode = normalize_network_access(network_access)
+    try:
+        kind = _address_kind(ipaddress.ip_address(address))
+    except ValueError:
+        return True
+    if kind is None or mode == "any":
+        return False
+    # "Internet and this computer" allows the loopback only; a LAN address
+    # still needs "Any address".
+    return not (kind == "loopback" and mode == "local")
+
+
 
 
 def _host_allowed(host: str, allowed_domains) -> bool:
@@ -118,20 +174,15 @@ def _host_allowed(host: str, allowed_domains) -> bool:
     return False
 
 
-def _is_within(path: Path, root: Path) -> bool:
-    """Path containment that follows case-insensitive Windows semantics."""
-    norm = os.path.normcase
-    child, parent = norm(str(path)), norm(str(root))
-    return child == parent or child.startswith(parent + os.sep)
+def _validate_local_file(text: str, parts) -> str:
+    """Allows any existing local file: this is the user's own browser.
 
-
-def _validate_local_file(text: str, parts, local_file_root) -> str:
-    """Allows file:// URLs only for files inside the active project root."""
-    if not local_file_root:
-        raise UrlBlockedError(
-            f"Refusing to open '{text[:200]}': local files are not available "
-            f"in this context; only http:// and https:// URLs are allowed."
-        )
+    A project-root restriction would not protect anything — Browser mode
+    already reads files through ``read_files`` / ``search_file_content`` — and
+    it blocks the obvious intent: opening a local HTML page or a saved file.
+    Only a host is refused, because ``file://server/share`` is a network path
+    with different semantics.
+    """
     if (parts.netloc or "").lower() not in ("", "localhost"):
         raise UrlBlockedError(
             f"Refusing to open '{text[:200]}': local files must use the form "
@@ -139,15 +190,9 @@ def _validate_local_file(text: str, parts, local_file_root) -> str:
         )
     try:
         target = Path(url2pathname(parts.path)).resolve()
-        root = Path(local_file_root).resolve()
     except (OSError, ValueError) as e:
         raise UrlBlockedError(
             f"Refusing to open '{text[:200]}': {e}") from e
-    if not _is_within(target, root):
-        raise UrlBlockedError(
-            f"Refusing to open '{text[:200]}': local files are limited to the "
-            f"active project directory ({root})."
-        )
     if not target.is_file():
         raise UrlBlockedError(
             f"Refusing to open '{text[:200]}': the file does not exist."
@@ -155,17 +200,31 @@ def _validate_local_file(text: str, parts, local_file_root) -> str:
     return text
 
 
+def _refusal(host: str, kind: str, mode: str) -> UrlBlockedError:
+    """Builds the model-readable refusal for a loopback/local target."""
+    label = NETWORK_ACCESS_LABELS.get(mode, mode)
+    where = "this computer (loopback)" if kind == "loopback" else "the local network"
+    return UrlBlockedError(
+        f"Refusing to open '{host}': it is {where}, and browser network access "
+        f"is set to '{label}' (Settings → Browser). Browser tasks may only use "
+        f"the addresses that setting allows."
+    )
+
+
 def validate_url(url: str, allowed_domains=None,
-                 block_private_networks: bool = True,
-                 local_file_root=None) -> str:
+                 network_access: str = DEFAULT_NETWORK_ACCESS,
+                 block_private_networks=None) -> str:
     """Validates a URL for browser navigation/requests.
 
     Returns the normalized URL. Raises UrlBlockedError with a model-readable
-    message otherwise. Private/loopback targets are always blocked when
-    ``block_private_networks`` is true; the allowlist can only narrow access,
-    it never re-enables a blocked network target. ``file://`` is accepted only
-    when ``local_file_root`` is set and the resolved file stays inside it.
+    message otherwise. ``network_access`` decides how far the browser may
+    reach (see NETWORK_ACCESS_MODES, default "any" = no restriction); the
+    allowlist can only narrow access, it never re-enables a blocked target.
+    ``file://`` accepts any existing local file.
     """
+    mode = normalize_network_access(
+        network_access if block_private_networks is None else
+        ("public" if block_private_networks else "any"))
     text = (url or "").strip()
     if not text:
         raise UrlBlockedError("Refusing to open an empty URL.")
@@ -175,7 +234,7 @@ def validate_url(url: str, allowed_domains=None,
         raise UrlBlockedError(f"Refusing to open invalid URL '{text[:200]}': {e}") from e
     scheme = (parts.scheme or "").lower()
     if scheme == "file":
-        return _validate_local_file(text, parts, local_file_root)
+        return _validate_local_file(text, parts)
     if scheme not in _ALLOWED_SCHEMES:
         raise UrlBlockedError(
             f"Refusing to open '{text[:200]}': only http:// and https:// URLs are allowed."
@@ -183,27 +242,38 @@ def validate_url(url: str, allowed_domains=None,
     host = (parts.hostname or "").strip().lower().rstrip(".")
     if not host:
         raise UrlBlockedError(f"Refusing to open '{text[:200]}': the URL has no host.")
-    if host in _BLOCKED_HOSTNAMES or host.endswith(_BLOCKED_SUFFIXES):
-        raise UrlBlockedError(
-            f"Refusing to open local host '{host}'. Browser tasks may only use public web pages."
-        )
+    if host in _BLOCKED_HOSTNAMES:
+        # "localhost" is this machine; the other names are loopback aliases.
+        if mode == "public":
+            raise UrlBlockedError(
+                f"Refusing to open local host '{host}': browser network access is "
+                f"set to '{NETWORK_ACCESS_LABELS['public']}' (Settings → Browser)."
+            )
+    elif host.endswith(_BLOCKED_SUFFIXES):
+        # .local / .internal / .home.arpa are local-network names, never public.
+        if mode != "any":
+            raise UrlBlockedError(
+                f"Refusing to open local-network host '{host}': browser network "
+                f"access is set to '{NETWORK_ACCESS_LABELS.get(mode, mode)}' "
+                f"(Settings → Browser)."
+            )
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
         literal = None
     if literal is not None:
-        if block_private_networks and _is_blocked_ip(str(literal)):
-            raise UrlBlockedError(
-                f"Refusing to open private/loopback address '{host}'. "
-                f"Browser tasks may only use public web pages."
-            )
-    elif block_private_networks:
+        kind = _address_kind(literal)
+        if kind is not None and mode != "any" and not (
+                kind == "loopback" and mode == "local"):
+            raise _refusal(host, kind, mode)
+    elif mode != "any":
         for address in _resolve(host):
-            if _is_blocked_ip(address):
-                raise UrlBlockedError(
-                    f"Refusing to open '{host}': it resolves to a private/loopback "
-                    f"address ({address}). Browser tasks may only use public web pages."
-                )
+            try:
+                kind = _address_kind(ipaddress.ip_address(address))
+            except ValueError:
+                kind = "local"
+            if kind is not None and not (kind == "loopback" and mode == "local"):
+                raise _refusal(host, kind, mode)
     if not _host_allowed(host, allowed_domains):
         raise UrlBlockedError(
             f"Refusing to open '{host}': it is not in browser.allowed_domains."

@@ -9,8 +9,9 @@ import logging
 import time
 from urllib.parse import urlsplit
 
-from .policy import (BrowserCancelledError, is_sensitive_text, redact_url,
-                     validate_url)
+from .policy import (BrowserCancelledError, DEFAULT_NETWORK_ACCESS,
+                     is_sensitive_text, normalize_network_access,
+                     redact_url, validate_url)
 
 logger = logging.getLogger(__name__)
 
@@ -45,16 +46,14 @@ class BrowserManager:
     def __init__(self, headless: bool = False, profile_dir: str = "cache/browser_profile",
                  timeout_ms: int = 30000, block_ads: bool = True,
                  easylist_path: str | None = None, allowed_domains=None,
-                 block_private_networks: bool = True,
-                 local_file_root: str | None = None):
+                 network_access: str = DEFAULT_NETWORK_ACCESS):
         self.headless = headless
         self.profile_dir = profile_dir
         self.timeout_ms = timeout_ms
         self.block_ads = block_ads
         self._easylist_path = easylist_path
         self.allowed_domains = list(allowed_domains or [])
-        self.block_private_networks = bool(block_private_networks)
-        self.local_file_root = local_file_root
+        self.network_access = normalize_network_access(network_access)
         self._cancel_check = None
         self._ad_engine_obj = None  # lazy EasyListEngine (built on first use)
         self._pw = None
@@ -123,8 +122,7 @@ class BrowserManager:
         return validate_url(
             url,
             allowed_domains=self.allowed_domains,
-            block_private_networks=self.block_private_networks,
-            local_file_root=self.local_file_root,
+            network_access=self.network_access,
         )
 
     # -- lifecycle ------------------------------------------------------

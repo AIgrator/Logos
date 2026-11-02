@@ -199,7 +199,7 @@ class SettingsManager(QObject):
             "max_steps": 50,
             "max_task_seconds": 1800,
             "allowed_domains": [],
-            "block_private_networks": True,
+            "network_access": "any",
             "require_approval": True,
             "approval_timeout_seconds": 300
         },

@@ -396,6 +396,7 @@ class SettingsPage(QWidget):
             self.light_theme_radio.toggled,
             self.dark_theme_radio.toggled,
             self.block_ads_checkbox.toggled,
+            self.browser_network_combo.currentIndexChanged,
             self.browser_headless_checkbox.toggled,
             self.browser_timeout_spinbox.valueChanged,
             self.terminal_access_combo.currentIndexChanged,
@@ -482,6 +483,10 @@ class SettingsPage(QWidget):
         # Browser (ad blocking defaults to ON)
         browser_settings = self.settings_manager.get("browser", {})
         self.block_ads_checkbox.setChecked(bool(browser_settings.get("block_ads", True)))
+        from src.browser.policy import resolve_network_access
+        network_index = self.browser_network_combo.findData(
+            resolve_network_access(browser_settings))
+        self.browser_network_combo.setCurrentIndex(max(0, network_index))
         self.browser_headless_checkbox.setChecked(bool(browser_settings.get("headless", False)))
         self.browser_timeout_spinbox.setValue(int(browser_settings.get("default_timeout_ms", 30000) or 30000))
 
@@ -590,6 +595,8 @@ class SettingsPage(QWidget):
 
         browser_settings = {
             "block_ads": self.block_ads_checkbox.isChecked(),
+            "network_access": (self.browser_network_combo.currentData()
+                               or "any"),
             "headless": self.browser_headless_checkbox.isChecked(),
             "default_timeout_ms": self.browser_timeout_spinbox.value(),
         }
@@ -599,6 +606,9 @@ class SettingsPage(QWidget):
             existing_browser = self.settings_manager.get("browser", {}) or {}
             for key, value in existing_browser.items():
                 browser_settings.setdefault(key, value)
+            # The pre-0.2 boolean is replaced by network_access; keeping it
+            # would leave two sources of truth in the file.
+            browser_settings.pop("block_private_networks", None)
         except Exception:
             pass
 
@@ -1430,11 +1440,31 @@ class SettingsPage(QWidget):
         browser_layout.addWidget(self._create_help_label(block_ads_tooltip), 0, 1, Qt.AlignLeft)
         browser_layout.addWidget(self.block_ads_checkbox, 0, 3)
 
+        from src.browser.policy import NETWORK_ACCESS_LABELS, NETWORK_ACCESS_MODES
+        self.browser_network_combo = QComboBox()
+        self.browser_network_combo.setFixedWidth(230)
+        for mode in NETWORK_ACCESS_MODES:
+            self.browser_network_combo.addItem(NETWORK_ACCESS_LABELS[mode], mode)
+        network_tooltip = (
+            "Any address (default): this is a normal browser, so localhost, "
+            "local network addresses and file:// pages open like any other "
+            "site.\n"
+            "Internet and this computer: refuses private LAN addresses "
+            "(192.168.x.x, 10.x.x.x, name.local) but still allows localhost.\n"
+            "Internet only: refuses localhost and LAN addresses.\n"
+            "The stricter modes only limit which addresses the agent may open "
+            "on its own; they exist for pages you do not trust, because a page "
+            "can try to talk the agent into visiting a router or a local file."
+        )
+        browser_layout.addWidget(QLabel("Network access:"), 1, 0)
+        browser_layout.addWidget(self._create_help_label(network_tooltip), 1, 1, Qt.AlignLeft)
+        browser_layout.addWidget(self.browser_network_combo, 1, 3)
+
         self.browser_headless_checkbox = QCheckBox()
         headless_tooltip = "Run the controlled browser without a visible window. Applies on next browser start."
-        browser_layout.addWidget(QLabel("Headless:"), 1, 0)
-        browser_layout.addWidget(self._create_help_label(headless_tooltip), 1, 1, Qt.AlignLeft)
-        browser_layout.addWidget(self.browser_headless_checkbox, 1, 3)
+        browser_layout.addWidget(QLabel("Headless:"), 2, 0)
+        browser_layout.addWidget(self._create_help_label(headless_tooltip), 2, 1, Qt.AlignLeft)
+        browser_layout.addWidget(self.browser_headless_checkbox, 2, 3)
 
         self.browser_timeout_spinbox = QSpinBox()
         self.browser_timeout_spinbox.setRange(5000, 120000)
@@ -1442,9 +1472,9 @@ class SettingsPage(QWidget):
         self.browser_timeout_spinbox.setSuffix(" ms")
         self.browser_timeout_spinbox.setFixedWidth(100)
         timeout_tooltip = "Action timeout for browser tools. Applies on next browser start."
-        browser_layout.addWidget(QLabel("Action timeout:"), 2, 0)
-        browser_layout.addWidget(self._create_help_label(timeout_tooltip), 2, 1, Qt.AlignLeft)
-        browser_layout.addWidget(self.browser_timeout_spinbox, 2, 3)
+        browser_layout.addWidget(QLabel("Action timeout:"), 3, 0)
+        browser_layout.addWidget(self._create_help_label(timeout_tooltip), 3, 1, Qt.AlignLeft)
+        browser_layout.addWidget(self.browser_timeout_spinbox, 3, 3)
 
         from src.browser import runtime as browser_runtime
         engine_tooltip = (
@@ -1464,9 +1494,9 @@ class SettingsPage(QWidget):
         engine_row.addWidget(self.browser_engine_label)
         engine_row.addStretch(1)
         engine_row.addWidget(self.browser_engine_button)
-        browser_layout.addWidget(QLabel("Browser engine:"), 3, 0)
-        browser_layout.addWidget(self._create_help_label(engine_tooltip), 3, 1, Qt.AlignLeft)
-        browser_layout.addLayout(engine_row, 3, 2, 1, 2)
+        browser_layout.addWidget(QLabel("Browser engine:"), 4, 0)
+        browser_layout.addWidget(self._create_help_label(engine_tooltip), 4, 1, Qt.AlignLeft)
+        browser_layout.addLayout(engine_row, 4, 2, 1, 2)
         self._refresh_browser_engine_row()
 
         return self._page(group)

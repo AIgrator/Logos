@@ -17,7 +17,9 @@ import time
 
 from PySide6.QtCore import Slot
 
-from src.browser.policy import BrowserCancelledError, classify_action, is_sensitive_text, redact_url
+from src.browser.policy import (BrowserCancelledError, classify_action,
+                               is_sensitive_text, redact_url,
+                               resolve_network_access)
 from src.computer.computer import Computer
 from src.executor.executor import Executor
 from states import VisionState
@@ -314,9 +316,7 @@ class BrowserHandler(BaseAgentHandler):
             timeout_ms=_setting_int(browser_settings, "default_timeout_ms", 30000),
             block_ads=_setting_bool(browser_settings, "block_ads", True),
             allowed_domains=browser_settings.get("allowed_domains") or [],
-            block_private_networks=_setting_bool(
-                browser_settings, "block_private_networks", True),
-            local_file_root=getattr(self.computer, "working_directory", None),
+            network_access=resolve_network_access(browser_settings),
         )
         self.computer.browser_manager = mgr
         # The browser_* tools also look for a factory on the Computer.
