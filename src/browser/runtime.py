@@ -38,24 +38,10 @@ DOWNLOAD_SIZE = "~320 MB"
 #: Roughly what those archives occupy once unpacked.
 DISK_SIZE = "~700 MB"
 
-#: What ``playwright install chromium`` fetches, in the order it fetches it,
-#: with the size each archive reports on its own progress lines. The driver
-#: counts every archive from 0 to 100 %, so the dialog needs the whole set to
-#: show one bar that only moves forward.
-ARCHIVES: tuple[tuple[str, float], ...] = (
-    ("Chromium", 197.5),
-    ("Chromium headless shell", 118.1),
-    ("FFmpeg", 1.6),
-    ("winldd", 0.1),
-)
-ARCHIVE_COUNT = len(ARCHIVES)
-#: Sum of :data:`ARCHIVES`, in megabytes (~317 MB, rounded to ~320 in the UI).
-TOTAL_MB = sum(size for _name, size in ARCHIVES)
-#: The same total rounded the way :data:`DOWNLOAD_SIZE` states it (320 MB), so
-#: the bar text and the headline do not disagree by three megabytes.
-TOTAL_LABEL_MB = round(TOTAL_MB, -1)
-
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+# "Downloading Chromium 156.0.8078.4 (playwright build v1248) from
+# https://cdn.playwright.dev/...": the link is noise in a status label.
+_URL_RE = re.compile(r"\s*(?:from\s+)?https?://\S+", re.IGNORECASE)
 # The driver draws its own bar with block characters between two pipes, e.g.
 # "|████████████      | 20% of 197.5 MiB"; all of it is decoration.
 _PROGRESS_RE = re.compile("[\u2588\u2589\u2593\u2592\u2591\u25a0\u2500-\u257f\u00a6|]+")
@@ -175,6 +161,7 @@ def install_command() -> list[str] | None:
 def _clean_line(line: str) -> str:
     """Turns a driver progress line into something worth showing in a label."""
     text = _ANSI_RE.sub("", line)
+    text = _URL_RE.sub("", text)
     text = text.replace("\r", " ").replace("\b", "")
     text = _PROGRESS_RE.sub(" ", text)
     return " ".join(text.split()).strip()
@@ -210,64 +197,6 @@ def archive_name(text: str) -> str | None:
     return None
 
 
-def archive_position(name: str) -> tuple[int, float] | None:
-    """``(1-based position, size in MB)`` of one archive, or None if unknown."""
-    for index, (label, size) in enumerate(ARCHIVES, start=1):
-        if label == name:
-            return index, size
-    return None
-
-
-class DownloadProgress:
-    """Folds the driver's per-archive percentages into one overall progress.
-
-    ``playwright install chromium`` downloads several archives one after
-    another and reports 0-100 % for each, so a raw percentage drops back to
-    zero between them and looks like a restart. This keeps the best percentage
-    seen per archive and reports the share of the whole download that is done,
-    plus a status line that names the file being fetched.
-    """
-
-    def __init__(self) -> None:
-        self._percent: dict[str, int] = {}
-        self.archive = ""
-
-    @property
-    def downloaded_mb(self) -> float:
-        """Megabytes accounted for so far; finished archives count in full."""
-        done = 0.0
-        for label, size in ARCHIVES:
-            percent = self._percent.get(label)
-            if percent is not None:
-                done += size * percent / 100.0
-        return done
-
-    def overall_percent(self) -> int | None:
-        """Progress across all archives, or None before the first percentage."""
-        if not self._percent:
-            return None
-        return max(0, min(100, int(round(self.downloaded_mb / TOTAL_MB * 100))))
-
-    def status_text(self) -> str:
-        """``File 2 of 4 · Chromium headless shell · 118.1 MiB``, or ""."""
-        position = archive_position(self.archive) if self.archive else None
-        if not position:
-            return ""
-        index, size = position
-        return f"File {index} of {ARCHIVE_COUNT} · {self.archive} · {size:g} MiB"
-
-    def feed(self, line: str) -> tuple[int | None, str]:
-        """Consumes one driver line: ``(overall percent or None, status text)``."""
-        percent, name, label = describe_progress(line, self.archive)
-        if name:
-            self.archive = name
-        if percent is None:
-            return None, self.status_text() or label
-        if self.archive:
-            self._percent[self.archive] = percent
-        return self.overall_percent(), self.status_text() or label
-
-
 def describe_progress(text: str, archive: str = "") -> tuple[int | None, str, str]:
     """Splits one driver line into ``(percent, archive, label)``.
 
@@ -275,12 +204,14 @@ def describe_progress(text: str, archive: str = "") -> tuple[int | None, str, st
     their own ("20% of 197.5 MiB"), so the caller passes the current one in.
     ``percent`` is None for ordinary status lines (the archive title, the final
     "downloaded to ..." line), so the caller can keep the bar where it is.
-    ``label`` is short enough for the dialog and carries no bar art.
+    ``label`` is what the dialog shows: the file name and its size while it
+    downloads, the name alone when a new file starts, and "" for the lines in
+    between (the caller keeps the last label).
     """
     name = archive_name(text) or archive
     percent = progress_percent(text)
     if percent is None:
-        return None, name, text
+        return None, name, name if name != archive else ""
     size = _SIZE_RE.search(text)
     if name and size:
         label = f"{name} · {size.group(1)}"

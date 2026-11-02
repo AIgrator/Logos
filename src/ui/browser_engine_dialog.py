@@ -59,7 +59,7 @@ class BrowserEngineDialog(QDialog):
         super().__init__(parent)
         self._task = None
         self._downloading = False
-        self._tracker = runtime.DownloadProgress()
+        self._archive = ""
 
         self.setWindowTitle("Browser engine")
         self.setMinimumWidth(620)
@@ -83,9 +83,6 @@ class BrowserEngineDialog(QDialog):
             f"Download: {runtime.DOWNLOAD_SIZE}\n"
             f"On disk after unpacking: {runtime.DISK_SIZE}\n"
             f"Saved to: {runtime.browsers_dir()}\n\n"
-            "It comes as four parts one after another — Chromium, its headless "
-            "shell, FFmpeg and winldd — so the name and size under the bar change "
-            "a few times while the bar keeps filling.\n\n"
             "It needs an internet connection and usually takes one to five minutes. "
             "Later Browser-mode sessions reuse the same copy, and updating or "
             "reinstalling Logos keeps it, so this happens once per computer. "
@@ -98,10 +95,10 @@ class BrowserEngineDialog(QDialog):
         self._status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self._status)
 
-        # One bar for the whole download: the driver reports 0-100 % for each
-        # archive separately, so a raw percentage would drop back to zero
-        # between them. DownloadProgress turns that into a single forward
-        # moving value, and the status line names the file being fetched.
+        # A normal filling bar: the driver reports "20% of 197.5 MiB" for the
+        # archive it is fetching right now, and every archive counts from 0 to
+        # 100 % again. Until the first percentage arrives the bar is busy
+        # (0-0), because the archives start with a name-and-size line.
         self._progress = QProgressBar()
         self._progress.setRange(0, 100)
         self._progress.setValue(0)
@@ -128,7 +125,7 @@ class BrowserEngineDialog(QDialog):
         if self._downloading:
             return
         self._downloading = True
-        self._tracker = runtime.DownloadProgress()
+        self._archive = ""
         self._download_button.setEnabled(False)
         self._cancel_button.setEnabled(True)
         self._cancel_button.setText("Cancel download")
@@ -144,16 +141,17 @@ class BrowserEngineDialog(QDialog):
     def _on_progress(self, line: str) -> None:
         if not self._downloading:
             return
-        percent, status = self._tracker.feed(line)
-        if status:
-            self._status.setText(status)
+        percent, name, label = runtime.describe_progress(line, self._archive)
+        if name:
+            self._archive = name
         if percent is None:
+            if label:
+                self._status.setText(label)
             return
         if self._progress.maximum() != 100:
             self._progress.setRange(0, 100)
         self._progress.setValue(percent)
-        done = self._tracker.downloaded_mb
-        self._progress.setFormat(f"%p% · {done:.0f} of {runtime.TOTAL_LABEL_MB:.0f} MB")
+        self._status.setText(label)
 
     def _on_done(self, ok: bool, message: str) -> None:
         self._downloading = False

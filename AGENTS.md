@@ -461,13 +461,14 @@ agree. `is_chromium_installed()` matches the exact revision from the bundled
 `src/ui/browser_engine_dialog.py`, which explains the download and shows
 progress while `install_chromium()` runs the bundled driver
 (`node cli.js install chromium`) on a thread. The driver fetches four archives
-in turn (Chromium 197.5 MiB, its headless shell 118.1 MiB, FFmpeg 1.6 MiB,
-winldd 0.1 MiB), each counting 0-100 % of its own size, so
-`runtime.DownloadProgress` keeps the best percentage per archive and reports
-one bar for the whole ~320 MB (`31% · 99 of 320 MB`) plus a status line naming
-the file (`File 1 of 4 · Chromium · 197.5 MiB`); the bar never steps back
-between archives. The same numbers live in `runtime.ARCHIVES`, so a size
-change only happens there. Settings → Browser shows the same
+in turn (Chromium, its headless shell, FFmpeg, winldd) and counts every one
+from 0 to 100 %, so the bar follows the current archive only: it restarts when
+the next file begins, and the status line above it names that file and its size
+(`Chromium · 197.5 MiB`), both taken from the driver's own `20% of 197.5 MiB`
+lines. `runtime.describe_progress` strips the driver's bar art and the
+`https://…` link from an archive title (that link used to swallow the name, so
+the label read `Downloading · 197.5 MiB`). The `Download: ~320 MB` line in the
+body is the only place the whole total is stated. Settings → Browser shows the same
 status and button. `BrowserManager.launch()` refuses with a readable message
 instead of Playwright's "Executable doesn't exist at …_MEI…" error.
 
