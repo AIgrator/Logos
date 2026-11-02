@@ -2,9 +2,11 @@
 
 Owns the Playwright lifecycle and exposes a ref-based grounding contract:
 every snapshot assigns stable integer refs to visible interactive elements;
-actions address elements by ref, never by coordinates. Designed to later
-become the `dom` GroundingBackend without changing callers.
+actions address elements by ref, and by viewport coordinates only where no
+ref can exist (canvas, custom widgets, cross-origin frames). Designed to
+later become the `dom` GroundingBackend without changing callers.
 """
+import json
 import logging
 import time
 from urllib.parse import urlsplit
@@ -38,6 +40,21 @@ _TAG_TO_ROLE = {
     "polygon": "button",
     "path": "button",
 }
+
+
+def _frame_host(frame) -> str:
+    """Short frame identity for model-facing text ('hidden' when about:blank)."""
+    try:
+        url = frame.url or ""
+    except Exception:
+        return "unknown"
+    if not url or url == "about:blank":
+        return "blank"
+    try:
+        parts = urlsplit(url)
+        return parts.hostname or (parts.scheme or "unknown")
+    except Exception:
+        return "unknown"
 
 
 class BrowserManager:
@@ -450,8 +467,29 @@ class BrowserManager:
             except Exception:
                 text = ""
         text = " ".join(text.split())
-        return (f"Title: {page.title()}\nURL: {redact_url(page.url)}"
+        head = (f"Title: {page.title()}\nURL: {redact_url(page.url)}"
                 f"\nText: {text[:max_chars]}")
+        parts = [head]
+        # Cross-origin frames never appear in the top document text, yet
+        # they often hold exactly the control the task is about (widgets,
+        # captchas, checkout forms). Read them separately instead of
+        # claiming the page is empty.
+        budget = max_chars
+        for index, frame in self._frames()[1:]:
+            if budget <= 0:
+                break
+            try:
+                body = frame.evaluate("document.body ? document.body.innerText : ''") or ""
+            except Exception:
+                continue
+            body = " ".join(str(body).split())
+            if not body:
+                continue
+            host = _frame_host(frame)
+            chunk = body[:budget]
+            budget -= len(chunk)
+            parts.append(f"Frame {index} ({host}): {chunk}")
+        return "\n".join(parts)
 
     @staticmethod
     def _visible_text(page) -> str:
@@ -495,52 +533,126 @@ class BrowserManager:
 
     # -- grounding (ref snapshot) ----------------------------------------
 
-    def snapshot(self, max_elements: int = 200) -> list:
-        """Visible interactive elements as [{ref, role, name}]. Rebuilds refs."""
+    def _frames(self) -> list:
+        """[(index, frame)] with the main frame at index 0."""
+        try:
+            frames = list(self._require_page().frames)
+        except Exception:
+            return []
+        return list(enumerate(frames))
+
+    def frames(self) -> list:
+        """Frame inventory: [{index, url, name, main}] (main frame = index 0)."""
+        out = []
+        for index, frame in self._frames():
+            try:
+                url, name = redact_url(frame.url), (frame.name or "")
+            except Exception:
+                url, name = "", ""
+            out.append({"index": index, "url": url, "name": name, "main": index == 0})
+        return out
+
+    def eval_js(self, script: str, frame: int = 0) -> str:
+        """Runs one JavaScript expression (or function) and returns its value.
+
+        Needed where the DOM grounding cannot help: reading state a page
+        keeps in JS, computing a layout point, or driving a widget that has
+        no clickable element at all.
+        """
         self._check_cancel()
-        page = self._require_page()
-        locators = page.locator(_INTERACTIVE_SELECTOR)
-        count = min(locators.count(), max_elements)
+        script = (script or "").strip()
+        if not script:
+            raise ValueError("browser_eval needs a JavaScript expression in 'script'.")
+        frames = self._frames()
+        try:
+            index = int(frame or 0)
+        except (TypeError, ValueError):
+            index = 0
+        if not frames:
+            raise ValueError("No page is open. Use browser_goto first.")
+        if not (0 <= index < len(frames)):
+            raise ValueError(f"Frame {index} does not exist; this page has "
+                             f"{len(frames)} frame(s) (0 = main).")
+        target = frames[index][1]
+        try:
+            result = target.evaluate(script)
+        except Exception as e:
+            raise ValueError(f"JavaScript failed: {str(e).splitlines()[0][:300]}") from e
+        if isinstance(result, str):
+            text = result
+        else:
+            try:
+                text = json.dumps(result, ensure_ascii=False)
+            except (TypeError, ValueError):
+                text = str(result)
+        text = text if text is not None else "undefined"
+        limit = 6000
+        if len(text) > limit:
+            text = text[:limit] + f"... [{len(text) - limit} more characters]"
+        return text
+
+    def snapshot(self, max_elements: int = 200) -> list:
+        """Visible interactive elements as [{ref, role, name}]. Rebuilds refs.
+
+        Every frame is walked, so controls inside cross-origin iframes get
+        refs like any other element; the entry carries its frame index.
+        """
+        self._check_cancel()
+        self._require_page()
         elements = []
         self._refs = {}
-        for i in range(count):
+        for index, frame in self._frames():
+            budget = max_elements - len(elements)
+            if budget <= 0:
+                break
             try:
-                loc = locators.nth(i)
-                if not loc.is_visible():
-                    continue
-                tag = (loc.evaluate("e => e.tagName.toLowerCase()") or "").strip()
-                explicit_role = (loc.get_attribute("role") or "").strip()
-                input_type = (loc.get_attribute("type") or "").strip().lower() if tag == "input" else ""
-                if tag == "input" and input_type in ("radio", "checkbox"):
-                    # Real control type beats the generic "textbox": a bare
-                    # "textbox: 1" hid answer radios from the model entirely.
-                    role = explicit_role or input_type
-                elif tag == "input" and input_type in ("submit", "button", "image"):
-                    role = explicit_role or "button"
-                else:
-                    role = explicit_role or _TAG_TO_ROLE.get(tag, "") or tag or "element"
-                label_text = ""
-                if tag in ("input", "select", "textarea"):
-                    label_text = self._labeled_text(loc)
-                name = (loc.get_attribute("aria-label")
-                        or label_text
-                        or loc.get_attribute("placeholder")
-                        or loc.get_attribute("value")
-                        or loc.get_attribute("alt")
-                        or self._element_text(loc, tag)
-                        or "").strip()[:120]
-                ref = len(elements) + 1
-                self._refs[ref] = loc
-                elements.append({
-                    "ref": ref, "role": role, "name": name,
-                    "type": input_type,
-                    "sensitive": bool(
-                        input_type == "password"
-                        or is_sensitive_text(name, explicit_role)),
-                })
+                locators = frame.locator(_INTERACTIVE_SELECTOR)
+                count = min(locators.count(), budget)
             except Exception:
                 continue
-        logger.info(f"Browser snapshot: {len(elements)} interactive elements.")
+            for i in range(count):
+                try:
+                    loc = locators.nth(i)
+                    if not loc.is_visible():
+                        continue
+                    tag = (loc.evaluate("e => e.tagName.toLowerCase()") or "").strip()
+                    explicit_role = (loc.get_attribute("role") or "").strip()
+                    input_type = (loc.get_attribute("type") or "").strip().lower() if tag == "input" else ""
+                    if tag == "input" and input_type in ("radio", "checkbox"):
+                        # Real control type beats the generic "textbox": a bare
+                        # "textbox: 1" hid answer radios from the model entirely.
+                        role = explicit_role or input_type
+                    elif tag == "input" and input_type in ("submit", "button", "image"):
+                        role = explicit_role or "button"
+                    else:
+                        role = explicit_role or _TAG_TO_ROLE.get(tag, "") or tag or "element"
+                    label_text = ""
+                    if tag in ("input", "select", "textarea"):
+                        label_text = self._labeled_text(loc)
+                    name = (loc.get_attribute("aria-label")
+                            or label_text
+                            or loc.get_attribute("placeholder")
+                            or loc.get_attribute("value")
+                            or loc.get_attribute("alt")
+                            or self._element_text(loc, tag)
+                            or "").strip()[:120]
+                    ref = len(elements) + 1
+                    self._refs[ref] = loc
+                    entry = {
+                        "ref": ref, "role": role, "name": name,
+                        "type": input_type,
+                        "sensitive": bool(
+                            input_type == "password"
+                            or is_sensitive_text(name, explicit_role)),
+                    }
+                    if index:
+                        entry["frame"] = index
+                        entry["frame_host"] = _frame_host(frame)
+                    elements.append(entry)
+                except Exception:
+                    continue
+        logger.info(f"Browser snapshot: {len(elements)} interactive elements "
+                    f"across {len(self._frames())} frame(s).")
         self._last_snapshot = elements
         return elements
 
@@ -679,6 +791,55 @@ class BrowserManager:
             opener_url = ""
         before = {id(p) for p in self._browser.pages}
         loc.click(timeout=self.timeout_ms)
+        self._after_click(opener_url, before)
+
+    def viewport_size(self) -> tuple[int, int]:
+        """Visible page size in CSS pixels (0, 0 when unknown)."""
+        try:
+            size = self._require_page().viewport_size or {}
+            return int(size.get("width") or 0), int(size.get("height") or 0)
+        except Exception:
+            return 0, 0
+
+    def click_at(self, x, y, button: str = "left", clicks: int = 1) -> tuple[int, int]:
+        """Clicks a point of the visible page (CSS pixels, top-left origin).
+
+        Needed where a ref cannot exist: canvas/image maps, custom widgets
+        that only react to raw mouse events, and controls inside a
+        cross-origin frame (such content never appears in a snapshot).
+        Returns the viewport size the point was validated against.
+        """
+        self._check_cancel()
+        page = self._require_page()
+        try:
+            px, py = float(x), float(y)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"browser_click needs numeric coordinates, got x={x!r}, y={y!r}.") from None
+        width, height = self.viewport_size()
+        if width and height and not (0 <= px < width and 0 <= py < height):
+            raise ValueError(
+                f"Point ({px:g}, {py:g}) is outside the visible page: the viewport is "
+                f"{width}x{height} CSS pixels, so x must be 0-{width - 1} and y 0-{height - 1}. "
+                f"Scroll to the target first, or click it by ref.")
+        button = str(button or "left").strip().lower()
+        if button not in {"left", "right", "middle"}:
+            raise ValueError(f"Unsupported mouse button '{button}'. Use left, right or middle.")
+        try:
+            count = max(1, min(int(clicks or 1), 3))
+        except (TypeError, ValueError):
+            count = 1
+        logger.info(f"Browser click at ({px:g}, {py:g}) button={button} clicks={count}")
+        try:
+            opener_url = page.url
+        except Exception:
+            opener_url = ""
+        before = {id(p) for p in self._browser.pages}
+        page.mouse.click(px, py, button=button, click_count=count)
+        self._after_click(opener_url, before)
+        return width, height
+
+    def _after_click(self, opener_url: str, before: set) -> None:
         try:
             after_url = self._page.url if self._page else ""
         except Exception:

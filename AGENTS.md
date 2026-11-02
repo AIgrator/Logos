@@ -494,6 +494,31 @@ Without that, a NAT64 resolver's answer for an IPv4-only site (`ukr.net` →
 `64:ff9b::23ba:da43`, i.e. 35.186.218.67) fell into `::/8`, which Python reports
 as IETF-reserved, and a public page looked local.
 
+Grounding is refs first, but not refs only (`src/browser/manager.py`).
+`BrowserManager.snapshot()` walks every frame of the page, so a control inside a
+cross-origin iframe (widgets, captchas, checkout forms) gets a ref like any other
+element and is marked `(frame N: host)` in the `browser_snapshot` output; clicks,
+fills and hovers then address it by that ref. `browser_read` appends the text of
+each frame as a `Frame N (host)` line, because a cross-origin frame never appears
+in the top document text. `browser_click` also takes `x`/`y` for the cases where
+no ref can exist — canvas, image maps, widgets that react only to raw mouse
+events, a frame the snapshot capped out on: CSS pixels from the top-left of the
+visible page (the same pixels as a `browser_screenshot`, which is never scaled),
+validated against the viewport so a stray point cannot click outside the page,
+with an optional `button` (left/right/middle). `browser_frames` lists the frames
+with their index, and `browser_eval` runs one JavaScript expression in the page
+or in a frame by index; its result is capped at 6 000 characters and wrapped as
+untrusted page content. `browser_eval` is the only browser tool whose every call
+asks for approval (`classify_action` in `src/browser/policy.py` returns a
+`page_javascript` check showing the script), because page JavaScript can read
+cookies and storage and fetch with the page's session. This is the reason the
+webscraper.io bot-check "CDP detection with a click within cross domain iframe"
+test can now pass at all: before frame-aware snapshots the checkbox had no ref
+and no tool could reach it. The remaining failure on that page, "Popular
+Browser", comes from the `navigator.userAgentData` brand list of a plain
+Chromium build, not from automation signals, and closing it is stealth work
+(`patchright`/`rebrowser-patches`), deliberately not done yet.
+
 ## MCP servers
 
 Terminal mode reaches user-configured MCP servers through three meta-tools

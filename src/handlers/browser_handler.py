@@ -32,7 +32,7 @@ _STOP_SENTINEL = object()
 
 # Tool results that contain page-authored text (untrusted data, not orders).
 _UNTRUSTED_RESULT_TOOLS = frozenset({
-    "browser_read", "browser_snapshot", "browser_find",
+    "browser_read", "browser_snapshot", "browser_find", "browser_eval",
 })
 
 

@@ -71,32 +71,120 @@ def browser_snapshot(self, **kwargs):
     if not elements:
         return (head + "No interactive elements found on this page. "
                 "The page may still be loading, or you may need a different "
-                "screen — take a screenshot to see the current state before "
-                "deciding your next step. Do not click blindly: without refs "
-                "there is nothing to click.")
-    lines = [f"[{e['ref']}] {e['role']}: {e['name'] or '(no label)'}" for e in elements]
-    return head + "Interactive elements:\n" + "\n".join(lines)
+                "screen — take a screenshot to see the current state, check "
+                "browser_frames, or click by x/y coordinates before "
+                "deciding your next step.")
+    lines = []
+    for e in elements:
+        where = f"(frame {e['frame']}: {e.get('frame_host', '?')}) " if e.get("frame") else ""
+        lines.append(f"[{e['ref']}] {where}{e['role']}: {e['name'] or '(no label)'}")
+    note = ""
+    if any(e.get("frame") for e in elements):
+        note = ("\nElements marked (frame N: host) live inside an iframe: click, fill and "
+                "hover them by ref exactly like the rest.\n")
+    return head + note + "Interactive elements:\n" + "\n".join(lines)
 
 
 @tool_meta(
     tool={
         "name": "browser_click",
-        "strategic": "Clicks an element by its ref.",
-        "description": "Clicks the element with the given ref from the latest snapshot.",
+        "strategic": "Clicks an element by ref, or a point by coordinates.",
+        "description": (
+            "Clicks the element with the given ref from the latest snapshot. When the "
+            "target has no ref - canvas, image map, a custom widget that reacts only to "
+            "raw mouse events, or a control inside a cross-origin frame - pass x and y "
+            "instead: CSS pixels counted from the top-left corner of the visible page, "
+            "read off browser_screenshot. Coordinates are for the current scroll "
+            "position only."),
         "arguments": {
             "description": {"type": "STRING", "description": "What is being clicked.", "required": True},
-            "ref": {"type": "INTEGER", "description": "Element ref from browser_snapshot.", "required": True},
+            "ref": {"type": "INTEGER", "description": "Element ref from browser_snapshot. Leave out when clicking by coordinates.", "required": False},
+            "x": {"type": "INTEGER", "description": "Horizontal point in CSS pixels of the visible page.", "required": False},
+            "y": {"type": "INTEGER", "description": "Vertical point in CSS pixels of the visible page.", "required": False},
+            "button": {"type": "STRING", "description": "left (default), right or middle. Coordinates only.", "required": False},
         },
     },
     flags={"platform": "any", "mode": "browser"},
 )
 def browser_click(self, **kwargs):
     ref = kwargs.get("ref")
+    x, y = kwargs.get("x"), kwargs.get("y")
+    if x is not None and y is not None:
+        mgr = _manager(self)
+        try:
+            px, py = float(x), float(y)
+        except (TypeError, ValueError):
+            raise ValueError(f"browser_click needs numeric x/y, got x={x!r}, y={y!r}.") from None
+        width, height = mgr.click_at(px, py, button=kwargs.get("button") or "left")
+        note = f" (viewport {width}x{height})" if width else ""
+        return _with_dialog_note(
+            mgr,
+            f"Clicked at ({px:g}, {py:g}){note}. A coordinate click cannot confirm what "
+            f"was under it - take browser_snapshot or browser_screenshot to verify.")
     if ref is None:
-        raise ValueError("Action 'browser_click' failed: Missing required 'ref' argument. Take browser_snapshot first.")
+        raise ValueError(
+            "Action 'browser_click' failed: missing 'ref', or 'x' and 'y' for a "
+            "coordinate click. Take browser_snapshot first.")
     mgr = _manager(self)
     mgr.click(ref)
     return _with_dialog_note(mgr, f"Clicked element ref={ref}.")
+
+
+@tool_meta(
+    tool={
+        "name": "browser_frames",
+        "strategic": "Lists the iframes of the current page.",
+        "description": (
+            "Lists this page's frames with their index, URL and name. Index 0 is the top "
+            "document. Controls inside a frame are already clickable by ref; the index is "
+            "only needed to run browser_eval inside that frame."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "Why the frame list is needed.", "required": True},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_frames(self, **kwargs):
+    mgr = _manager(self)
+    frames = mgr.frames()
+    lines = []
+    for frame in frames:
+        line = f"[{frame['index']}] {frame['url'] or '(not loaded yet)'}"
+        if frame["name"]:
+            line += f" name={frame['name']}"
+        if frame["main"]:
+            line += " (top document)"
+        lines.append(line)
+    return f"Frames ({len(frames)}):\n" + "\n".join(lines)
+
+
+@tool_meta(
+    tool={
+        "name": "browser_eval",
+        "strategic": "Runs one JavaScript expression in the page.",
+        "description": (
+            "Evaluates one JavaScript expression or function in the page and returns what "
+            "it evaluates to as text. Use it only where clicks and snapshots cannot help: "
+            "reading a value the page keeps in JS state, measuring where an element is, or "
+            "driving a widget that has no clickable element. It cannot navigate the browser "
+            "itself, and it must never be used to read credentials, cookies or storage, or "
+            "to fetch another site with the page's session. Pass frame (see browser_frames) "
+            "to run inside an iframe; the default is the top document."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "What the script is for.", "required": True},
+            "script": {"type": "STRING", "description": "JavaScript expression or function source, e.g. document.title or () => window.innerWidth.", "required": True},
+            "frame": {"type": "INTEGER", "description": "Frame index from browser_frames; omit for the top document.", "required": False},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_eval(self, **kwargs):
+    script = kwargs.get("script")
+    if not script:
+        raise ValueError("Action 'browser_eval' failed: missing 'script' with the JavaScript to run.")
+    mgr = _manager(self)
+    result = mgr.eval_js(script, frame=kwargs.get("frame") or 0)
+    return _with_dialog_note(mgr, f"JavaScript returned: {result}")
 
 
 @tool_meta(

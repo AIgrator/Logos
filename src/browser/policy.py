@@ -371,4 +371,12 @@ def classify_action(action_name: str, action_args: dict, element: dict | None = 
                 "code": "close_tab",
                 "message": f"Tab {args.get('index', '(current)')} will be closed.",
             })
+    elif action_name == "browser_eval":
+        script = str(args.get("script") or "").strip().replace("\n", " ")
+        if len(script) > 200:
+            script = script[:200] + "…"
+        checks.append({
+            "code": "page_javascript",
+            "message": f"Runs JavaScript inside the page: {script or '(empty)'}",
+        })
     return checks
