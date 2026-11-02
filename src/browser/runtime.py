@@ -32,11 +32,18 @@ logger = logging.getLogger(__name__)
 
 BROWSERS_PATH_ENV = "PLAYWRIGHT_BROWSERS_PATH"
 
-#: Shown in the UI before the download starts; the real size is ~150 MB.
-DOWNLOAD_SIZE = "~150 MB"
+#: Shown in the UI before the download starts: Chromium itself (~198 MB) plus
+#: the headless shell Playwright uses for headless mode, ffmpeg and winldd.
+DOWNLOAD_SIZE = "~320 MB"
+#: Roughly what those archives occupy once unpacked.
+DISK_SIZE = "~700 MB"
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
-_PROGRESS_RE = re.compile("[\u2588\u2589\u2593\u2592\u2591\u25a0\u2500-\u257f]+")
+# The driver draws its own bar with block characters between two pipes, e.g.
+# "|████████████      | 20% of 197.5 MiB"; all of it is decoration.
+_PROGRESS_RE = re.compile("[\u2588\u2589\u2593\u2592\u2591\u25a0\u2500-\u257f\u00a6|]+")
+_PERCENT_RE = re.compile(r"(\d{1,3})\s*%")
+_SIZE_RE = re.compile(r"of\s+([\d.,]+\s*[KMG]i?B)", re.IGNORECASE)
 
 
 def _default_browsers_dir() -> Path:
@@ -152,8 +159,61 @@ def _clean_line(line: str) -> str:
     """Turns a driver progress line into something worth showing in a label."""
     text = _ANSI_RE.sub("", line)
     text = text.replace("\r", " ").replace("\b", "")
-    text = _PROGRESS_RE.sub("", text)
+    text = _PROGRESS_RE.sub(" ", text)
     return " ".join(text.split()).strip()
+
+
+def progress_percent(text: str) -> int | None:
+    """Percentage carried by a progress line (``20% of 197.5 MiB``), or None."""
+    match = _PERCENT_RE.search(text)
+    if not match:
+        return None
+    try:
+        return max(0, min(100, int(match.group(1))))
+    except ValueError:  # pragma: no cover - regex only matches digits
+        return None
+
+
+def archive_name(text: str) -> str | None:
+    """Friendly name of the archive a progress line belongs to.
+
+    ``playwright install chromium`` fetches several archives one after another
+    (Chromium, its headless shell, ffmpeg, winldd), each with its own 0-100%
+    bar, so the dialog names the current one to explain the resets.
+    """
+    lowered = text.lower()
+    if "ffmpeg" in lowered:
+        return "FFmpeg"
+    if "headless shell" in lowered:
+        return "Chromium headless shell"
+    if "chrome for testing" in lowered or "chromium" in lowered:
+        return "Chromium"
+    return None
+
+
+def describe_progress(text: str, archive: str = "") -> tuple[int | None, str, str]:
+    """Splits one driver line into ``(percent, archive, label)``.
+
+    ``archive`` is the archive seen so far: percentage lines carry no name of
+    their own ("20% of 197.5 MiB"), so the caller passes the current one in.
+    ``percent`` is None for ordinary status lines (the archive title, the final
+    "downloaded to ..." line), so the caller can keep the bar where it is.
+    ``label`` is short enough for the dialog and carries no bar art.
+    """
+    name = archive_name(text) or archive
+    percent = progress_percent(text)
+    if percent is None:
+        return None, name, text
+    size = _SIZE_RE.search(text)
+    if name and size:
+        label = f"{name} · {size.group(1)}"
+    elif name:
+        label = f"{name} · downloading"
+    elif size:
+        label = f"Downloading · {size.group(1)}"
+    else:
+        label = text
+    return percent, name, label
 
 
 def _is_progress_line(text: str) -> bool:
@@ -162,7 +222,7 @@ def _is_progress_line(text: str) -> bool:
         return False
     if "%" in text:
         return True
-    return text.startswith(("Chrome for Testing", "Chromium", "Downloading", "Installing", "Extracting"))
+    return text.startswith(("Chrome for Testing", "Chromium", "FFmpeg", "Downloading", "Installing", "Extracting"))
 
 
 def _failure_detail(tail: list[str], code: int | None) -> str:

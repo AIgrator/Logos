@@ -9,12 +9,15 @@
 #   the temp folder and a read-only install folder can vanish.
 # - Splash: assets/ico.png placeholder until the animated GIF lands. Only
 #   one-file mode supports the bootloader splash.
-# - Browsers (Playwright Chromium, ~150MB) are NOT bundled: the first switch
-#   to Browser mode (and Settings -> Browser) offers a one-time download into
-#   %LOCALAPPDATA%\ms-playwright (src/browser/runtime.py pins
+# - Browsers (Playwright Chromium, ~320MB download) are NOT bundled: the first
+#   switch to Browser mode (and Settings -> Browser) offers a one-time download
+#   into %LOCALAPPDATA%\ms-playwright (src/browser/runtime.py pins
 #   PLAYWRIGHT_BROWSERS_PATH, because the Python package would otherwise point
 #   the driver at its own folder inside the temporary _MEI unpack dir).
 #   Keeps the base build lean. A pre-installed cache is reused as-is.
+# - The release version has one source, [project] version in pyproject.toml:
+#   it is bundled for src/build_info.py (title bar, About page) and turned into
+#   the EXE version resource below, which installer/logos.iss reads back.
 # - keyring uses the ctypes-based Windows backend (no pywin32 needed).
 # - Heavy ML stack (torch/OCR/YOLO) was removed from dependencies, which
 #   is what makes this build viable at all (was ~9GB unstartable).
@@ -59,8 +62,59 @@ datas = [
     (os.path.join(SPECPATH, "skills"), "skills"),
     (os.path.join(SPECPATH, "cache", "models.json"), "cache"),
     (os.path.join(SPECPATH, "LICENSE"), "."),
+    # The single source of the release version, read at runtime by build_info.
+    (os.path.join(SPECPATH, "pyproject.toml"), "."),
     *provider_sources,
 ]
+
+
+def _app_version():
+    """[project] version from pyproject.toml (no duplicated number anywhere)."""
+    import tomllib
+
+    with open(os.path.join(SPECPATH, "pyproject.toml"), "rb") as f:
+        return str(tomllib.load(f)["project"]["version"]).strip()
+
+
+def _version_resource(version):
+    """Writes the EXE version resource PyInstaller embeds (and the installer reads)."""
+    parts = [int(p) for p in version.split(".") if p.isdigit()][:4]
+    quad = (parts + [0, 0, 0, 0])[:4]
+    path = os.path.join(workpath, "logos_version_info.txt")
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(f"""VSVersionInfo(
+  ffi=FixedFileInfo(
+    filevers={tuple(quad)},
+    prodvers={tuple(quad)},
+    mask=0x3f,
+    flags=0x0,
+    OS=0x40004,
+    fileType=0x1,
+    subtype=0x0,
+    date=(0, 0)
+  ),
+  kids=[
+    StringFileInfo([
+      StringTable('040904B0', [
+        StringStruct('CompanyName', 'Yaroslav Litvinchenko'),
+        StringStruct('FileDescription', 'Logos AI Assistant'),
+        StringStruct('FileVersion', '{version}'),
+        StringStruct('InternalName', 'Logos'),
+        StringStruct('LegalCopyright', 'Copyright (c) 2026 Yaroslav Litvinchenko'),
+        StringStruct('OriginalFilename', 'Logos.exe'),
+        StringStruct('ProductName', 'Logos AI Assistant'),
+        StringStruct('ProductVersion', '{version}')
+      ])
+    ]),
+    VarFileInfo([VarStruct('Translation', [1033, 1200])])
+  ]
+)
+""")
+    return path
+
+
+APP_VERSION = _app_version()
+version_resource = _version_resource(APP_VERSION)
 
 dynamic_imports = (
     _py_modules(PROVIDERS, "llm.providers")
@@ -135,5 +189,6 @@ exe = EXE(
     codesign_identity=None,
     entitlements_file=None,
     icon="assets/ico.ico",
+    version=version_resource,
     splash=splash,
 )

@@ -137,7 +137,7 @@ class BrowserManager:
         if not is_chromium_installed():
             raise RuntimeError(
                 "The browser engine (Chromium) is not installed yet. Open "
-                "Settings → Browser → Download… (about 150 MB) and retry.")
+                "Settings → Browser → Download… (about 320 MB) and retry.")
         from playwright.sync_api import sync_playwright
         import os
         os.makedirs(self.profile_dir, exist_ok=True)

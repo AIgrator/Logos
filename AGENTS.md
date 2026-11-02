@@ -17,6 +17,20 @@ Both builders are ephemeral tools, never dependencies: do not add PyInstaller or
 
 `build/` and `dist/` are packaging artifacts and git-ignored. A frozen build keeps settings, logs, cache and the materialized `prompts/` + `assets/` in `%LOCALAPPDATA%\Logos` (see `src/app_paths.py`), because the one-file unpack folder is temporary and the install folder may be read-only. Compilation success alone is not proof: launch the built exe and, for installer changes, run install -> launch -> uninstall.
 
+## Version
+
+`[project] version` in `pyproject.toml` is the only place a release number
+exists. `src/build_info.py` reads it at runtime (source runs) or from the copy
+`logos.spec` bundles next to the executable, so the window title
+(`… [v0.1.0]`), the startup log line and Settings → About
+(`Version 0.1.0 · build <commit>` for source runs) all follow a one-line bump.
+`logos.spec` also writes an EXE version resource from that number, and
+`installer/logos.iss` reads it back (`GetStringFileInfo(…, "ProductVersion")`),
+so the installer needs no hand-edited `AppVersion`. The commit hash is still
+logged and shown on the About page when the app runs from a checkout; an
+installed build has no repository and shows the version alone — never
+"unknown".
+
 ## Dependency manifests — keep in sync (DO NOT FORGET)
 
 There are two dependency manifests, and they are **manually kept in sync**:
@@ -349,7 +363,11 @@ and `mcp_page.commit()` so pending edits and removed MCP secrets are not lost.
 Settings → Providers (`src/ui/widgets/providers_page.py`) is the single place
 where providers are connected, activated and configured. Built-in rows open the
 schema-driven `ProviderDialog` (API key + model); custom OpenAI- or
-Anthropic-compatible endpoints open `custom_provider_dialog.py`. That dialog's
+Anthropic-compatible endpoints open `custom_provider_dialog.py`. The Google
+schema offers no native-search toggle on purpose: Gemini's Google Search
+grounding is billed and unavailable on free keys, so chat web search goes
+through the app's own `web_search` / `web_fetchs` tools, and the form only
+notes that Vision needs a paid key. That dialog's
 **API format** selector writes `custom_providers[i]["protocol"]` (`openai`
 default, or `anthropic`); `src/llm/custom_providers.py` builds a
 `CustomOpenAIProvider` or `CustomAnthropicProvider` subclass accordingly. The
@@ -429,7 +447,7 @@ layouts (`_reflow_toolbar`).
 ## Browser engine
 
 Browser mode drives a real Chromium through Playwright, and that binary is not
-packaged (about 150 MB). `src/browser/runtime.py` owns the runtime decisions:
+packaged (~320 MB download, ~700 MB on disk). `src/browser/runtime.py` owns the runtime decisions:
 `PLAYWRIGHT_BROWSERS_PATH` is pinned to a stable per-user folder
 (`%LOCALAPPDATA%\ms-playwright`; `~/.cache/ms-playwright` or
 `~/Library/Caches/ms-playwright` elsewhere; an explicit environment value wins),

@@ -134,7 +134,7 @@ The application has four main modes, each designed for different types of tasks:
 *   **Browser Mode:** In this mode, the assistant drives a real Chromium browser via accessibility snapshots: it sees numbered element references (`browser_snapshot`), clicks/fills/presses them, reads pages, manages tabs, and takes screenshots with overlaid reference badges. Like Terminal Mode, it is **stateful** and works step by step — the agent loops observe → act → assess until the goal is reached or it escalates to the user.
 
 > [!NOTE]
-> **Browser mode downloads Chromium once.** The browser itself is not shipped with Logos (~150 MB). The first time you switch to Browser mode, the app explains this and downloads Chromium into `%LOCALAPPDATA%\ms-playwright` (`~/.cache/ms-playwright` on Linux); every later session reuses it. Settings → Browser shows the engine status and can start or repeat the download. Point `PLAYWRIGHT_BROWSERS_PATH` at another folder before launching to keep the cache elsewhere — the path is honoured both for the download and at runtime.
+> **Browser mode downloads Chromium once.** The browser itself is not shipped with Logos (~320 MB download, ~700 MB on disk). The first time you switch to Browser mode, the app explains this and downloads Chromium into `%LOCALAPPDATA%\ms-playwright` (`~/.cache/ms-playwright` on Linux); every later session reuses it. Settings → Browser shows the engine status and can start or repeat the download. Point `PLAYWRIGHT_BROWSERS_PATH` at another folder before launching to keep the cache elsewhere — the path is honoured both for the download and at runtime.
 
 ### Transcript
 

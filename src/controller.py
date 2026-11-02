@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (
 from PIL import Image
 
 from brain import Brain
-from build_info import get_build_id
+from build_info import get_version_label
 from llm.custom_providers import provider_is_configured
 from llm.error_formatter import CONTINUE_LINK
 from llm.llm_worker import LLMWorker
@@ -3264,8 +3264,8 @@ class AppController(QObject):
             return "Logos AI Assistant"
 
     def _get_llm_window_title(self) -> str:
-        """Window/title-bar text: the LLM title string plus the build id."""
-        return f"{self._get_llm_title_string()} [{get_build_id()}]"
+        """Window/title-bar text: the LLM title string plus the build version."""
+        return f"{self._get_llm_title_string()} [{get_version_label()}]"
 
     def _on_settings_changed(self, new_settings):
         self.settings = new_settings
@@ -3573,7 +3573,7 @@ class AppController(QObject):
     def _ensure_browser_engine(self) -> bool:
         """Makes sure Chromium exists before Browser mode takes a task.
 
-        The engine is a ~150 MB download that is not shipped with Logos, so the
+        The engine is a ~320 MB download that is not shipped with Logos, so the
         first switch to Browser mode explains it and installs it on request
         instead of failing later with Playwright's raw "Executable doesn't
         exist" error.

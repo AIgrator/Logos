@@ -50,7 +50,7 @@ from settings_manager import SettingsManager
 from context import skills as skills_store
 from context import context_stats as context_stats_store
 from context import handoff as handoff_store
-from build_info import APP_VERSION
+from build_info import APP_VERSION, get_commit
 from src.ui.widgets.font_manager.font_combobox import FontComboBox
 from src.ui.widgets.hotkey.hotkey_edit import HotkeyEdit
 from src.apps.installed_apps import AppScanner
@@ -1368,6 +1368,11 @@ class SettingsPage(QWidget):
         name_font.setBold(True)
         name_label.setFont(name_font)
         version_label = QLabel(f"Version {APP_VERSION}")
+        # A source run also knows its commit; an installed build shows the
+        # version alone, because there is no repository to ask.
+        commit = get_commit()
+        if commit:
+            version_label.setText(f"Version {APP_VERSION} · build {commit}")
         version_label.setStyleSheet("color: #9E9E9E;")
         title_layout.addWidget(name_label)
         title_layout.addWidget(version_label)

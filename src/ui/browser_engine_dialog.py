@@ -1,10 +1,11 @@
 """First-use download of the Chromium build that Browser mode drives.
 
 Browser mode controls a real browser, and that binary is not shipped inside
-Logos (it would add ~150 MB to every download). The first time the user picks
-Browser mode, this dialog says what is about to be downloaded, where it goes,
-and then shows the download with progress instead of letting Playwright fail
-later with "Executable doesn't exist at ..._MEI...".
+Logos (it would make every download hundreds of megabytes bigger). The first
+time the user picks Browser mode, this dialog says what is about to be
+downloaded, how much space it takes and where it goes, then shows a real
+progress bar instead of letting Playwright fail later with
+"Executable doesn't exist at ..._MEI...".
 """
 import logging
 import threading
@@ -58,9 +59,10 @@ class BrowserEngineDialog(QDialog):
         super().__init__(parent)
         self._task = None
         self._downloading = False
+        self._archive = ""
 
         self.setWindowTitle("Browser engine")
-        self.setMinimumWidth(560)
+        self.setMinimumWidth(620)
         self.setModal(True)
 
         layout = QVBoxLayout(self)
@@ -74,14 +76,17 @@ class BrowserEngineDialog(QDialog):
         self._body.setWordWrap(True)
         self._body.setTextFormat(Qt.PlainText)
         self._body.setText(
-            "Browser mode drives a real Chromium browser, the same engine family "
-            "as Google Chrome. It is not bundled with Logos — that would add about "
-            "150 MB to every download — so it is fetched once, on first use.\n\n"
-            f"Download size: {runtime.DOWNLOAD_SIZE}\n"
+            "Browser mode drives a real Chromium browser — the engine inside Google "
+            "Chrome — which is not part of Windows. It is not shipped inside Logos, "
+            "because that would make every Logos download hundreds of megabytes "
+            "bigger, so it is fetched once, the first time you use Browser mode.\n\n"
+            f"Download: {runtime.DOWNLOAD_SIZE}\n"
+            f"On disk after unpacking: {runtime.DISK_SIZE}\n"
             f"Saved to: {runtime.browsers_dir()}\n\n"
-            "The download needs an internet connection, usually takes one to five "
-            "minutes and is reused by every later Browser-mode session. Nothing "
-            "else on your computer is touched."
+            "It needs an internet connection and usually takes one to five minutes. "
+            "Later Browser-mode sessions reuse the same copy, and updating or "
+            "reinstalling Logos keeps it, so this happens once per computer. "
+            "Nothing else on your computer is changed."
         )
         layout.addWidget(self._body)
 
@@ -90,8 +95,16 @@ class BrowserEngineDialog(QDialog):
         self._status.setTextInteractionFlags(Qt.TextSelectableByMouse)
         layout.addWidget(self._status)
 
+        # A normal filling bar: the driver reports "20% of 197.5 MiB" per
+        # archive, so the value comes from there. Until the first percentage
+        # arrives the bar is busy (0-0), because the archives start with a
+        # name-and-size line.
         self._progress = QProgressBar()
-        self._progress.setRange(0, 0)  # indeterminate: the driver reports no stable percent
+        self._progress.setRange(0, 100)
+        self._progress.setValue(0)
+        self._progress.setFormat("%p%")
+        self._progress.setTextVisible(True)
+        self._progress.setMinimumHeight(24)
         self._progress.setVisible(False)
         layout.addWidget(self._progress)
 
@@ -112,9 +125,12 @@ class BrowserEngineDialog(QDialog):
         if self._downloading:
             return
         self._downloading = True
+        self._archive = ""
         self._download_button.setEnabled(False)
+        self._cancel_button.setEnabled(True)
         self._cancel_button.setText("Cancel download")
-        self._status.setText("Downloading Chromium… this can take a few minutes.")
+        self._status.setText("Preparing the download…")
+        self._progress.setRange(0, 0)  # busy until a percentage shows up
         self._progress.setVisible(True)
         self._task = _InstallTask(self)
         self._task.progressed.connect(self._on_progress)
@@ -122,12 +138,23 @@ class BrowserEngineDialog(QDialog):
         self._task.start()
 
     def _on_progress(self, line: str) -> None:
-        if self._downloading:
-            self._status.setText(line)
+        if not self._downloading:
+            return
+        percent, name, label = runtime.describe_progress(line, self._archive)
+        if name:
+            self._archive = name
+        if percent is None:
+            self._status.setText(label)
+            return
+        if self._progress.maximum() != 100:
+            self._progress.setRange(0, 100)
+        self._progress.setValue(percent)
+        self._status.setText(label)
 
     def _on_done(self, ok: bool, message: str) -> None:
         self._downloading = False
         self._progress.setVisible(False)
+        self._cancel_button.setEnabled(True)
         if ok:
             self._status.setText(message)
             self.accept()

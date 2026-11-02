@@ -19,7 +19,12 @@
 ; Inno Setup is a build-time tool only; it is not a project dependency.
 
 #define AppName "Logos AI Assistant"
-#define AppVersion "0.1.0"
+; The release number is not repeated here: it is read from the built EXE, whose
+; version resource logos.spec generates from [project] version in pyproject.toml.
+; Build dist\Logos.exe first (pyinstaller logos.spec), then compile this script.
+#define AppExePath AddBackslash(SourcePath) + "..\dist\Logos.exe"
+#define AppVersion GetStringFileInfo(AppExePath, "ProductVersion")
+#define AppVersionQuad GetFileVersion(AppExePath)
 #define AppPublisher "AIgrator"
 #define AppURL "https://github.com/AIgrator/Logos"
 #define AppExeName "Logos.exe"
@@ -34,7 +39,7 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}
-VersionInfoVersion=0.1.0.0
+VersionInfoVersion={#AppVersionQuad}
 VersionInfoCompany={#AppPublisher}
 VersionInfoDescription={#AppName} Setup
 VersionInfoProductName={#AppName}
