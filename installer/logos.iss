@@ -8,7 +8,10 @@
 ; uninstall entry per user (HKCU "Installed apps" / Programs and Features),
 ; and the uninstaller removes the program plus its data folder
 ; %LOCALAPPDATA%\Logos (settings.json, logs, cache, prompts, assets) that the
-; one-file build creates at first launch.
+; one-file build creates at first launch. The Chromium engine in
+; %LOCALAPPDATA%\ms-playwright (~700 MB) is outside both folders and may be
+; shared with other Playwright programs, so the uninstaller asks about it:
+; a checkbox that is off by default.
 ;
 ; The optional tasks mirror what the first-run wizard asks in a source
 ; checkout: the global 'logos' command (adds {app} to the user PATH), the
@@ -79,6 +82,16 @@ english.CreateGlobalCommand=Create global 'logos' command (recommended)
 russian.CreateGlobalCommand=Создать глобальную команду 'logos' (рекомендуется)
 english.AddContextMenu=Add 'Open with Logos' to the folder right-click menu
 russian.AddContextMenu=Добавить «Открыть с помощью Logos» в контекстное меню папок
+english.UninstallBrowserEngineTitle=Uninstall {#AppName}
+russian.UninstallBrowserEngineTitle=Удаление {#AppName}
+english.UninstallBrowserEngineText=Browser mode uses Chromium, which lives outside the program folder in %LOCALAPPDATA%\ms-playwright and takes about 700 MB. Other programs on this computer may use the same copy, so it is kept by default. The program itself is removed together with its settings, logs and browser profiles.
+russian.UninstallBrowserEngineText=Режим Browser использует Chromium, который лежит вне папки программы, в %LOCALAPPDATA%\ms-playwright, и занимает около 700 МБ. Эту копию могут использовать и другие программы на компьютере, поэтому по умолчанию она сохраняется. Сама программа удаляется вместе с настройками, журналами и профилями браузера.
+english.UninstallBrowserEngineCheck=Also delete the browser engine (Chromium, ~700 MB)
+russian.UninstallBrowserEngineCheck=Также удалить движок браузера (Chromium, ~700 МБ)
+english.UninstallBrowserEngineOk=Uninstall
+russian.UninstallBrowserEngineOk=Удалить
+english.UninstallBrowserEngineCancel=Cancel
+russian.UninstallBrowserEngineCancel=Отмена
 
 [Tasks]
 Name: "addtopath"; Description: "{cm:CreateGlobalCommand}"; GroupDescription: "{cm:WindowsIntegration}"
@@ -110,6 +123,99 @@ Type: filesandordirs; Name: "{localappdata}\Logos"
 [Code]
 const
   UserEnvKey = 'Environment';
+
+{ Chromium for Browser mode is downloaded at first use into the Playwright
+  browser folder, outside the program folder and outside the app data folder.
+  It is shared with any other Playwright program on the machine, so the
+  uninstaller only removes it when the user ticks the box: the box starts
+  empty and the whole question is skipped when the folder is not there. }
+var
+  DeleteBrowserEngine: Boolean;
+
+function BrowserEngineDir(): string;
+begin
+  Result := ExpandConstant('{localappdata}\ms-playwright');
+end;
+
+function AskDeleteBrowserEngine(): Boolean;
+var
+  Form: TSetupForm;
+  Info: TNewStaticText;
+  Choice: TNewCheckBox;
+  OkButton, CancelButton: TNewButton;
+  ButtonWidth: Integer;
+begin
+  Result := False;
+  Form := CreateCustomForm(460, 230, False, True);
+  try
+    Form.Caption := ExpandConstant('{cm:UninstallBrowserEngineTitle}');
+
+    Info := TNewStaticText.Create(Form);
+    Info.Parent := Form;
+    Info.Left := ScaleX(12);
+    Info.Top := ScaleY(12);
+    Info.Width := Form.ClientWidth - ScaleX(24);
+    Info.Height := ScaleY(84);
+    Info.AutoSize := False;
+    Info.WordWrap := True;
+    Info.Caption := ExpandConstant('{cm:UninstallBrowserEngineText}');
+
+    Choice := TNewCheckBox.Create(Form);
+    Choice.Parent := Form;
+    Choice.Left := ScaleX(12);
+    Choice.Top := ScaleY(104);
+    Choice.Width := Form.ClientWidth - ScaleX(24);
+    Choice.Caption := ExpandConstant('{cm:UninstallBrowserEngineCheck}');
+    Choice.Checked := False;
+
+    OkButton := TNewButton.Create(Form);
+    OkButton.Parent := Form;
+    OkButton.Caption := ExpandConstant('{cm:UninstallBrowserEngineOk}');
+    OkButton.ModalResult := mrOk;
+    OkButton.Default := True;
+    OkButton.Height := ScaleY(23);
+    OkButton.Top := Form.ClientHeight - ScaleY(33);
+
+    CancelButton := TNewButton.Create(Form);
+    CancelButton.Parent := Form;
+    CancelButton.Caption := ExpandConstant('{cm:UninstallBrowserEngineCancel}');
+    CancelButton.ModalResult := mrCancel;
+    CancelButton.Cancel := True;
+    CancelButton.Height := ScaleY(23);
+    CancelButton.Top := OkButton.Top;
+
+    ButtonWidth := Form.CalculateButtonWidth([OkButton.Caption, CancelButton.Caption]);
+    OkButton.Width := ButtonWidth;
+    CancelButton.Width := ButtonWidth;
+    OkButton.Left := Form.ClientWidth - ScaleX(12) - CancelButton.Width - ScaleX(8) - OkButton.Width;
+    CancelButton.Left := Form.ClientWidth - ScaleX(12) - CancelButton.Width;
+
+    if Form.ShowModal() = mrOk then
+    begin
+      Result := True;
+      DeleteBrowserEngine := Choice.Checked;
+    end;
+  finally
+    Form.Free();
+  end;
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  DeleteBrowserEngine := False;
+  { Silent uninstall (scripts, package managers) never prompts: keep the engine. }
+  if UninstallSilent() then
+  begin
+    Result := True;
+    Exit;
+  end;
+  if not DirExists(BrowserEngineDir()) then
+  begin
+    Result := True;
+    Exit;
+  end;
+  Result := AskDeleteBrowserEngine();
+end;
 
 function NormalizePathEntry(const Value: string): string;
 var
@@ -213,5 +319,9 @@ end;
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
+  begin
     RemoveUserPathDir(ExpandConstant('{app}'));
+    if DeleteBrowserEngine then
+      DelTree(BrowserEngineDir(), True, True, True);
+  end;
 end;

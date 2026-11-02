@@ -13,7 +13,7 @@ Notes for AI coding agents working in this repository.
 Both builders are ephemeral tools, never dependencies: do not add PyInstaller or Inno Setup to `pyproject.toml` / `requirements.txt`.
 
 - One-file executable: `uv run --with pyinstaller pyinstaller logos.spec --noconfirm --clean` -> `dist/Logos.exe` (about 6 minutes, ~204 MB).
-- Installer: `"$LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe" installer/logos.iss` -> `dist/LogosSetup.exe`. Per-user only (`PrivilegesRequired=lowest`, default `%LOCALAPPDATA%\Programs\Logos`), user picks the folder, Start Menu shortcut, HKCU uninstall entry for Settings > Installed apps, and the uninstaller deletes the whole data folder below. Its optional Tasks (all checked by default) carry the Windows integration the source setup script does: `logos.cmd` in `{app}` plus an append to the user PATH (`ChangesEnvironment`, removed on uninstall), the HKCU `Directory\shell\Logos` "Open with Logos" folder menu, and the desktop shortcut. Because the installer owns these, a frozen build skips step 2 of `src/initial_setup.py`; source setups keep it because `setup_windows.ps1` reads `setup_choices.json`.
+- Installer: `"$LOCALAPPDATA/Programs/Inno Setup 6/ISCC.exe" installer/logos.iss` -> `dist/LogosSetup.exe`. Per-user only (`PrivilegesRequired=lowest`, default `%LOCALAPPDATA%\Programs\Logos`), user picks the folder, Start Menu shortcut, HKCU uninstall entry for Settings > Installed apps, and the uninstaller deletes the whole data folder below. It does not touch the Chromium engine in `%LOCALAPPDATA%\ms-playwright` (about 700 MB, shared with other Playwright programs) unless the user ticks the uninstaller's checkbox, which starts empty and is skipped on silent uninstalls. Its optional Tasks (all checked by default) carry the Windows integration the source setup script does: `logos.cmd` in `{app}` plus an append to the user PATH (`ChangesEnvironment`, removed on uninstall), the HKCU `Directory\shell\Logos` "Open with Logos" folder menu, and the desktop shortcut. Because the installer owns these, a frozen build skips step 2 of `src/initial_setup.py`; source setups keep it because `setup_windows.ps1` reads `setup_choices.json`.
 
 `build/` and `dist/` are packaging artifacts and git-ignored. A frozen build keeps settings, logs, cache and the materialized `prompts/` + `assets/` in `%LOCALAPPDATA%\Logos` (see `src/app_paths.py`), because the one-file unpack folder is temporary and the install folder may be read-only. Compilation success alone is not proof: launch the built exe and, for installer changes, run install -> launch -> uninstall.
 
@@ -22,8 +22,8 @@ Both builders are ephemeral tools, never dependencies: do not add PyInstaller or
 `[project] version` in `pyproject.toml` is the only place a release number
 exists. `src/build_info.py` reads it at runtime (source runs) or from the copy
 `logos.spec` bundles next to the executable, so the window title
-(`… [v0.1.0]`), the startup log line and Settings → About
-(`Version 0.1.0 · build <commit>` for source runs) all follow a one-line bump.
+(`… [v0.2.0]`), the startup log line and Settings → About
+(`Version 0.2.0 · build <commit>` for source runs) all follow a one-line bump.
 `logos.spec` also writes an EXE version resource from that number, and
 `installer/logos.iss` reads it back (`GetStringFileInfo(…, "ProductVersion")`),
 so the installer needs no hand-edited `AppVersion`. The commit hash is still
