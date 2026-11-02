@@ -65,13 +65,36 @@ def _resolve(host: str) -> tuple[str, ...]:
     return addresses
 
 
+_NAT64_WELL_KNOWN = ipaddress.ip_network("64:ff9b::/96")
+
+
+def _embedded_ipv4(ip):
+    """Returns the IPv4 address an IPv6 address only wraps, or None.
+
+    A NAT64 resolver answers with 64:ff9b::<v4> for an IPv4-only site, and that
+    prefix sits inside ::/8, which Python reports as IETF-reserved: a public
+    site (ukr.net -> 64:ff9b::23ba:da43 = 35.186.218.67) looked local. The
+    wrapped IPv4 is what the policy is about, so 64:ff9b::7f00:1 is still the
+    loopback and stays blocked. IPv4-mapped (::ffff:0:0/96) is the same idea;
+    the local-use NAT64 prefix (64:ff9b:1::/48) is deliberately left alone.
+    """
+    if ip.version != 6:
+        return None
+    if ip.ipv4_mapped is not None:
+        return ip.ipv4_mapped
+    if ip in _NAT64_WELL_KNOWN:
+        return ipaddress.IPv4Address(int(ip) & 0xFFFFFFFF)
+    return None
+
+
 def _is_blocked_ip(address: str) -> bool:
     try:
         ip = ipaddress.ip_address(address)
     except ValueError:
         return True
-    if ip.version == 6 and ip.ipv4_mapped is not None:
-        ip = ip.ipv4_mapped
+    embedded = _embedded_ipv4(ip)
+    if embedded is not None:
+        ip = embedded
     return bool(
         ip.is_loopback or ip.is_private or ip.is_link_local
         or ip.is_multicast or ip.is_reserved or ip.is_unspecified

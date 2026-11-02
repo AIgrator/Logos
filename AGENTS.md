@@ -479,6 +479,16 @@ body is the only place the whole total is stated. Settings → Browser shows the
 status and button. `BrowserManager.launch()` refuses with a readable message
 instead of Playwright's "Executable doesn't exist at …_MEI…" error.
 
+Every navigation, redirect included, passes `src/browser/policy.py::validate_url`,
+which refuses local hosts and private/loopback/reserved targets
+(`browser.block_private_networks`, on by default). An IPv6 address that only
+wraps an IPv4 one is judged by the wrapped address: IPv4-mapped
+(`::ffff:0:0/96`) and NAT64 (`64:ff9b::/96`) are unwrapped first. Without that,
+a NAT64 resolver's answer for an IPv4-only site (`ukr.net` →
+`64:ff9b::23ba:da43`, i.e. 35.186.218.67) fell into `::/8`, which Python reports
+as IETF-reserved, and a public page looked local. `64:ff9b::7f00:1` is still
+the loopback and stays blocked.
+
 ## MCP servers
 
 Terminal mode reaches user-configured MCP servers through three meta-tools
