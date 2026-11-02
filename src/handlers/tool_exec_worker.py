@@ -4,11 +4,67 @@ Runs a single tool call (shell, file op, browser action) in the worker's own
 thread so the chat window never blocks. The caller dispatches with a ticket;
 results carry it back so stale (cancelled/stopped) executions are ignored.
 """
+import inspect
 import logging
 import threading
 import time
+import types
+import typing
 
 from PySide6.QtCore import QObject, Signal, Slot
+
+
+def coerce_arguments(func, args: dict) -> dict:
+    """Matches stringified scalar arguments to the types the tool declares.
+
+    Weak models sometimes send every value as a string ("false", "null", "5").
+    Passing those straight through breaks the tool: a non-empty "false" is
+    truthy, so a foreground command runs in the background, and "null" becomes
+    a literal folder name. Only a value whose declared parameter type disagrees
+    with the string is converted, so genuine string arguments (a command, a
+    path, file content) are never touched.
+    """
+    try:
+        parameters = inspect.signature(func).parameters
+    except (TypeError, ValueError):
+        return args
+    coerced = dict(args)
+    for key, value in args.items():
+        parameter = parameters.get(key)
+        if parameter is None or not isinstance(value, str):
+            continue
+        annotation = parameter.annotation
+        if annotation is inspect.Parameter.empty:
+            continue
+        origin = typing.get_origin(annotation)
+        allowed = typing.get_args(annotation) if origin in (typing.Union, types.UnionType) else (annotation,)
+        text = value.strip()
+        lowered = text.lower()
+        if lowered in ("null", "none", ""):
+            # "null" written as text means "not set". A non-optional parameter
+            # falls back to its declared default instead of receiving the word.
+            if type(None) in allowed:
+                coerced[key] = None
+            elif parameter.default is not inspect.Parameter.empty:
+                del coerced[key]
+            else:
+                continue
+        elif bool in allowed and lowered in ("true", "false"):
+            coerced[key] = lowered == "true"
+        elif int in allowed and text.lstrip("-").isdigit():
+            coerced[key] = int(text)
+        elif float in allowed and int not in allowed:
+            try:
+                coerced[key] = float(text)
+            except ValueError:
+                continue
+        else:
+            continue
+        if key in coerced:
+            logging.info(f"Coerced tool argument '{key}' from string {value!r} to {coerced[key]!r}.")
+        else:
+            logging.info(f"Dropped tool argument '{key}' ({value!r}); the tool's default applies.")
+    return coerced
 
 
 class ToolExecRelay(QObject):
@@ -128,7 +184,7 @@ class ToolExecWorker(QObject):
             if not hasattr(self.computer, action_name):
                 raise AttributeError(f"Computer has no tool named '{action_name}'")
             action_func = getattr(self.computer, action_name)
-            result = action_func(**action_args)
+            result = action_func(**coerce_arguments(action_func, action_args))
         except Exception as e:  # noqa: BLE001 - report back to the loop
             if not self._cancelled:
                 logging.error(f"Tool execution error in worker: {e}", exc_info=True)

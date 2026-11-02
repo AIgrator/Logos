@@ -18,6 +18,35 @@ def _rejects_forced_tool_choice_in_thinking_mode(body: str) -> bool:
     return "tool_choice" in body and "thinking mode" in body
 
 
+def tool_call_envelope(name: str, args_str: str) -> dict | None:
+    """Rebuilds the ``{"type": ..., "payload": ...}`` envelope from a tool call.
+
+    The request asks for a single ``payload`` argument, but models do not always
+    comply: Qwen routes on OpenRouter, for one, send the payload's own keys
+    (``commentary``/``actions``) and often a stringified ``actions`` list. Such
+    a call is kept and its arguments become the payload; validation and the
+    shared safe repair decide whether the contents are usable, so a malformed
+    call still reaches self-correction instead of vanishing as "no response".
+    Returns None when the arguments cannot be decoded at all.
+    """
+    from ..llm_parsing import repair_json_string
+    try:
+        args = json.loads(args_str)
+    except json.JSONDecodeError:
+        logging.error(f"Failed to decode tool call arguments for '{name}'. Raw args: '{args_str}'")
+        args = repair_json_string(args_str)
+        if not isinstance(args, dict):
+            logging.error(f"Could not repair arguments for tool call '{name}'. Skipping.")
+            return None
+        logging.info(f"Successfully repaired arguments for tool call '{name}'.")
+    if not isinstance(args, dict):
+        return None
+    if 'payload' not in args:
+        logging.warning(f"Tool call '{name}' arrived without a 'payload'; using its arguments as the payload.")
+        return {"type": name, "payload": args}
+    return {"type": name, "payload": args['payload']}
+
+
 class OpenRouterProvider(BaseLLMProvider):
     """
     LLM provider for OpenRouter. This version implements robust error handling
@@ -342,26 +371,10 @@ class OpenRouterProvider(BaseLLMProvider):
                     name, args_str = function.get("name"), function.get("arguments", "{}")
                     if not name:
                         continue
-
-                    try:
-                        args = json.loads(args_str)
-                        if 'payload' in args:
-                            reconstructed_object = {"type": name, "payload": args['payload']}
-                            return {"text": text_content, "tool_calls": reconstructed_object, "reasoning": reasoning_summary}
-                        else:
-                            logging.warning(f"Tool call '{name}' received without a 'payload'. Arguments: {args_str}")
-
-                    except json.JSONDecodeError:
-                        logging.error(f"Failed to decode tool call arguments for '{name}'. Raw args: '{args_str}'")
-                        # Attempt to repair the broken JSON from the arguments
-                        repaired_args = repair_json_string(args_str)
-                        if repaired_args and 'payload' in repaired_args:
-                            logging.info(f"Successfully repaired arguments for tool call '{name}'.")
-                            reconstructed_object = {"type": name, "payload": repaired_args['payload']}
-                            return {"text": text_content, "tool_calls": reconstructed_object, "reasoning": reasoning_summary}
-                        else:
-                            logging.error(f"Could not repair arguments for tool call '{name}'. Skipping.")
-                            continue # Move to the next tool call
+                    envelope = tool_call_envelope(name, args_str)
+                    if envelope is None:
+                        continue  # Move to the next tool call
+                    return {"text": text_content, "tool_calls": envelope, "reasoning": reasoning_summary}
 
                 return {"text": text_content, "tool_calls": [], "reasoning": reasoning_summary}
             elif text_content:

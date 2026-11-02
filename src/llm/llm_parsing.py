@@ -211,6 +211,13 @@ def validate_object(data_object: any, schema_name: str) -> tuple[dict | None, st
         type_value = data_object.get('type')
         if isinstance(type_value, str) and type_value in mode_tools and type_value != schema_name:
             args = data_object.get('arguments')
+            if not isinstance(args, dict):
+                payload = data_object.get('payload')
+                # {"type": "execute_shell", "payload": {"command": "dir"}}: the
+                # model called the action itself and put its arguments in the
+                # payload slot. Rebuild the batch envelope around them.
+                if isinstance(payload, dict) and 'actions' not in payload and 'action' not in payload:
+                    args = payload
             if isinstance(args, dict):
                 logging.warning(f"Detected naked tool call with type='{type_value}'. Reconstructing envelope.")
                 data_object = {'type': schema_name,

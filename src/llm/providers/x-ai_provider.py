@@ -266,13 +266,19 @@ class XAIProvider(BaseLLMProvider):
                         continue
                     try:
                         args = json.loads(args_str)
-                        if 'payload' in args:
-                            reconstructed_object = {"type": name, "payload": args['payload']}
-                            return {"text": text_content, "tool_calls": reconstructed_object, "reasoning": reasoning_summary}
-                        else:
-                            logger.warning(f"Tool call '{name}' received without a 'payload'. Arguments: {args_str}")
                     except json.JSONDecodeError:
                         logger.error(f"Failed to decode tool call arguments for '{name}': {args_str}")
+                        continue
+                    if 'payload' in args:
+                        payload = args['payload']
+                    else:
+                        # A model may drop the envelope's wrapper and send the
+                        # payload's own keys; keep the call instead of losing it.
+                        logger.warning(f"Tool call '{name}' arrived without a 'payload'; "
+                                       "using its arguments as the payload.")
+                        payload = args
+                    reconstructed_object = {"type": name, "payload": payload}
+                    return {"text": text_content, "tool_calls": reconstructed_object, "reasoning": reasoning_summary}
                 return {"text": text_content, "tool_calls": [], "reasoning": reasoning_summary}
             else:
                 # Fallback for non-tool responses

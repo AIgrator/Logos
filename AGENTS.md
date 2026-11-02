@@ -229,7 +229,14 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   the batch waiting until the job ends (or the wait budget runs out), and a
   mid-task user steer or a pause drops the remaining queued actions. The
   single `action` shape of older caches and models is still accepted by
-  `src/llm/llm_parsing.py`, which folds it into `actions`. A user message
+  `src/llm/llm_parsing.py`, which folds it into `actions`. The same module also
+  rebuilds a call whose envelope is missing or wrong: a tool call that arrives
+  without the `payload` wrapper (the payload's own keys at the top level), with
+  the action name as `type` (`{"type": "execute_shell", "payload": {...}}`), or
+  with `actions` as a JSON string, is wrapped/decoded before validation, so a
+  weak model's shape never turns into a silent empty turn. Stringified scalar
+  arguments (`"false"`, `"null"`) are matched to the tool's declared parameter
+  types in `src/handlers/tool_exec_worker.py` before the call. A user message
   mid-turn seals the live block: `ChatWidget.add_message` with
   `role='user'` calls `seal_live_activity()`, which finishes the block as
   `Done` (`Stopped` when a step was still in flight) and marks that step
