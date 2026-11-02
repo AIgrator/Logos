@@ -460,7 +460,14 @@ agree. `is_chromium_installed()` matches the exact revision from the bundled
 `browsers.json`; when it is missing, switching to Browser mode opens
 `src/ui/browser_engine_dialog.py`, which explains the download and shows
 progress while `install_chromium()` runs the bundled driver
-(`node cli.js install chromium`) on a thread. Settings → Browser shows the same
+(`node cli.js install chromium`) on a thread. The driver fetches four archives
+in turn (Chromium 197.5 MiB, its headless shell 118.1 MiB, FFmpeg 1.6 MiB,
+winldd 0.1 MiB), each counting 0-100 % of its own size, so
+`runtime.DownloadProgress` keeps the best percentage per archive and reports
+one bar for the whole ~320 MB (`31% · 99 of 320 MB`) plus a status line naming
+the file (`File 1 of 4 · Chromium · 197.5 MiB`); the bar never steps back
+between archives. The same numbers live in `runtime.ARCHIVES`, so a size
+change only happens there. Settings → Browser shows the same
 status and button. `BrowserManager.launch()` refuses with a readable message
 instead of Playwright's "Executable doesn't exist at …_MEI…" error.
 
