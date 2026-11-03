@@ -479,11 +479,13 @@ class ActivityBlockFormatter:
                 f'font-family: Consolas, monospace; font-size: 90%;">'
                 f"{html.escape(_one_line(args_text, _ARGS_PREVIEW_CHARS))}</span>")
         body = self._pre(_clip(args_text, _ARGS_LIMIT)) if expanded else ""
+        # The peek is the call itself, so it stays outside the toggle link:
+        # the link handles the click, the payload stays selectable text.
         return (
             f'<div style="margin-top: 4px;">'
             f'<a href="{self._row_action(msg.get("id"), row, "args")}" '
             f'style="text-decoration: none; color: {meta}; font-size: 90%;">'
-            f"{caret}&nbsp;Arguments{peek}</a>{body}</div>")
+            f"{caret}&nbsp;Arguments</a>{peek}{body}</div>")
 
     @staticmethod
     def _is_long_output(text: str) -> bool:

@@ -2,6 +2,7 @@
 import html
 import json
 import logging
+import re
 import sys
 import time
 import uuid
@@ -107,6 +108,90 @@ def _selected_plain_text(cursor) -> str:
             .replace("\u2029", "\n")
             .replace("\ufdd0", "")
             .replace("\ufdd1", ""))
+
+
+# Plain blocks a card draws as a label rather than as content. Every other
+# label (a step title, ``Arguments``, ``Show all``) is a link, so the link
+# check already keeps it out of a selection; these words are drawn bare.
+_CHROME_LABELS = frozenset({"Output", "Command", "System note"})
+_CHROME_LABEL_PATTERN = re.compile(r"Changed \d+ replacement\(s\)")
+
+
+def _merge_spans(spans) -> list:
+    """Sorts ``(start, end)`` spans and joins the touching ones."""
+    ordered = sorted((int(start), int(end)) for start, end in spans
+                     if int(end) > int(start))
+    merged = []
+    for start, end in ordered:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _block_chrome_spans(block) -> list:
+    """Spans of a block that are click targets or painted marks.
+
+    Card headers, run rows, step titles, the ``Arguments`` line and
+    ``Show all`` links are links (the click toggles something), and the
+    status badges are images. Everything outside those spans is the text a
+    reader may want to copy.
+
+    Qt keeps that information on the block's text fragments, not on
+    ``block.layout().formats()``, which only carries layout-level overrides.
+    """
+    spans = []
+    base = block.position()
+    it = block.begin()
+    while not it.atEnd():
+        fragment = it.fragment()
+        if fragment.isValid():
+            fmt = fragment.charFormat()
+            if fmt.anchorHref() or fmt.isImageFormat():
+                start = fragment.position() - base
+                if fragment.length() > 0:
+                    spans.append((start, start + fragment.length()))
+        it += 1
+    return _merge_spans(spans)
+
+
+def _block_content_spans(block) -> list:
+    """``(start, end)`` offsets inside a block that are plain content."""
+    text = block.text()
+    if not text.strip():
+        return []
+    chrome = _block_chrome_spans(block)
+    if not chrome:
+        return [(0, len(text))]
+    pieces = []
+    cursor_pos = 0
+    for start, end in chrome:
+        if start > cursor_pos:
+            pieces.append((cursor_pos, start))
+        cursor_pos = max(cursor_pos, end)
+    if cursor_pos < len(text):
+        pieces.append((cursor_pos, len(text)))
+    spans = []
+    for start, end in pieces:
+        piece = text[start:end]
+        if not piece.strip():
+            continue
+        # ``&nbsp;`` joins a link to the text after it; the gap is chrome.
+        lead = len(piece) - len(piece.lstrip("\xa0"))
+        trail = len(piece) - len(piece.rstrip("\xa0"))
+        start += lead
+        end -= trail
+        if end > start and text[start:end].strip():
+            spans.append((start, end))
+    return spans
+
+
+def _block_in_table(block) -> bool:
+    try:
+        return QTextCursor(block).currentTable() is not None
+    except Exception:
+        return False
 
 
 class ChatWidget(QAbstractScrollArea):
@@ -298,6 +383,84 @@ class ChatWidget(QAbstractScrollArea):
         if 0 < meta_start < end:
             return meta_start
         return end
+
+    def _select_ranges(self, msg) -> list:
+        """Character ranges of a message worth selecting, chrome excluded.
+
+        A card is full of click targets and painted marks - the block header,
+        run rows, step titles, the ``Arguments`` line, ``Show all`` links,
+        status badges - and none of them are text a reader wants on the
+        clipboard. Only the content blocks are selectable: narration, an
+        expanded thought, the arguments body, command output, a written file,
+        an edit diff. A user bubble is content up to its status line, and a
+        chat answer (plain rich text) stays fully selectable.
+
+        Ranges are cached on the message, because painting runs on every
+        mouse move while a selection is being dragged.
+        """
+        doc = msg.get('doc') if isinstance(msg, dict) else None
+        if doc is None:
+            return []
+        end = max(0, int(doc.characterCount()) - 1)
+        key = (id(doc), end, int(doc.blockCount()),
+               int(msg.get('meta_start') or 0),
+               bool(msg.get('consumed')), str(msg.get('type') or ''))
+        cached = msg.get('_select_ranges')
+        if cached is not None and cached[0] == key:
+            return cached[1]
+
+        msg_type = str(msg.get('type') or '')
+        if msg_type == 'suggestions':
+            ranges = []
+        elif msg_type in ('activity', 'collapsible') or msg.get('role') == 'user':
+            ranges = []
+            block = doc.begin()
+            while block.isValid():
+                base = block.position()
+                text = block.text()
+                for start, stop in _block_content_spans(block):
+                    piece = text[start:stop].strip()
+                    if not _block_in_table(block) and (
+                            piece in _CHROME_LABELS
+                            or _CHROME_LABEL_PATTERN.fullmatch(piece)):
+                        continue
+                    ranges.append((base + start, base + stop))
+                block = block.next()
+            ranges = _merge_spans(ranges)
+            if msg.get('role') == 'user':
+                # The status line under the bubble is chrome, whatever it
+                # holds: Pending, the time and the copy icon.
+                limit = int(msg.get('meta_start') or 0)
+                if 0 < limit < end:
+                    ranges = [(start, min(stop, limit)) for start, stop in ranges
+                              if start < limit]
+        else:
+            ranges = [(0, end)] if end > 0 else []
+
+        result = [(start, stop) for start, stop in ranges if stop > start]
+        msg['_select_ranges'] = (key, result)
+        return result
+
+    def _selection_spans(self, msg_idx: int, start, end) -> list:
+        """Parts of one message's content the current selection covers."""
+        if start is None or end is None:
+            return []
+        if not (start[0] <= msg_idx <= end[0]):
+            return []
+        if not (0 <= msg_idx < len(self.messages)):
+            return []
+        ranges = self._select_ranges(self.messages[msg_idx])
+        if not ranges:
+            return []
+        low = int(start[1]) if msg_idx == start[0] else 0
+        high = int(end[1]) if msg_idx == end[0] else None
+        spans = []
+        for range_start, range_end in ranges:
+            span_start = max(int(range_start), low)
+            span_end = int(range_end) if high is None else min(int(range_end), high)
+            if span_end > span_start:
+                spans.append((span_start, span_end))
+        return spans
 
     def _clamp_selection_pos(self, pos):
         """Keeps a selection endpoint out of a message's non-selectable tail."""
@@ -753,19 +916,23 @@ class ChatWidget(QAbstractScrollArea):
 
     def copy_selection(self):
         start, end = self._get_selection_range()
-        if start is None:
+        if start is None or end is None:
             return
-        start_msg_idx, start_char_idx = start
-        end_msg_idx, end_char_idx = end
         selected_parts = []
-        for i in range(start_msg_idx, end_msg_idx + 1):
+        for i in range(start[0], end[0] + 1):
+            spans = self._selection_spans(i, start, end)
+            if not spans:
+                continue
             doc = self.messages[i]['doc']
-            sel_start = start_char_idx if i == start_msg_idx else 0
-            sel_end = end_char_idx if i == end_msg_idx else self._selectable_end(self.messages[i])
-            cursor = QTextCursor(doc)
-            cursor.setPosition(sel_start)
-            cursor.setPosition(sel_end, QTextCursor.KeepAnchor)
-            selected_parts.append(_selected_plain_text(cursor))
+            pieces = []
+            for span_start, span_end in spans:
+                cursor = QTextCursor(doc)
+                cursor.setPosition(span_start)
+                cursor.setPosition(span_end, QTextCursor.KeepAnchor)
+                pieces.append(_selected_plain_text(cursor))
+            piece_text = "\n".join(piece for piece in pieces if piece)
+            if piece_text:
+                selected_parts.append(piece_text)
         full_text = "\n".join(selected_parts)
         if full_text:
             QApplication.clipboard().setText(full_text)
@@ -775,16 +942,21 @@ class ChatWidget(QAbstractScrollArea):
         for msg in self.messages:
             if msg.get('type') == 'collapsible':
                 all_text_parts.append(f"--- {msg.get('title', 'Collapsible Block')} ---\n{msg.get('full_content', '')}")
-            elif msg.get('meta_start'):
-                # The status line under a user bubble is chrome, not content.
-                cursor = QTextCursor(msg['doc'])
-                cursor.setPosition(0)
-                cursor.setPosition(int(msg['meta_start']),
-                                   QTextCursor.KeepAnchor)
-                all_text_parts.append(
-                    _selected_plain_text(cursor))
-            else:
-                all_text_parts.append(msg['doc'].toPlainText())
+                continue
+            doc = msg.get('doc')
+            if doc is None:
+                continue
+            # Chrome (headers, titles, labels, the status line) is skipped,
+            # so Copy All carries what the user could select by hand.
+            pieces = []
+            for span_start, span_end in self._select_ranges(msg):
+                cursor = QTextCursor(doc)
+                cursor.setPosition(span_start)
+                cursor.setPosition(span_end, QTextCursor.KeepAnchor)
+                pieces.append(_selected_plain_text(cursor))
+            text = "\n".join(piece for piece in pieces if piece)
+            if text:
+                all_text_parts.append(text)
 
         full_text = "\n\n".join(all_text_parts)
         if full_text:
@@ -874,6 +1046,7 @@ class ChatWidget(QAbstractScrollArea):
         meta = self._user_meta_html(msg)
         doc.setHtml(str(body or '') + meta)
         msg['meta_start'] = doc.lastBlock().position() if meta else 0
+        msg.pop('_select_ranges', None)
 
     def _copy_user_message(self, msg_id: str) -> bool:
         """Copies one user prompt as plain text (not the rendered HTML)."""
@@ -1979,22 +2152,19 @@ class ChatWidget(QAbstractScrollArea):
                 ctx = QAbstractTextDocumentLayout.PaintContext()
                 ctx.palette = self.palette()
                 selections = []
-                if start_sel is not None:
-                    start_msg_idx, start_char_idx = start_sel
-                    end_msg_idx, end_char_idx = end_sel
-                    if start_msg_idx <= i <= end_msg_idx:
-                        selection_cursor = QTextCursor(doc)
-                        sel_start = start_char_idx if i == start_msg_idx else 0
-                        sel_end = end_char_idx if i == end_msg_idx else self._selectable_end(msg)
-                        selection_cursor.setPosition(sel_start)
-                        selection_cursor.setPosition(sel_end, QTextCursor.KeepAnchor)
-                        selection_format = QTextCharFormat()
-                        selection_format.setBackground(QApplication.palette().highlight())
-                        selection_format.setForeground(QApplication.palette().highlightedText())
-                        selection = QAbstractTextDocumentLayout.Selection()
-                        selection.cursor = selection_cursor
-                        selection.format = selection_format
-                        selections.append(selection)
+                for span_start, span_end in self._selection_spans(
+                        i, start_sel, end_sel):
+                    selection_cursor = QTextCursor(doc)
+                    selection_cursor.setPosition(span_start)
+                    selection_cursor.setPosition(span_end,
+                                                 QTextCursor.KeepAnchor)
+                    selection_format = QTextCharFormat()
+                    selection_format.setBackground(QApplication.palette().highlight())
+                    selection_format.setForeground(QApplication.palette().highlightedText())
+                    selection = QAbstractTextDocumentLayout.Selection()
+                    selection.cursor = selection_cursor
+                    selection.format = selection_format
+                    selections.append(selection)
                 ctx.selections = selections
                 doc.documentLayout().draw(painter, ctx)
                 painter.restore()
@@ -2029,6 +2199,7 @@ class ChatWidget(QAbstractScrollArea):
                 continue
             try:
                 msg['doc'].setHtml(self.activity_formatter.format_block(msg))
+                msg.pop('_select_ranges', None)
             except Exception as e:
                 logging.warning(f"Thought excerpt re-render failed: {e}")
                 continue

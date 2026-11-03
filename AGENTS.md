@@ -267,8 +267,10 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   the task). `activate_queued_message` clears it for the chat queue. `Pending`
   is live UI state and is never journaled, so a restored session shows none.
   Inside an expanded step the raw call is a disclosure, not content: the
-  `Arguments` line stays folded to a one-line monospace peek and toggles through
-  an `activity:<message id>:args:<row id>` anchor (`row['args_expanded']`), and
+  `Arguments` label toggles through an
+  `activity:<message id>:args:<row id>` anchor (`row['args_expanded']`) and the
+  one-line monospace peek of the call sits outside that link, so the label is
+  chrome while the call itself can be selected, and
   it is not rendered at all when the call is already its title or its detail -
   `BaseAgentHandler._step_args_text` drops null/empty leaves and hands the
   trimming to the mode (`TerminalHandler` replaces file bodies with
@@ -295,6 +297,21 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   The block level is read from the rendered document heights
   (`_block_at_scroll`), so a block that fits on screen never gets a bar, and
   folding or scrolling out of either level hides it.
+  Selection is scoped to content, not to chrome: `ChatWidget._select_ranges`
+  returns the character ranges a reader may select and copy from each
+  document, and both the highlight (`paintEvent` paints one
+  `QAbstractTextDocumentLayout.Selection` per intersection) and `copy_selection`
+  / `copy_all_text` use only those ranges. Card headers, run rows, step titles,
+  carets, status badges and the `Arguments` / `Show all` links are links, so the
+  fragment's `anchorHref()` marks them as chrome; bare labels (`Output`,
+  `Command`, `System note`, `Changed N replacement(s)`) are matched by their
+  text outside a table. Content stays selectable: narration, an expanded
+  thought, the arguments peek and body, command output, a written file, an
+  edit diff and `detail_html`. A user bubble is content up to its status line
+  and a chat answer stays fully selectable (its markdown links are content),
+  while a suggestion row is not selectable at all. The computed ranges are
+  cached per message on `(id(doc), character count, block count, meta_start,
+  consumed, type)`, because a drag repaints on every mouse move.
   The plan lives outside the transcript: a live turn
   shows a compact `Step N / M` pill above the composer
   (`src/ui/widgets/plan_panel.py::PlanPanel`, mounted first in
