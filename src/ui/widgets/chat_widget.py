@@ -28,10 +28,12 @@ from src.ui.text_render import USER_BUBBLE_PADDING, USER_BUBBLE_RADIUS, render_t
 from src.ui.utils import IconHoverFilter
 from src.ui.widgets.activity_block_formatter import (
     ActivityBlockFormatter,
+    block_summary,
     run_default_expanded,
     steps_in_run,
 )
 from src.ui.widgets.collapsible_block_formatter import CollapsibleBlockFormatter
+from src.ui.widgets.status_marks import register_status_images
 
 # --- Basic Logging Setup ---
 logging.basicConfig(
@@ -86,6 +88,17 @@ class ChatWidget(QAbstractScrollArea):
         self.chat_font = QFont(QApplication.font())
         if self.chat_font.pointSize() > 0:
             self.chat_font.setPointSize(self.chat_font.pointSize() + 1)
+        # One-line thought excerpts are clipped by measurement, because Qt's
+        # rich text has no text-overflow. The formatter asks the widget for the
+        # column width and for font metrics so the "…" lands where the row ends.
+        self.activity_formatter.available_width = self._activity_column_width
+        self.activity_formatter.measure_text = self._measure_activity_text
+        # A narrower window re-clips those excerpts: they are measured when the
+        # block renders, so the blocks are rendered again once a resize settles.
+        self._excerpt_timer = QTimer(self)
+        self._excerpt_timer.setSingleShot(True)
+        self._excerpt_timer.setInterval(220)
+        self._excerpt_timer.timeout.connect(self._rerender_excerpts)
         self.is_streaming = False
         # The message dict the live stream writes into. Tracked by reference
         # instead of ``messages[-1]`` so queued user messages appended below the
@@ -143,23 +156,23 @@ class ChatWidget(QAbstractScrollArea):
         self.verticalScrollBar().valueChanged.connect(
             self._update_scroll_to_bottom_button)
 
-        # Sticky step bar: a long result (a written file, a big listing) runs
-        # past the screen, and its own step row is gone once the reader is
-        # inside it. The bar names that step - file name included - while its
-        # content is on screen, and a click folds the step right there instead
-        # of making the reader scroll back to the row first.
+        # Sticky header: a long turn - a written file, a big listing, a live run
+        # still piling up steps - pushes its own header off the top, and
+        # folding it back then means scrolling up to find that header. The bar
+        # pins it while the body is on screen. Inside an expanded step it names
+        # that step (file included) and folds the step; over the block as a
+        # whole it summarises the turn and folds the whole block.
         self._step_marker = None
-        self.step_sticky_button = QPushButton(self.viewport())
-        self.step_sticky_button.setObjectName("StepStickyButton")
-        self.step_sticky_button.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.step_sticky_button.setFixedHeight(28)
-        self.step_sticky_button.setToolTip("Collapse this step")
-        self.step_sticky_button.clicked.connect(self._collapse_step_marker)
-        self.step_sticky_button.setVisible(False)
-        theme_manager.theme_changed.connect(self._apply_step_sticky_style)
-        self._apply_step_sticky_style()
-        self.verticalScrollBar().valueChanged.connect(
-            self._update_step_sticky_button)
+        self._sticky_target = None
+        self.sticky_bar_button = QPushButton(self.viewport())
+        self.sticky_bar_button.setObjectName("StickyBarButton")
+        self.sticky_bar_button.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.sticky_bar_button.setFixedHeight(28)
+        self.sticky_bar_button.clicked.connect(self._collapse_sticky_target)
+        self.sticky_bar_button.setVisible(False)
+        theme_manager.theme_changed.connect(self._apply_sticky_bar_style)
+        self._apply_sticky_bar_style()
+        self.verticalScrollBar().valueChanged.connect(self._update_sticky_bar)
         logging.info("ChatWidget initialized.")
 
     def set_assistant_name(self, name: str):
@@ -171,6 +184,7 @@ class ChatWidget(QAbstractScrollArea):
         doc = QTextDocument(self)
         doc.setDocumentMargin(0)
         doc.setDefaultFont(self.chat_font)
+        register_status_images(doc, self.theme_manager)
         return doc
 
     def _content_geometry(self):
@@ -690,8 +704,9 @@ class ChatWidget(QAbstractScrollArea):
         self._streaming_msg = None
         self._retry_countdown_msg_idx = -1
         self._step_marker = None
-        if getattr(self, "step_sticky_button", None) is not None:
-            self.step_sticky_button.setVisible(False)
+        self._sticky_target = None
+        if getattr(self, "sticky_bar_button", None) is not None:
+            self.sticky_bar_button.setVisible(False)
         self._activity_timer.stop()
         self.selection_start = None
         self.selection_end = None
@@ -1184,13 +1199,17 @@ class ChatWidget(QAbstractScrollArea):
         self.scroll_to_bottom_button.setStyleSheet(
             self.theme_manager.get_style("SCROLL_BOTTOM_BUTTON_STYLE"))
 
-    def _apply_step_sticky_style(self):
-        self.step_sticky_button.setStyleSheet(
-            self.theme_manager.get_style("STEP_STICKY_BAR_STYLE"))
+    def _apply_sticky_bar_style(self):
+        self.sticky_bar_button.setStyleSheet(
+            self.theme_manager.get_style("STICKY_BAR_STYLE"))
+
+    def _block_sticky_label(self, msg: dict) -> str:
+        """Same text as the block header, so the bar is the header, pinned."""
+        return block_summary(msg) or " ".join(str(msg.get("title") or "Working").split())
 
     @staticmethod
     def _step_file_name(row: dict) -> str:
-        """File name a step works on, for the sticky bar's label."""
+        """File name a step works on, for the step bar's label."""
         try:
             data = json.loads(str(row.get("args") or ""))
         except (TypeError, ValueError):
@@ -1211,7 +1230,26 @@ class ChatWidget(QAbstractScrollArea):
         title = " ".join(str(row.get("title") or "step").split())
         name = self._step_file_name(row)
         label = f"{title} · {name}" if name and name not in title else title
-        return label if len(label) <= 46 else label[:45] + "…"
+        return label if len(label) <= 60 else label[:59] + "…"
+
+    def _block_at_scroll(self):
+        """The expanded activity block whose body the viewport top is inside."""
+        value = self.verticalScrollBar().value()
+        top = 0.0
+        found = None
+        for msg in self.messages:
+            doc = msg.get("doc")
+            height = doc.size().height() if doc is not None else 0.0
+            if (msg.get("type") == "activity" and msg.get("expanded", True)
+                    and top + 30 < value < top + height):
+                found = (msg, top)
+            top += height + self.document_margin
+        return found
+
+    @staticmethod
+    def _document_height(msg: dict) -> float:
+        doc = msg.get("doc")
+        return doc.size().height() if doc is not None else 0.0
 
     def _mark_step_position(self, msg: dict, row: dict, content_y: float):
         """Remembers where an expanded step's header sits in the transcript."""
@@ -1223,41 +1261,35 @@ class ChatWidget(QAbstractScrollArea):
             "label": self._step_sticky_label(row),
             "end": y + int(row.get("growth") or 0) + 28,
         }
-        self._update_step_sticky_button()
+        self._update_sticky_bar()
 
     def _track_step_toggle(self, msg: dict, row: dict, content_y: float | None):
-        """Arms or disarms the sticky bar for a step the reader opened."""
+        """Arms or disarms the step bar for a step the reader opened."""
         marker = self._step_marker
         if not row.get("expanded"):
             if marker and marker["row"] is row:
                 self._step_marker = None
-                self.step_sticky_button.setVisible(False)
             return
         if content_y is not None:
             self._mark_step_position(msg, row, content_y)
 
-    @staticmethod
-    def _document_height(msg: dict) -> float:
-        doc = msg.get("doc")
-        return doc.size().height() if doc is not None else 0.0
-
     def _remeasure_step_growth(self, msg: dict, row: dict, before: float):
-        """Keeps the sticky bar's window in step with the step's detail height.
+        """Keeps the step bar's window in step with that step's height.
 
-        The bar must vanish exactly when that step's own content scrolls off
+        The bar must vanish exactly when the step's own content scrolls off
         the top, so the height a toggle added is measured from the rendered
         document instead of guessed from the block model.
         """
         if not row.get("expanded"):
             row["growth"] = 0
-            self._update_step_sticky_button()
+            self._update_sticky_bar()
             return
         delta = self._document_height(msg) - before
         row["growth"] = max(0, int((row.get("growth") or 0) + delta))
         marker = self._step_marker
         if marker and marker["row"] is row:
             marker["end"] = marker["y"] + row["growth"] + 28
-        self._update_step_sticky_button()
+        self._update_sticky_bar()
 
     def _step_row_on_screen(self, msg: dict, row: dict) -> bool:
         """Whether the step's row is actually rendered (its run is open)."""
@@ -1272,42 +1304,67 @@ class ChatWidget(QAbstractScrollArea):
         state = (msg.get("run_state") or {}).get(steps[0].get("id"))
         return run_default_expanded(steps) if state is None else bool(state)
 
-    def _collapse_step_marker(self):
-        """Folds the step from the bar, without scrolling back up to its row."""
+    def _sticky_target_at_scroll(self):
+        """What the bar folds right now: the open step, else the whole block."""
+        value = self.verticalScrollBar().value()
         marker = self._step_marker
-        if not marker:
+        if (marker and self._has_message(marker["msg"])
+                and marker["msg"].get("expanded", True)
+                and marker["row"].get("expanded")
+                and self._step_row_on_screen(marker["msg"], marker["row"])
+                and marker["y"] + 24 < value < marker["end"]):
+            return ("step", marker["label"],
+                    (marker["msg"], marker["row"], marker["y"]))
+        found = self._block_at_scroll()
+        if found:
+            msg, top = found
+            return ("block", self._block_sticky_label(msg), (msg, top))
+        return None
+
+    def _collapse_sticky_target(self):
+        """Folds what the bar names, without scrolling back to its header."""
+        target = self._sticky_target
+        if not target:
             return
-        msg, row, y = marker["msg"], marker["row"], marker["y"]
-        row["expanded"] = False
-        row["growth"] = 0
-        self._step_marker = None
-        self.step_sticky_button.setVisible(False)
+        kind, _label, payload = target
+        self._sticky_target = None
+        self.sticky_bar_button.setVisible(False)
+        if kind == "step":
+            msg, row, y = payload
+            row["expanded"] = False
+            row["growth"] = 0
+            if self._step_marker and self._step_marker["row"] is row:
+                self._step_marker = None
+            if self._has_message(msg):
+                self._render_activity(msg)
+                self.verticalScrollBar().setValue(max(0, int(y) - 8))
+            return
+        msg, top = payload
+        msg["expanded"] = False
+        # A fold the reader asked for outranks the automatic ones.
+        msg["user_toggled"] = True
         if self._has_message(msg):
             self._render_activity(msg)
-            self.verticalScrollBar().setValue(max(0, y - 8))
+            self.verticalScrollBar().setValue(max(0, int(top) - 8))
 
-    def _update_step_sticky_button(self, *args):
-        """Shows the step bar while that step's own content fills the screen."""
-        button = getattr(self, "step_sticky_button", None)
+    def _update_sticky_bar(self, *args):
+        """Pins the header the reader has scrolled past, step or block alike."""
+        button = getattr(self, "sticky_bar_button", None)
         if button is None:
             return
-        marker = self._step_marker
-        if (not marker or not self._has_message(marker["msg"])
-                or not marker["row"].get("expanded")):
-            self._step_marker = None
+        target = self._sticky_target_at_scroll()
+        if target is None:
+            self._sticky_target = None
             button.setVisible(False)
             return
-        if (not marker["msg"].get("expanded", True)
-                or not self._step_row_on_screen(marker["msg"], marker["row"])):
-            button.setVisible(False)
-            return
-        bar = self.verticalScrollBar()
-        if bar.maximum() <= 0 or not (marker["y"] + 24 < bar.value() < marker["end"]):
-            button.setVisible(False)
-            return
-        label = f"▴  {marker['label']}"
-        if button.text() != label:
-            button.setText(label)
+        self._sticky_target = target
+        kind, label, _payload = target
+        text = f"▾  {label}"
+        if button.text() != text:
+            button.setText(text)
+        tooltip = "Collapse this step" if kind == "step" else "Collapse this block"
+        if button.toolTip() != tooltip:
+            button.setToolTip(tooltip)
         x_offset, text_width = self._content_geometry()
         if text_width <= 0:
             return
@@ -1608,7 +1665,7 @@ class ChatWidget(QAbstractScrollArea):
         self.verticalScrollBar().setPageStep(viewport_height)
         self.viewport().update()
         self._update_scroll_to_bottom_button()
-        self._update_step_sticky_button()
+        self._update_sticky_bar()
 
     @staticmethod
     def _block_has_image(block) -> bool:
@@ -1726,3 +1783,36 @@ class ChatWidget(QAbstractScrollArea):
     def resizeEvent(self, event):
         self._update_scroll_bar()
         super().resizeEvent(event)
+        if self.messages:
+            self._excerpt_timer.start()
+
+    def _activity_column_width(self) -> int:
+        return self._content_geometry()[1]
+
+    def _measure_activity_text(self, text: str, bold: bool = False) -> int:
+        font = QFont(self.chat_font)
+        font.setBold(bool(bold))
+        return QFontMetrics(font).horizontalAdvance(str(text))
+
+    def _rerender_excerpts(self):
+        """Re-clips one-line thought rows after the text column changed width."""
+        width = self._activity_column_width()
+        last = int(getattr(self.activity_formatter, "last_width", 0) or 0)
+        if width <= 0 or last <= 0 or abs(width - last) < 24:
+            return
+        touched = False
+        for msg in list(self.messages):
+            if msg.get('type') != 'activity':
+                continue
+            if not any(row.get('kind') == 'thought'
+                       for row in msg.get('rows') or []):
+                continue
+            try:
+                msg['doc'].setHtml(self.activity_formatter.format_block(msg))
+            except Exception as e:
+                logging.warning(f"Thought excerpt re-render failed: {e}")
+                continue
+            touched = True
+        if touched:
+            self._update_scroll_bar()
+            self.viewport().update()

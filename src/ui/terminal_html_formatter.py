@@ -223,7 +223,8 @@ class TerminalHtmlFormatter:
             f'<td width="1%" valign="top"><pre style="margin: 0; color: {meta};">'
             f'{num.rjust(width)}&nbsp;&nbsp;</pre></td>'
             f'<td width="99%" valign="top"><pre style="margin: 0; '
-            f'color: {pre_color}; white-space: pre-wrap; word-wrap: break-word;">'
+            f'color: {pre_color}; white-space: pre-wrap; word-wrap: break-word; '
+            f'line-height: 95%;">'
             f'{line_html or "&nbsp;"}</pre></td>'
             '</tr>'
             for (num, _), line_html in zip(shown, code_lines, strict=True)
@@ -272,6 +273,11 @@ class TerminalHtmlFormatter:
         background, border and padding, so the output used to sit naked on
         the card. Table cell background and cellpadding render solidly.
         """
+        # Qt's pre-wrap draws a lone \r as its own break on top of the \n, so
+        # CRLF content (shell output, Windows text files) came out double
+        # spaced. Normalizing first and tightening the line-height keeps a
+        # long block readable instead of twice as tall as it needs to be.
+        inner_html = str(inner_html).replace("\r\n", "\n").replace("\r", "\n")
         return (
             f'<table width="100%" cellspacing="0" cellpadding="8" '
             f'bgcolor="{self._get_style("CODE_BG")}" '
@@ -279,7 +285,7 @@ class TerminalHtmlFormatter:
             'margin-top: 2px;"><tr><td>'
             f'<pre style="margin: 0; color: '
             f'{color or self._get_style("TERMINAL_PRE_COLOR")}; '
-            'white-space: pre-wrap; word-wrap: break-word;">'
+            'white-space: pre-wrap; word-wrap: break-word; line-height: 95%;">'
             f"<code>{inner_html}</code></pre></td></tr></table>"
         )
 

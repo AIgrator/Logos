@@ -150,6 +150,11 @@ STYLES = {
         "SUCCESS_COLOR": "#1a7f37",
         "ERROR_COLOR": "#cf222e",
         "WARNING_COLOR": "#9a6700",
+        # Row status marks are deliberately quieter than the alert colors: a
+        # transcript is mostly successful steps, so a bright tick on every row
+        # reads as decoration. These keep the shape readable, the color calm.
+        "STATUS_OK_COLOR": "#2b8a3e",
+        "STATUS_ERROR_COLOR": "#d1242f",
         "CODE_BG": "#f6f8fa",
         "CODE_BORDER": "#d0d7de",
         "COLLAPSIBLE_BG": "#f6f8fa",
@@ -171,7 +176,7 @@ STYLES = {
                 background-color: #f0f0f0;
             }
         """,
-        "STEP_STICKY_BAR_STYLE": """
+        "STICKY_BAR_STYLE": """
             QPushButton {
                 background-color: #ffffff;
                 color: #0550ae;
@@ -249,6 +254,8 @@ STYLES = {
         "SUCCESS_COLOR": "#7ee787",
         "ERROR_COLOR": "#ff7b72",
         "WARNING_COLOR": "#ffd166",
+        "STATUS_OK_COLOR": "#57ab5a",
+        "STATUS_ERROR_COLOR": "#e5534b",
         "CODE_BG": "#11161d",
         "CODE_BORDER": "#30363d",
         "COLLAPSIBLE_BG": "#151a21",
@@ -270,7 +277,7 @@ STYLES = {
                 background-color: #4a4a4a;
             }
         """,
-        "STEP_STICKY_BAR_STYLE": """
+        "STICKY_BAR_STYLE": """
             QPushButton {
                 background-color: #1c2128;
                 color: #9cdcfe;

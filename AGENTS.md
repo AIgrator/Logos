@@ -191,16 +191,39 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   group. A thought or narration row ends a run, so the model's thinking stays
   visible between groups instead of being hidden inside a folded row; the
   narration before a run's first step stays visible as its commentary.
+  A thought row is always exactly one line: its first non-empty line is
+  clipped to the text column and ends with `…`, and the full text stays behind
+  the expand click. Qt's rich text has no `text-overflow`, so the clip is
+  measured (`ActivityBlockFormatter._thought_excerpt`, fed by
+  `ChatWidget._measure_activity_text` and `_activity_column_width`) and the
+  excerpt is `white-space: nowrap`, so a narrow window never wraps it. A
+  window resize re-renders the blocks that have thoughts once it settles
+  (`_excerpt_timer` → `_rerender_excerpts`, skipped under 24 px), so the
+  ellipsis follows the new width instead of leaving a half-empty line.
   A single-step run stays a plain step row. Runs are open while a step is
   running and when one failed or was denied, and fold to
   `Ran N tools · <tool breakdown>` once finished clean; the row toggles via an
   `activity:<message id>:run:<first step id>` anchor, with the override kept
-  in `msg['run_state']`. The block header is only the caret and the title
-  (`Working` while live, then the outcome): there is no overall turn timer and
-  no status-colored card edge, and the outcome never derives from step results:
-  replay closes every block as `Done`, because a failed step is not a failed
-  turn (the model often retries and succeeds); the red ✗ and expanded output
-  stay on the step row alone. When the turn ends with `finish`, the block
+  in `msg['run_state']`. The block header is only the caret and the title:
+  `Working` while live, a clean finish turns into what the turn did
+  (`6 steps · read_files, write_file +1`, from `block_summary`), and a real
+  outcome keeps its word (`Stopped`, `Request failed`, `Waiting for you`).
+  There is no overall turn timer and no status-colored card edge, and the
+  outcome never derives from step results:
+  replay closes every block as `Done`, which the header renders as that same
+  summary, because a failed step is not a failed
+  turn (the model often retries and succeeds); the red badge and expanded output
+  stay on the step row alone. Every step row (and every run row) opens with a
+  small circled status badge instead of a trailing tick: a thin green
+  circle-check for `ok`, a red circle-cross for `error`, a hollow accent ring
+  for `running`, plus amber `!` and grey dash for `denied` / `stopped`
+  (`src/ui/widgets/status_marks.py`). They are drawn with `QPainter`, not
+  typed glyphs, so they stay crisp and follow the theme colors
+  (`STATUS_OK_COLOR`, `STATUS_ERROR_COLOR`, ...); `ChatWidget._new_document`
+  registers them as document resources under `logos-status:<state>`, because
+  the transcript is one `QTextDocument` per block and a bundled image file
+  would need a variant per state and theme. The caret stays a quiet grey so
+  the badge is what the eye lands on. When the turn ends with `finish`, the block
   folds to its header (`collapse="auto"` in `ChatWidget.finish_activity`):
   the answer stays open below, the work does not. Auto-fold is skipped when the
   user toggled the block by hand during the turn (`msg['user_toggled']`), when
@@ -221,17 +244,23 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   renders the body. A long result is a preview of 25 lines / 3 500 characters
   plus a `Show all · N more lines` link (`row['output_expanded']`, anchor
   `...:output:<row id>`, `Show less` to fold back), because the transcript is
-  one `QTextDocument` and cannot nest a scroll area inside a card. A long step
-  (a written file, a big listing) is taller than the screen, so its own row
-  leaves the viewport while its content is read: a sticky bar
-  (`ChatWidget.step_sticky_button`) hangs at the top of the transcript with the
-  step title and the file it touched (`▴ Writing file · catalog.html`) and
-  folds that step on click, so the reader never scrolls back to the row first.
-  It is armed by the click that opens the step (`_mark_step_position` remembers
-  that y instead of scanning the document, `_remeasure_step_growth` measures
-  the height a toggle added from the rendered document) and is visible only
-  while that step's own content is on screen, so a short step never gets one;
-  collapsing the step, its run or the block disarms it.
+  one `QTextDocument` and cannot nest a scroll area inside a card. Both the
+  output box and the code box normalize `\r\n` / `\r` to `\n` before escaping
+  (Qt's `pre-wrap` draws a lone `\r` as its own break, so Windows command
+  output used to render double spaced) and use a 95 % line-height. A long turn
+  - a written file, a big listing, a live run still piling up steps - is taller
+  than the screen, so its own header (the caret and the title) leaves the top
+  of the transcript. A sticky bar (`ChatWidget.sticky_bar_button`) pins it and
+  folds what it names on click, so the reader never scrolls back to the header
+  first. `_sticky_target_at_scroll` picks the level: inside a step the reader
+  opened it reads `▾ Writing file · catalog.html` and folds that step alone
+  (`_step_marker` is armed by the click that opened it and
+  `_remeasure_step_growth` measures the height that toggle added), while over
+  the block as a whole it repeats the block summary
+  (`▾ 6 steps · read_files, write_file +1`) and folds the entire block.
+  The block level is read from the rendered document heights
+  (`_block_at_scroll`), so a block that fits on screen never gets a bar, and
+  folding or scrolling out of either level hides it.
   The plan lives outside the transcript: a live turn
   shows a compact `Step N / M` pill above the composer
   (`src/ui/widgets/plan_panel.py::PlanPanel`, mounted first in

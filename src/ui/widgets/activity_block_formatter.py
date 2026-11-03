@@ -12,6 +12,8 @@ from __future__ import annotations
 import html
 import time
 
+from src.ui.widgets.status_marks import MARK_SIZE, STATUS_STATES
+
 _TEXT_LIMIT = 30000
 _ARGS_LIMIT = 12000
 # A result longer than this is a preview: the transcript should stay a
@@ -21,13 +23,10 @@ _OUTPUT_PREVIEW_CHARS = 3500
 # Width of the one-line argument peek next to the collapsed Arguments link.
 _ARGS_PREVIEW_CHARS = 110
 
-_STATUS_ICONS = {
-    "running": ("", "COLLAPSIBLE_META"),
-    "ok": ("&#10003;", "SUCCESS_COLOR"),
-    "error": ("&#10007;", "ERROR_COLOR"),
-    "denied": ("!", "WARNING_COLOR"),
-    "stopped": ("&#9632;", "COLLAPSIBLE_META"),
-}
+# Status badges lead a row instead of trailing it. A tick after the title reads
+# like a read receipt; a quiet mark in front of it is a status column, where the
+# shape carries the meaning and the color only supports it. The images are
+# registered per document by ``status_marks.register_status_images``.
 
 # Read-only lookups. A turn usually starts with a long survey of the project;
 # folding those steps keeps the transcript readable while edits and commands
@@ -83,6 +82,34 @@ def run_default_expanded(steps) -> bool:
     return any(status in ("running", "error", "denied") for status in statuses)
 
 
+def block_tool_summary(msg: dict) -> str:
+    """Tool names used by a block, at most two plus a ``+N`` count."""
+    names = []
+    for row in msg.get("rows") or []:
+        if row.get("kind") != "step":
+            continue
+        name = str(row.get("name") or "").strip()
+        if name and name not in names:
+            names.append(name)
+    if len(names) > 2:
+        return ", ".join(names[:2]) + f" +{len(names) - 2}"
+    return ", ".join(names)
+
+
+def block_summary(msg: dict) -> str:
+    """What a block did, as its header reads it: ``6 steps · read_files, write_file``.
+
+    A finished turn says that instead of an outcome word, because "what ran"
+    tells the reader more than "Done" does.
+    """
+    steps = [row for row in msg.get("rows") or [] if row.get("kind") == "step"]
+    if not steps:
+        return ""
+    label = f"{len(steps)} step" if len(steps) == 1 else f"{len(steps)} steps"
+    tools = block_tool_summary(msg)
+    return f"{label} · {tools}" if tools else label
+
+
 def format_duration(seconds: float | None) -> str:
     """Compact duration: 8s, 1m 05s, 1h 02m."""
     try:
@@ -121,6 +148,14 @@ class ActivityBlockFormatter:
 
     def __init__(self, theme_manager):
         self.theme_manager = theme_manager
+        # The transcript is one QTextDocument, and Qt's rich text has no
+        # text-overflow, so a row that must stay on one line has to be clipped
+        # by measurement. ChatWidget supplies both callbacks (its column width
+        # and a font-metric measure); without them the excerpt falls back to a
+        # plain character limit.
+        self.available_width = None
+        self.measure_text = None
+        self.last_width = 0
 
     def _get_style(self, key: str) -> str:
         try:
@@ -130,6 +165,7 @@ class ActivityBlockFormatter:
 
     def format_block(self, msg: dict, now: float | None = None) -> str:
         now = time.monotonic() if now is None else now
+        self.last_width = self._column_width()
         meta = self._get_style("COLLAPSIBLE_META")
         title_color = self._get_style("COLLAPSIBLE_TITLE")
         status = str(msg.get("status") or "running")
@@ -140,12 +176,18 @@ class ActivityBlockFormatter:
 
         expanded = bool(msg.get("expanded", True))
         caret = "&#9662;" if expanded else "&#9656;"
-        title = html.escape(str(msg.get("title") or "Working"))
+        # A cleanly finished turn speaks through what it did, not through the
+        # word "Done": the step and tool count says more than an outcome does.
+        # Real outcomes (stopped, failed, waiting for you) keep their label.
+        title = str(msg.get("title") or "").strip()
+        if title in ("", "Done"):
+            title = block_summary(msg) or title or "Working"
+        title = html.escape(title)
         header = (
             f'<div style="font-weight: bold;">'
             f'<a href="activity:{msg.get("id")}:toggle" '
             f'style="text-decoration: none; color: {title_color};">'
-            f"{caret}&nbsp;{title}</a></div>")
+            f'<span style="color: {meta};">{caret}</span>&nbsp;{title}</a></div>')
 
         body = ""
         if expanded:
@@ -211,11 +253,7 @@ class ActivityBlockFormatter:
         expanded = self._run_expanded(msg, run_id, steps)
         caret = "&#9662;" if expanded else "&#9656;"
         status = self._run_status(steps)
-        icon, color_key = _STATUS_ICONS.get(status, _STATUS_ICONS["running"])
-        color = self._get_style(color_key)
-        if status == "running":
-            icon = "&#9679;"
-            color = self._get_style("COLLAPSIBLE_TITLE")
+        mark = self._status_mark(status)
         label = ("Running" if status == "running" else "Ran")
         title = f"{label} {len(steps)} tools"
         suffix_bits = []
@@ -233,21 +271,19 @@ class ActivityBlockFormatter:
             suffix = (
                 f'&nbsp;<span style="color: {meta}; font-weight: normal;">'
                 f"&middot; {' &middot; '.join(suffix_bits)}</span>")
-        icon_html = (
-            f'&nbsp;<span style="color: {color}; font-weight: 600;">{icon}</span>'
-            if icon else "")
         detail = ""
         if expanded:
             inner = "".join(self._format_row(msg, row, meta, now)
                             for row in run_rows)
             detail = f'<div style="margin: 2px 0 0 14px;">{inner}</div>'
         run_id_html = html.escape(run_id, quote=True)
+        caret_html = f'<span style="color: {meta};">{caret}</span>'
         return (
             f'<div style="margin-top: 6px;">'
             f'<a href="activity:{msg.get("id")}:run:{run_id_html}" '
             f'style="text-decoration: none; color: '
             f'{self._get_style("COLLAPSIBLE_TITLE")};">'
-            f"{caret}&nbsp;<b>{title}</b>{suffix}{icon_html}</a>{detail}</div>")
+            f"{caret_html}&nbsp;{mark}<b>{title}</b>{suffix}</a>{detail}</div>")
 
     @staticmethod
     def _run_status(steps) -> str:
@@ -289,17 +325,63 @@ class ActivityBlockFormatter:
         row_id = html.escape(str(row.get("id") or ""), quote=True)
         return f"activity:{msg_id}:row:{row_id}"
 
+    def _thought_excerpt(self, text: str) -> str:
+        """One line for the row: as much of the thought as fits, then "…".
+
+        A thought is the model's reasoning, so the row shows its opening and
+        keeps the rest behind the expand click. It must never wrap: a second
+        line would tuck the reasoning under the row and double the height of
+        every turn.
+        """
+        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
+        if not first:
+            return ""
+        budget = self._excerpt_budget()
+        if budget <= 0 or not callable(self.measure_text):
+            legend = first[:140]
+            return legend + "…" if len(first) > 140 else legend
+        measure = self.measure_text
+        if measure(first) <= budget:
+            return first
+        low, high = 0, len(first)
+        while low < high:
+            middle = (low + high + 1) // 2
+            if measure(first[:middle].rstrip() + "…") <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        clipped = first[:low].rstrip()
+        return clipped + "…" if clipped else "…"
+
+    def _column_width(self) -> int:
+        """Width of the text column at the last render, or 0 when unknown."""
+        width_fn = self.available_width
+        if not callable(width_fn):
+            return 0
+        try:
+            return max(0, int(width_fn() or 0))
+        except Exception:
+            return 0
+
+    def _excerpt_budget(self) -> int:
+        """Pixels left for the excerpt on a thought row, or 0 when unknown."""
+        width = self._column_width()
+        if width <= 0 or not callable(self.measure_text):
+            return 0
+        # The block is inset by its own margins (15 px left, 12 px right) and
+        # the row starts with the caret and the bold "Thought" label.
+        inset = 15 + 12 + 14
+        prefix = self.measure_text("▾\u00a0Thought ", True)
+        return max(0, width - inset - prefix)
+
     def _format_thought(self, msg: dict, row: dict, meta: str) -> str:
         expanded = bool(row.get("expanded"))
         caret = "&#9662;" if expanded else "&#9656;"
         text = str(row.get("text") or "")
-        first = next((line.strip() for line in text.splitlines() if line.strip()), "")
-        excerpt = html.escape(first[:140])
-        if len(first) > 140:
-            excerpt += "…"
+        excerpt = html.escape(self._thought_excerpt(text))
         excerpt_html = (
-            f'&nbsp;<span style="color: {meta}; font-weight: normal;">'
-            f"{excerpt}</span>" if excerpt else "")
+            f'&nbsp;<span style="color: {meta}; font-weight: normal; '
+            f'white-space: nowrap;">{excerpt}</span>' if excerpt else "")
         body = ""
         if expanded:
             body = (
@@ -318,33 +400,37 @@ class ActivityBlockFormatter:
             f'<div style="margin-top: 6px; white-space: pre-wrap;">'
             f"{text}</div>")
 
+    def _status_mark(self, status: str) -> str:
+        """Circled badge that opens a row, drawn by ``status_marks``."""
+        status = status if status in STATUS_STATES else "running"
+        return (f'<img src="logos-status:{status}" '
+                f'width="{MARK_SIZE}" height="{MARK_SIZE}">&nbsp;')
+
     def _format_step(self, msg: dict, row: dict, meta: str, now: float) -> str:
         expanded = bool(row.get("expanded"))
         caret = "&#9662;" if expanded else "&#9656;"
         status = str(row.get("status") or "running")
-        icon, color_key = _STATUS_ICONS.get(status, _STATUS_ICONS["running"])
-        color = self._get_style(color_key)
+        mark = self._status_mark(status)
         title = html.escape(str(row.get("title") or "Step"))
         duration = self._step_duration(row, now)
         suffix = ""
         if duration:
             suffix += (f'&nbsp;<span style="color: {meta}; font-weight: normal;">'
                        f"&middot; {duration}</span>")
-        if icon:
-            suffix += (f'&nbsp;<span style="color: {color}; font-weight: 600;">'
-                       f"{icon}</span>")
         detail = ""
         if expanded:
             detail = self._format_step_detail(msg, row, meta)
         # Job actions stay outside the collapsible body: Stop and Open log
         # must be reachable without expanding the step first.
         actions = self._job_actions(msg, row)
+        caret_html = (f'<span style="color: {meta};">{caret}</span>'
+                      if caret else "")
         return (
             f'<div style="margin-top: 6px;">'
             f'<a href="{self._row_toggle(msg.get("id"), row)}" '
             f'style="text-decoration: none; color: '
             f'{self._get_style("COLLAPSIBLE_TITLE")};">'
-            f"{caret}&nbsp;{title}{suffix}</a>{detail}{actions}</div>")
+            f"{caret_html}&nbsp;{mark}{title}{suffix}</a>{detail}{actions}</div>")
 
     def _step_duration(self, row: dict, now: float) -> str:
         started = row.get("started_at")
@@ -441,6 +527,13 @@ class ActivityBlockFormatter:
     def _pre(self, text: str) -> str:
         # Table cell instead of pre styling: Qt ignores a pre's background,
         # border and padding, leaving bare text on the card.
+        #
+        # Command output arrives with CRLF line endings, and Qt's pre-wrap
+        # renders a lone \r as its own break on top of the \n, so every line
+        # of shell output was drawn with a blank line under it. Normalizing to
+        # \n (and a slightly tighter line-height) gives a compact block
+        # instead of one that spends half its height on nothing.
+        text = str(text).replace("\r\n", "\n").replace("\r", "\n")
         return (
             f'<table width="100%" cellspacing="0" cellpadding="8" '
             f'bgcolor="{self._get_style("CODE_BG")}" '
@@ -448,7 +541,8 @@ class ActivityBlockFormatter:
             f'margin-top: 2px;"><tr><td>'
             f'<pre style="margin: 0; color: '
             f'{self._get_style("TERMINAL_PRE_COLOR")}; '
-            f'white-space: pre-wrap; word-wrap: break-word;">'
+            f'white-space: pre-wrap; word-wrap: break-word; '
+            f'line-height: 95%;">'
             f"<code>{html.escape(text)}</code></pre></td></tr></table>")
 
     def _job_actions(self, msg: dict, row: dict) -> str:
