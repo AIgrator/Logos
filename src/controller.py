@@ -162,6 +162,10 @@ class AppController(QObject):
         # Messages typed while a chat reply is streaming wait here and are
         # answered in order (FIFO) once the current reply finishes.
         self.chat_queue = []
+        # User bubbles marked "Pending": their text is in the loop's history
+        # but has not reached the model yet. Cleared when the next request is
+        # actually sent (or when Stop drops it).
+        self._pending_user_messages = []
         self.thinking_timer = QTimer(self)
         self.thinking_time = 0
         self._shutting_down = False
@@ -2105,7 +2109,8 @@ class AppController(QObject):
                     if text or records:
                         self.ui.add_message(
                             self.ui.build_user_message_html(
-                                text, attachments=records), role="user")
+                                text, attachments=records), role="user",
+                            ts=event.get("ts"), user_text=text)
                 elif not text:
                     continue
                 elif role == "assistant":
@@ -2611,7 +2616,7 @@ class AppController(QObject):
 
         attachment_records = self._record_pending_attachments()
         self.session_turn_id = uuid.uuid4().hex
-        self.ui.add_user_message(user_text, attachments=attachment_records)
+        turn_msg = self.ui.add_user_message(user_text, attachments=attachment_records)
         self.conversation_history.append({'role': 'user', 'content': user_text})
         self._persist_session(attachments=attachment_records)
         self._ensure_session_objective(user_text)
@@ -2672,10 +2677,12 @@ class AppController(QObject):
         elif self.state == ControllerState.TERMINAL:
             self._refresh_agent_context()
             self.consume_handoff_seed()
+            self._mark_pending_user_message(turn_msg, self.terminal_handler)
             self.terminal_handler.start_task(user_text)
         elif self.state == ControllerState.BROWSER:
             self._refresh_agent_context()
             self.consume_handoff_seed()
+            self._mark_pending_user_message(turn_msg, self.browser_handler)
             self.browser_handler.start_task(user_text, attachment_context)
         else:
             self.chat_handler.start_chat(
@@ -2748,6 +2755,42 @@ class AppController(QObject):
                     self.ui.add_error_message(f"Could not process attachment: {e}")
         return payloads
 
+    def _mark_pending_user_message(self, msg, handler) -> bool:
+        """Flags a just-shown bubble whose text only reaches the model later.
+
+        A steer folded into a running task (or a note recorded while it is
+        paused) is accepted at once but travels with the next request, so the
+        bubble says ``Pending`` until then. Chat messages waiting behind a
+        streaming answer are flagged by ``add_queued_message`` instead.
+        """
+        if not isinstance(msg, dict) or handler is None:
+            return False
+        state = getattr(handler, "state", None)
+        if state not in (VisionState.EXECUTING, VisionState.PAUSED):
+            return False
+        try:
+            marked = self.ui.set_user_pending(msg, True)
+        except Exception as e:
+            logging.warning(f"Could not mark a user message pending: {e}")
+            return False
+        if marked:
+            self._pending_user_messages.append(msg)
+        return marked
+
+    def _clear_pending_user_messages(self):
+        """Drops ``Pending`` from every bubble whose text is not queued anymore.
+
+        Called when a request is actually sent (the one funnel every mode goes
+        through) and when Stop abandons a turn, so the status can never
+        outlive its chance of reaching the model.
+        """
+        pending, self._pending_user_messages = self._pending_user_messages, []
+        for msg in pending:
+            try:
+                self.ui.set_user_pending(msg, False)
+            except Exception:
+                pass
+
     def _enqueue_chat_message(self, user_text):
         """Queues a chat message typed while a reply is streaming."""
         if len(self.chat_queue) >= self.CHAT_QUEUE_MAX:
@@ -2774,7 +2817,8 @@ class AppController(QObject):
             label, attachments=attachment_records)
         display_html = self.ui.build_user_message_html(
             label, queued=True, attachments=attachment_records)
-        handle = self.ui.add_queued_message(raw_html, display_html)
+        handle = self.ui.add_queued_message(
+            raw_html, display_html, text=user_text)
         self.chat_queue.append({
             'text': user_text,
             'attachments': attachments,
@@ -2908,6 +2952,9 @@ class AppController(QObject):
         """
         self._last_llm_request = (user_prompt, attachments, system_prompt, history, schema_name, tag, turn)
         self._last_llm_error = False
+        # The request is on its way: any steer folded into it is no longer
+        # pending, whichever mode and whichever turn built it.
+        self._clear_pending_user_messages()
         self.llm_request_sent.emit(user_prompt, attachments, system_prompt, history, schema_name, tag, turn)
 
     def _resend_last_request(self, log_line: str, notice_html: str, thinking_msg: str) -> bool:
@@ -3169,6 +3216,9 @@ class AppController(QObject):
         self.ui.stop_retry_countdown()
         self.ui.show_thinking_ui(False)
         self.ui.add_message("<i>Request cancelled.</i>", force_scroll=True)
+        # A steer that had not reached the model yet is dropped with the turn:
+        # its Pending status must not outlive the request it was waiting for.
+        self._clear_pending_user_messages()
 
         # If we are in vision mode, just reset the vision handler to IDLE
         # but keep the controller in ASSISTING state. Otherwise, idle the active

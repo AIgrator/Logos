@@ -5,6 +5,7 @@ import logging
 import sys
 import time
 import uuid
+from datetime import UTC, datetime
 from urllib.parse import unquote
 
 from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize, QTime, QTimer, QUrl, Signal
@@ -34,6 +35,11 @@ from src.ui.widgets.activity_block_formatter import (
 )
 from src.ui.widgets.collapsible_block_formatter import CollapsibleBlockFormatter
 from src.ui.widgets.status_marks import register_status_images
+from src.ui.widgets.transcript_icons import (
+    ICON_PREFIX,
+    ICON_SIZE,
+    register_icon_images,
+)
 
 # --- Basic Logging Setup ---
 logging.basicConfig(
@@ -42,6 +48,66 @@ logging.basicConfig(
     stream=sys.stdout
 )
 # ---
+
+_MONTHS = ("Jan", "Feb", "Mar", "Apr", "May", "Jun",
+           "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _message_moment(ts):
+    """Local datetime for a message timestamp, or None when it has none.
+
+    Journal events store UTC ISO strings, live messages hand over a
+    ``time.time()`` float; both end up in the user's local zone, because a
+    bubble that says 12:19 has to match the clock on the wall.
+    """
+    if ts is None or ts == "":
+        return None
+    if isinstance(ts, (int, float)):
+        try:
+            return datetime.fromtimestamp(float(ts)).astimezone()
+        except (OverflowError, OSError, ValueError):
+            return None
+    text = str(ts).strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.astimezone()
+
+
+def format_message_time(ts) -> str:
+    """Clock stamp under a user bubble: ``12:19``, dated when not today."""
+    moment = _message_moment(ts)
+    if moment is None:
+        return ""
+    now = datetime.now().astimezone()
+    clock = f"{moment.hour:02d}:{moment.minute:02d}"
+    if moment.date() == now.date():
+        return clock
+    month = _MONTHS[moment.month - 1]
+    if moment.year == now.year:
+        return f"{moment.day} {month}, {clock}"
+    return f"{moment.day} {month} {moment.year}, {clock}"
+
+
+def _selected_plain_text(cursor) -> str:
+    """Plain text of a cursor selection, free of Qt's layout markers.
+
+    ``selectedText`` separates paragraphs with U+2029 and wraps table cells
+    (which every bubble is) in U+FDD0/U+FDD1; neither belongs on the
+    clipboard.
+    """
+    return (cursor.selectedText()
+            .replace("\u2029", "\n")
+            .replace("\ufdd0", "")
+            .replace("\ufdd1", ""))
+
 
 class ChatWidget(QAbstractScrollArea):
     """
@@ -185,6 +251,7 @@ class ChatWidget(QAbstractScrollArea):
         doc.setDocumentMargin(0)
         doc.setDefaultFont(self.chat_font)
         register_status_images(doc, self.theme_manager)
+        register_icon_images(doc, self.theme_manager)
         return doc
 
     def _content_geometry(self):
@@ -215,12 +282,43 @@ class ChatWidget(QAbstractScrollArea):
 
     # --- Selection and Copying Logic ---
 
+    def _selectable_end(self, msg) -> int:
+        """Last selectable character of a message.
+
+        A user bubble's status line (``Pending``, the time, the copy icon) is
+        chrome, not text: it is excluded from selection, from the selection
+        highlight and from the clipboard, so dragging across a bubble never
+        picks up "12:50" or the icon.
+        """
+        doc = msg.get('doc') if isinstance(msg, dict) else None
+        if doc is None:
+            return 0
+        end = max(0, doc.characterCount() - 1)
+        meta_start = int(msg.get('meta_start') or 0)
+        if 0 < meta_start < end:
+            return meta_start
+        return end
+
+    def _clamp_selection_pos(self, pos):
+        """Keeps a selection endpoint out of a message's non-selectable tail."""
+        if not pos:
+            return pos
+        try:
+            msg_idx, char_idx = pos
+        except (TypeError, ValueError):
+            return pos
+        if 0 <= msg_idx < len(self.messages):
+            return (msg_idx, min(int(char_idx), self._selectable_end(self.messages[msg_idx])))
+        return pos
+
     def _get_selection_range(self):
         if not self.selection_start or not self.selection_end:
             return None, None
         if self.selection_start > self.selection_end:
-            return self.selection_end, self.selection_start
-        return self.selection_start, self.selection_end
+            start, end = self.selection_end, self.selection_start
+        else:
+            start, end = self.selection_start, self.selection_end
+        return self._clamp_selection_pos(start), self._clamp_selection_pos(end)
 
     def _pos_to_char_index(self, pos: QPoint):
         scroll_y = self.verticalScrollBar().value()
@@ -240,6 +338,9 @@ class ChatWidget(QAbstractScrollArea):
                     self.viewport().setCursor(Qt.CursorShape.IBeamCursor)
 
                 char_index = layout.hitTest(relative_pos, Qt.HitTestAccuracy.FuzzyHit)
+                # The message footer is not text: a click or a drag inside it
+                # anchors at the end of the bubble body instead.
+                char_index = max(0, min(int(char_index), self._selectable_end(msg)))
                 return (i, char_index)
             current_y += doc_height + self.document_margin
 
@@ -274,6 +375,10 @@ class ChatWidget(QAbstractScrollArea):
                     if len(parts) == 3:
                         self._copy_collapsible_payload(parts[1], parts[2])
                         return
+
+                if anchor and anchor.startswith("msgcopy:"):
+                    self._copy_user_message(anchor.split(':', 1)[1])
+                    return
 
                 if anchor and anchor.startswith("action:"):
                     parts = anchor.split(':', 2)
@@ -656,11 +761,11 @@ class ChatWidget(QAbstractScrollArea):
         for i in range(start_msg_idx, end_msg_idx + 1):
             doc = self.messages[i]['doc']
             sel_start = start_char_idx if i == start_msg_idx else 0
-            sel_end = end_char_idx if i == end_msg_idx else doc.characterCount() - 1
+            sel_end = end_char_idx if i == end_msg_idx else self._selectable_end(self.messages[i])
             cursor = QTextCursor(doc)
             cursor.setPosition(sel_start)
             cursor.setPosition(sel_end, QTextCursor.KeepAnchor)
-            selected_parts.append(cursor.selectedText())
+            selected_parts.append(_selected_plain_text(cursor))
         full_text = "\n".join(selected_parts)
         if full_text:
             QApplication.clipboard().setText(full_text)
@@ -670,6 +775,14 @@ class ChatWidget(QAbstractScrollArea):
         for msg in self.messages:
             if msg.get('type') == 'collapsible':
                 all_text_parts.append(f"--- {msg.get('title', 'Collapsible Block')} ---\n{msg.get('full_content', '')}")
+            elif msg.get('meta_start'):
+                # The status line under a user bubble is chrome, not content.
+                cursor = QTextCursor(msg['doc'])
+                cursor.setPosition(0)
+                cursor.setPosition(int(msg['meta_start']),
+                                   QTextCursor.KeepAnchor)
+                all_text_parts.append(
+                    _selected_plain_text(cursor))
             else:
                 all_text_parts.append(msg['doc'].toPlainText())
 
@@ -714,7 +827,99 @@ class ChatWidget(QAbstractScrollArea):
         self.verticalScrollBar().setValue(0)
         self.viewport().update()
 
-    def add_message(self, data, force_scroll=False, keep_stream=False, role=None):
+    def _user_meta_html(self, msg: dict) -> str:
+        """Time, pending status and copy button under a user bubble.
+
+        The strip sits outside the bubble on purpose: the bubble background is
+        painted under the message's own text blocks, so a paragraph after the
+        table stays on the chat background, quiet and out of the way. It is
+        right-aligned with the bubble, the way messengers date a message.
+
+        ``Pending`` leads the row when the text is accepted but has not reached
+        the model yet (a steer folded into the next planning turn, or a message
+        waiting behind a streaming answer). It disappears at the moment the
+        request that carries the text is sent.
+        """
+        meta = self.theme_manager.get_style("COLLAPSIBLE_META") or "#8b949e"
+        accent = self.theme_manager.get_style("COLLAPSIBLE_TITLE") or meta
+        pieces = []
+        if msg.get('pending'):
+            pieces.append(f'<span style="color: {accent};">Pending</span>')
+        stamp = format_message_time(msg.get('ts'))
+        if stamp:
+            pieces.append(f'<span style="color: {meta};">{stamp}</span>')
+        if str(msg.get('user_text') or ''):
+            icon = 'copied' if msg.get('copied') else 'copy'
+            pieces.append(
+                f'<a href="msgcopy:{msg.get("id")}" style="text-decoration: none;">'
+                f'<img src="{ICON_PREFIX}{icon}" width="{ICON_SIZE}" '
+                f'height="{ICON_SIZE}"></a>')
+        if not pieces:
+            return ""
+        return ('<p align="right" style="margin: 3px 5px 2px 0; font-size: 90%;">'
+                + ('&nbsp;&nbsp;&nbsp;'.join(pieces)) + '</p>')
+
+    def _render_user_bubble(self, msg: dict):
+        """Renders a user message and remembers where its footer begins.
+
+        ``meta_start`` is the character position of the status line, which
+        selection must never reach (``_selectable_end``).
+        """
+        doc = msg.get('doc')
+        if doc is None:
+            return
+        body = msg.get('raw_content')
+        if msg.get('queued') and msg.get('queued_content'):
+            body = msg.get('queued_content')
+        meta = self._user_meta_html(msg)
+        doc.setHtml(str(body or '') + meta)
+        msg['meta_start'] = doc.lastBlock().position() if meta else 0
+
+    def _copy_user_message(self, msg_id: str) -> bool:
+        """Copies one user prompt as plain text (not the rendered HTML)."""
+        msg = next((m for m in self.messages if m.get('id') == msg_id), None)
+        if msg is None or msg.get('role') != 'user':
+            return False
+        text = str(msg.get('user_text') or '')
+        if not text:
+            return False
+        QApplication.clipboard().setText(text)
+        self._set_user_copied(msg, True)
+        return True
+
+    def _rerender_user_meta(self, msg: dict):
+        """Re-renders a user bubble in place after a meta flag flipped."""
+        was_at_bottom = self._is_at_bottom()
+        self._render_user_bubble(msg)
+        self._update_scroll_bar()
+        self._follow_if_at_bottom(was_at_bottom)
+        self.viewport().update()
+
+    def _set_user_copied(self, msg: dict, copied: bool):
+        """Flips the copy icon to a check for a moment, so the click lands."""
+        if not any(m is msg for m in self.messages):
+            return
+        if bool(msg.get('copied')) == bool(copied):
+            return
+        msg['copied'] = bool(copied)
+        self._rerender_user_meta(msg)
+        if copied:
+            QTimer.singleShot(1600, lambda: self._set_user_copied(msg, False))
+
+    def set_user_pending(self, msg, pending: bool = True):
+        """Shows or clears the ``Pending`` status of a user bubble."""
+        if not isinstance(msg, dict) or msg.get('role') != 'user':
+            return False
+        if not any(m is msg for m in self.messages):
+            return False
+        if bool(msg.get('pending')) == bool(pending):
+            return False
+        msg['pending'] = bool(pending)
+        self._rerender_user_meta(msg)
+        return True
+
+    def add_message(self, data, force_scroll=False, keep_stream=False, role=None,
+                    ts=None, user_text=None):
         if role == 'user':
             # A user message splits the turn: the live block stays above it,
             # and the work that follows starts a new block below. Without the
@@ -783,13 +988,19 @@ class ChatWidget(QAbstractScrollArea):
             self._ensure_activity_timer()
         elif isinstance(data, str):
             html_content = data
-            doc.setHtml(html_content)
             msg = {
                 'type': 'simple',
+                'id': f"msg-{uuid.uuid4().hex}",
                 'raw_content': html_content,
                 'role': role,
+                'ts': ts if ts is not None else (time.time() if role == 'user' else None),
+                'user_text': user_text,
                 'doc': doc
             }
+            if role == 'user':
+                self._render_user_bubble(msg)
+            else:
+                doc.setHtml(html_content)
         else:
             logging.warning(f"ChatWidget received add_message with unknown data type: {type(data)}")
             return
@@ -1138,7 +1349,8 @@ class ChatWidget(QAbstractScrollArea):
                 return True
         return False
 
-    def add_queued_message(self, raw_html: str, display_html: str):
+    def add_queued_message(self, raw_html: str, display_html: str,
+                           text: str = "", ts=None):
         """Appends a user message shown as "queued" (dimmed).
 
         Unlike ``add_message`` this does NOT touch the active stream state, so
@@ -1148,14 +1360,19 @@ class ChatWidget(QAbstractScrollArea):
         """
         was_at_bottom = self._is_at_bottom()
         doc = self._new_document()
-        doc.setHtml(display_html)
         msg = {
             'type': 'simple',
+            'id': f"msg-{uuid.uuid4().hex}",
             'raw_content': raw_html,  # normal (undimmed) HTML, restored on send
+            'queued_content': display_html,
             'role': 'user',
+            'ts': ts if ts is not None else time.time(),
+            'user_text': text,
             'doc': doc,
             'queued': True,
+            'pending': True,
         }
+        self._render_user_bubble(msg)
         self.messages.append(msg)
         self._update_scroll_bar()
         self.viewport().update()
@@ -1168,7 +1385,10 @@ class ChatWidget(QAbstractScrollArea):
             return
         was_at_bottom = self._is_at_bottom()
         msg['queued'] = False
-        msg['doc'].setHtml(msg.get('raw_content', ''))
+        # Its turn has come: the text goes out with the request that is about
+        # to be built, so it is no longer pending.
+        msg['pending'] = False
+        self._render_user_bubble(msg)
         self._update_scroll_bar()
         self.viewport().update()
         self._follow_if_at_bottom(was_at_bottom)
@@ -1765,7 +1985,7 @@ class ChatWidget(QAbstractScrollArea):
                     if start_msg_idx <= i <= end_msg_idx:
                         selection_cursor = QTextCursor(doc)
                         sel_start = start_char_idx if i == start_msg_idx else 0
-                        sel_end = end_char_idx if i == end_msg_idx else doc.characterCount() - 1
+                        sel_end = end_char_idx if i == end_msg_idx else self._selectable_end(msg)
                         selection_cursor.setPosition(sel_start)
                         selection_cursor.setPosition(sel_end, QTextCursor.KeepAnchor)
                         selection_format = QTextCharFormat()

@@ -232,6 +232,40 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `Request failed`, `Stopped` and `Waiting for you` keep their block open.
   Replay always folds (`collapse="always"`), so a restored session shows all
   work collapsed. There is no green `✓ Done` line under the answer.
+  A user bubble carries its own footer: the local send time and a copy button,
+  right-aligned under the bubble (`ChatWidget._user_meta_html`). The strip sits
+  outside the bubble table because `ChatWidget._user_bubble_rect` paints the
+  background under the message's own text blocks only. `ts` is the journal
+  event's UTC stamp (live messages hand over `time.time()`), converted to the
+  reader's zone by `format_message_time` - `12:19` today, `3 Nov, 12:19` this
+  year, `3 Nov 2025, 12:19` older. The button is a painted icon
+  (`src/ui/widgets/transcript_icons.py`, `logos-icon:copy` / `:copied`, the
+  same QPainter-as-document-resource approach as the status badges) and copies
+  `msg['user_text']`, the plain prompt rather than the rendered HTML; the icon
+  flips to a check for 1.6 s. The same strip dates a `queued` message, which
+  keeps its own dimmed HTML in `msg['queued_content']`.
+  The strip is chrome, not message text: `_render_user_bubble` stores where it
+  starts (`msg['meta_start']`) and `_selectable_end` keeps selection endpoints
+  out of it, so dragging across a bubble never highlights or copies the
+  status, the time or the icon, and a click inside the strip anchors at the end
+  of the bubble body. Copy All takes a user message's body with a cursor that
+  stops at `meta_start`, and `_selected_plain_text` strips Qt's U+2029 / U+FDD0
+  / U+FDD1 layout markers (every bubble is a table) from anything copied.
+  A bubble whose text is accepted but has not reached the model yet leads the
+  strip with `Pending` (accent color): a mid-task steer folded into the next
+  planning turn (`BaseAgentHandler._steer_mid_task`, which no longer writes the
+  old "Noted - I'll take it into account after the current step finishes."
+  line), a note recorded while the task is paused, and a chat message waiting
+  behind a streaming answer (which keeps its italic `queued` label inside the
+  bubble as well). The controller flags these in
+  `_mark_pending_user_message` and drops the status in
+  `_clear_pending_user_messages`, called from `_send_llm_request` (the single
+  funnel every request goes through, so `Pending` disappears exactly when the
+  text is sent), from `handle_cancel_request` (Stop: the text is abandoned and
+  the usual `Request cancelled.` line explains it) and from
+  `BaseAgentHandler.stop` (a steer that never made it into a request dies with
+  the task). `activate_queued_message` clears it for the chat queue. `Pending`
+  is live UI state and is never journaled, so a restored session shows none.
   Inside an expanded step the raw call is a disclosure, not content: the
   `Arguments` line stays folded to a one-line monospace peek and toggles through
   an `activity:<message id>:args:<row id>` anchor (`row['args_expanded']`), and

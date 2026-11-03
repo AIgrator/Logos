@@ -1881,12 +1881,16 @@ class UIManager(QWidget):
         )
 
     def add_user_message(self, content: str, queued: bool = False,
-                         attachments=None):
+                         attachments=None, ts=None):
         """Add the user's own prompt as a safe, readable card."""
-        self.add_message(
+        return self.add_message(
             self.build_user_message_html(
                 content, queued=queued, attachments=attachments),
-            force_scroll=True, role='user')
+            force_scroll=True, role='user', ts=ts, user_text=content)
+
+    def set_user_pending(self, handle, pending: bool = True):
+        """Marks a user bubble as not yet delivered to the model."""
+        return self.chat_widget.set_user_pending(handle, pending)
 
     def add_error_message(self, message, force_scroll=True):
         error_style = self.controller.theme_manager.get_style("ERROR_MESSAGE_STYLE")
@@ -1926,10 +1930,13 @@ class UIManager(QWidget):
             'title_color': color,
         }, force_scroll=force_scroll)
 
-    def add_message(self, html_content, force_scroll=False, keep_stream=False, role=None):
+    def add_message(self, html_content, force_scroll=False, keep_stream=False, role=None,
+                    ts=None, user_text=None):
         if self.is_compact:
             force_scroll = True
-        return self.chat_widget.add_message(html_content, force_scroll=force_scroll, keep_stream=keep_stream, role=role)
+        return self.chat_widget.add_message(html_content, force_scroll=force_scroll,
+                                            keep_stream=keep_stream, role=role,
+                                            ts=ts, user_text=user_text)
 
     def update_collapsible(self, msg, title: str, content_html: str) -> bool:
         """Updates an existing collapsible block, preserving its state."""
@@ -1995,9 +2002,11 @@ class UIManager(QWidget):
     def finalize_stream(self, final_html_content: str):
         self.chat_widget.finalize_stream(final_html_content)
 
-    def add_queued_message(self, raw_html: str, display_html: str):
+    def add_queued_message(self, raw_html: str, display_html: str,
+                           text: str = "", ts=None):
         """Adds a dimmed user message for the chat queue; returns its handle."""
-        return self.chat_widget.add_queued_message(raw_html, display_html)
+        return self.chat_widget.add_queued_message(
+            raw_html, display_html, text=text, ts=ts)
 
     def activate_queued_message(self, handle):
         """Un-dims a queued message once it becomes the active turn."""

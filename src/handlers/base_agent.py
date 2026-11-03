@@ -388,9 +388,9 @@ class BaseAgentHandler:
             # planned before the guidance existed.
             self._batch_queue = []
             self.command_history.append(guidance)
-            self.ui.add_message(
-                "<i>Noted — I'll take it into account after the current step "
-                "finishes.</i>")
+            # The bubble already says "Pending" under its time; the old
+            # "Noted — I'll take it into account..." line said the same thing
+            # a second time and cluttered the transcript.
             logging.info(f"{type(self).__name__} steering recorded while a "
                          f"step is in flight; deferred to the next turn.")
             return
@@ -450,6 +450,13 @@ class BaseAgentHandler:
     def stop(self):
         """Stops the current task and resets state. Heirs clean resources via hook."""
         was_active = self.state != VisionState.IDLE
+        # A steer that never made it into a request dies with the task.
+        clear_pending = getattr(self.controller, "_clear_pending_user_messages", None)
+        if callable(clear_pending):
+            try:
+                clear_pending()
+            except Exception:
+                pass
         self._activity_finalize("Stopped", "stopped")
         try:
             self._cleanup_task()
