@@ -2098,8 +2098,18 @@ class AppController(QObject):
                 logging.warning(f"Could not replay {event.get('type')}: {e}")
                 return False
 
+        # The model that wrote the next answer; a journaled ``model`` event
+        # moves it forward, so a session that switched models keeps each
+        # answer attributed to the model that produced it.
+        replay_actor = self._get_current_model_name()
+
         for event in events:
             event_type = event.get("type")
+            if event_type == "model":
+                # A model switch inside the session: later answers belong to
+                # the new model, which their footer names.
+                replay_actor = str(event.get("model") or replay_actor)
+                continue
             if event_type == "message":
                 close_activity()
                 text = event_text(event)
@@ -2115,7 +2125,9 @@ class AppController(QObject):
                     continue
                 elif role == "assistant":
                     self.ui.add_message(
-                        render_text(text, markdown_ok=True))
+                        render_text(text, markdown_ok=True), role="assistant",
+                        ts=event.get("ts"), copy_text=text, copyable=True,
+                        actor=replay_actor)
                 else:
                     self.ui.add_message(
                         f"<p><i>{html.escape(text)}</i></p>")

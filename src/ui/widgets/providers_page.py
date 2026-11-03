@@ -10,12 +10,9 @@ are made; ``commit()`` then prunes keychain entries of deleted providers.
 """
 import copy
 import logging
-import sys
-from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QEvent, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QPainter, QPixmap
-from PySide6.QtSvg import QSvgRenderer
+from PySide6.QtCore import QEvent, Qt, QTimer, Signal
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
@@ -34,6 +31,7 @@ from llm.custom_providers import is_custom_provider, provider_is_configured
 from llm.mode_capabilities import CUA_PROVIDERS, ModeCapabilities
 from llm.model_config_manager import ModelConfigManager
 
+from src.ui.provider_icons import provider_glyph
 from src.ui.widgets.busy_spinner import BusySpinner
 from src.ui.widgets.custom_provider_dialog import CustomProviderDialog
 from src.ui.widgets.provider_form import ProviderForm
@@ -60,16 +58,6 @@ _PROVIDER_ACCENTS = {
 
 _CUSTOM_ACCENT = "#7E57C2"
 _FALLBACK_ACCENTS = ("#5B8DEF", "#2FA98C", "#D96C6C", "#C77D3E", "#6C8EBF")
-
-# Brand glyphs from @lobehub/icons-static-svg (MIT), see assets/providers/LICENSE.
-_PROVIDER_ICONS = {
-    "anthropic": "anthropic.svg",
-    "openai": "openai.svg",
-    "google": "gemini.svg",
-    "openrouter": "openrouter.svg",
-    "huggingface": "huggingface.svg",
-    "x-ai": "xai.svg",
-}
 
 _PAGE_STYLE = """
 QLabel#providerPageTitle { font-size: 20px; font-weight: 600; }
@@ -158,36 +146,6 @@ def _initials(display_name: str) -> str:
     if len(words) == 1:
         return words[0][:1].upper()
     return (words[0][:1] + words[1][:1]).upper()
-
-
-def _icon_dir() -> Path:
-    bundled = getattr(sys, "_MEIPASS", None)
-    if bundled:
-        return Path(bundled) / "assets" / "providers"
-    return Path(__file__).resolve().parents[3] / "assets" / "providers"
-
-
-def _provider_icon(provider_id: str, color: str, size: int = 21) -> QPixmap | None:
-    """Renders the provider's brand glyph in ``color``; None when unknown."""
-    file_name = _PROVIDER_ICONS.get(provider_id)
-    if not file_name:
-        return None
-    try:
-        source = (_icon_dir() / file_name).read_text(encoding="utf-8")
-    except OSError:
-        return None
-    source = source.replace("currentColor", color)
-    renderer = QSvgRenderer(QByteArray(source.encode("utf-8")))
-    if not renderer.isValid():
-        return None
-    ratio = 2.0
-    pixmap = QPixmap(int(size * ratio), int(size * ratio))
-    pixmap.setDevicePixelRatio(ratio)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    renderer.render(painter, QRectF(0, 0, size, size))
-    painter.end()
-    return pixmap
 
 
 def _separator():
@@ -663,7 +621,7 @@ class ProvidersPage(QWidget):
 
     def _tile(self, provider_id):
         accent = _accent_color(provider_id)
-        icon = _provider_icon(provider_id, _text_on(accent))
+        icon = provider_glyph(provider_id, _text_on(accent))
         label = QLabel()
         if icon is None:
             label.setText(_initials(self._display_name(provider_id)))

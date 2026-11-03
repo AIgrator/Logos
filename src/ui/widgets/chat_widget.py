@@ -259,6 +259,8 @@ class ChatWidget(QAbstractScrollArea):
         self.selection_end = None
         self.is_selecting = False
         self.current_assistant_name = "Assistant"
+        # The message whose hover strip (time, model, copy) is showing.
+        self._hover_msg = None
         self.click_count = 0
         self.last_click_time = 0
         self._retry_countdown_msg_idx = -1
@@ -370,10 +372,10 @@ class ChatWidget(QAbstractScrollArea):
     def _selectable_end(self, msg) -> int:
         """Last selectable character of a message.
 
-        A user bubble's status line (``Pending``, the time, the copy icon) is
-        chrome, not text: it is excluded from selection, from the selection
-        highlight and from the clipboard, so dragging across a bubble never
-        picks up "12:50" or the icon.
+        A message's footer strip (``Pending``, the model name, the time, the
+        copy icon) is chrome, not text: it is excluded from selection, from the
+        selection highlight and from the clipboard, so dragging across a
+        message never picks up "12:50" or the icon.
         """
         doc = msg.get('doc') if isinstance(msg, dict) else None
         if doc is None:
@@ -392,8 +394,9 @@ class ChatWidget(QAbstractScrollArea):
         status badges - and none of them are text a reader wants on the
         clipboard. Only the content blocks are selectable: narration, an
         expanded thought, the arguments body, command output, a written file,
-        an edit diff. A user bubble is content up to its status line, and a
-        chat answer (plain rich text) stays fully selectable.
+        an edit diff. A user bubble or an answer is content up to its footer
+        strip, and a chat answer (plain rich text) otherwise stays fully
+        selectable.
 
         Ranges are cached on the message, because painting runs on every
         mouse move while a selection is being dragged.
@@ -427,15 +430,15 @@ class ChatWidget(QAbstractScrollArea):
                     ranges.append((base + start, base + stop))
                 block = block.next()
             ranges = _merge_spans(ranges)
-            if msg.get('role') == 'user':
-                # The status line under the bubble is chrome, whatever it
-                # holds: Pending, the time and the copy icon.
-                limit = int(msg.get('meta_start') or 0)
-                if 0 < limit < end:
-                    ranges = [(start, min(stop, limit)) for start, stop in ranges
-                              if start < limit]
         else:
             ranges = [(0, end)] if end > 0 else []
+
+        # The strip under a message (Pending, the model name, the time, the
+        # copy icon) is chrome, whatever else the message holds.
+        limit = int(msg.get('meta_start') or 0)
+        if 0 < limit < end:
+            ranges = [(start, min(stop, limit)) for start, stop in ranges
+                      if start < limit]
 
         result = [(start, stop) for start, stop in ranges if stop > start]
         msg['_select_ranges'] = (key, result)
@@ -540,7 +543,7 @@ class ChatWidget(QAbstractScrollArea):
                         return
 
                 if anchor and anchor.startswith("msgcopy:"):
-                    self._copy_user_message(anchor.split(':', 1)[1])
+                    self._copy_message(anchor.split(':', 1)[1])
                     return
 
                 if anchor and anchor.startswith("action:"):
@@ -753,6 +756,38 @@ class ChatWidget(QAbstractScrollArea):
         self.viewport().update()
         return True
 
+    def _message_index_at(self, pos):
+        """Index of the message under a viewport point, or None."""
+        scroll_y = self.verticalScrollBar().value()
+        target_y = pos.y() + scroll_y
+        current_y = 0
+        for i, msg in enumerate(self.messages):
+            height = msg['doc'].size().height()
+            if current_y <= target_y < current_y + height:
+                return i
+            current_y += height + self.document_margin
+        return None
+
+    def _apply_hover(self, msg):
+        """Shows the footer strip of one message and hides the previous one.
+
+        Both messages keep the strip's line (only its content changes), so
+        revealing or hiding it never moves the transcript under the pointer.
+        """
+        if msg is self._hover_msg:
+            return
+        previous = self._hover_msg
+        self._hover_msg = msg
+        for candidate in (previous, msg):
+            if not isinstance(candidate, dict) or not candidate.get('has_footer'):
+                continue
+            visible = candidate is msg
+            if bool(candidate.get('footer_visible')) == visible:
+                continue
+            candidate['footer_visible'] = visible
+            if any(m is candidate for m in self.messages):
+                self._rerender_message(candidate)
+
     def _copy_collapsible_payload(self, block_id: str, label: str) -> bool:
         """Copy a labelled payload from an expanded collapsible block."""
         for msg in self.messages:
@@ -833,9 +868,18 @@ class ChatWidget(QAbstractScrollArea):
                 self.viewport().update()
         else:
             # This will update the cursor to a hand if hovering over a link
-            self._pos_to_char_index(pos)
+            char_pos = self._pos_to_char_index(pos)
+            # The time / model / copy strip belongs to the message under the
+            # pointer; a drag (is_selecting) must not make it flicker.
+            idx = char_pos[0] if char_pos else None
+            self._apply_hover(self.messages[idx] if idx is not None else None)
 
         super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event):
+        # The pointer left the transcript: no message is hovered any more.
+        self._apply_hover(None)
+        super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -987,6 +1031,7 @@ class ChatWidget(QAbstractScrollArea):
         self.messages = []
         self.is_streaming = False
         self._streaming_msg = None
+        self._hover_msg = None
         self._retry_countdown_msg_idx = -1
         self._step_marker = None
         self._sticky_target = None
@@ -999,85 +1044,109 @@ class ChatWidget(QAbstractScrollArea):
         self.verticalScrollBar().setValue(0)
         self.viewport().update()
 
-    def _user_meta_html(self, msg: dict) -> str:
-        """Time, pending status and copy button under a user bubble.
+    def _footer_html(self, msg: dict) -> str:
+        """Hover strip under a message: status, model or time, copy button.
 
         The strip sits outside the bubble on purpose: the bubble background is
         painted under the message's own text blocks, so a paragraph after the
-        table stays on the chat background, quiet and out of the way. It is
-        right-aligned with the bubble, the way messengers date a message.
+        table stays on the chat background, quiet and out of the way. A user
+        bubble dates itself on its right edge, the way messengers do; an answer
+        has no bubble, so its strip sits on the left edge of its text.
 
-        ``Pending`` leads the row when the text is accepted but has not reached
-        the model yet (a steer folded into the next planning turn, or a message
-        waiting behind a streaming answer). It disappears at the moment the
-        request that carries the text is sent.
+        It stays hidden until the pointer is over the message (the line is
+        still rendered, empty, so revealing it never shifts the transcript).
+        ``Pending`` is the exception: it is a state the user has to see, so it
+        shows even without hover. An assistant message leads the strip with
+        the model that wrote it; the copy button is offered only for a
+        completed final answer (``copy_enabled``), never for an interrupted
+        turn or an interim note.
         """
+        if not msg.get('has_footer'):
+            return ""
         meta = self.theme_manager.get_style("COLLAPSIBLE_META") or "#8b949e"
         accent = self.theme_manager.get_style("COLLAPSIBLE_TITLE") or meta
         pieces = []
         if msg.get('pending'):
             pieces.append(f'<span style="color: {accent};">Pending</span>')
-        stamp = format_message_time(msg.get('ts'))
-        if stamp:
-            pieces.append(f'<span style="color: {meta};">{stamp}</span>')
-        if str(msg.get('user_text') or ''):
-            icon = 'copied' if msg.get('copied') else 'copy'
-            pieces.append(
-                f'<a href="msgcopy:{msg.get("id")}" style="text-decoration: none;">'
-                f'<img src="{ICON_PREFIX}{icon}" width="{ICON_SIZE}" '
-                f'height="{ICON_SIZE}"></a>')
+        if msg.get('footer_visible'):
+            if msg.get('role') == 'assistant':
+                actor = str(msg.get('actor') or '').strip()
+                if actor:
+                    pieces.append(f'<span style="color: {meta};">'
+                                  f'{html.escape(actor)}</span>')
+            stamp = format_message_time(msg.get('ts'))
+            if stamp:
+                pieces.append(f'<span style="color: {meta};">{stamp}</span>')
+            if msg.get('copy_enabled') and msg.get('copy_text'):
+                icon = 'copied' if msg.get('copied') else 'copy'
+                pieces.append(
+                    f'<a href="msgcopy:{msg.get("id")}" style="text-decoration: none;">'
+                    f'<img src="{ICON_PREFIX}{icon}" width="{ICON_SIZE}" '
+                    f'height="{ICON_SIZE}"></a>')
         if not pieces:
-            return ""
-        return ('<p align="right" style="margin: 3px 5px 2px 0; font-size: 90%;">'
+            pieces.append("&nbsp;")
+        # A bubble dates itself on its own right edge, the way a messenger
+        # does; an answer has no bubble, so its strip lines up with the text
+        # at the left edge of the transcript instead.
+        if msg.get('role') == 'user':
+            align, margin = 'right', '3px 5px 2px 0'
+        else:
+            align, margin = 'left', '3px 0 2px 5px'
+        return (f'<p align="{align}" style="margin: {margin}; font-size: 90%;">'
                 + ('&nbsp;&nbsp;&nbsp;'.join(pieces)) + '</p>')
 
-    def _render_user_bubble(self, msg: dict):
-        """Renders a user message and remembers where its footer begins.
+    @staticmethod
+    def _message_body_html(msg: dict) -> str:
+        """Rendered body of a message, without its footer strip."""
+        if msg.get('queued') and msg.get('queued_content'):
+            return str(msg.get('queued_content') or '')
+        return str(msg.get('raw_content') or '')
 
-        ``meta_start`` is the character position of the status line, which
-        selection must never reach (``_selectable_end``).
+    def _render_message(self, msg: dict):
+        """Renders a message body plus its footer and remembers where it starts.
+
+        ``meta_start`` is the character position of the footer strip, which
+        selection must never reach (``_selectable_end``). Used for user
+        bubbles and for the model's answers, both of which carry a strip.
         """
         doc = msg.get('doc')
         if doc is None:
             return
-        body = msg.get('raw_content')
-        if msg.get('queued') and msg.get('queued_content'):
-            body = msg.get('queued_content')
-        meta = self._user_meta_html(msg)
-        doc.setHtml(str(body or '') + meta)
-        msg['meta_start'] = doc.lastBlock().position() if meta else 0
+        footer = self._footer_html(msg)
+        doc.setHtml(self._message_body_html(msg) + footer)
+        msg['meta_start'] = doc.lastBlock().position() if footer else 0
         msg.pop('_select_ranges', None)
 
-    def _copy_user_message(self, msg_id: str) -> bool:
-        """Copies one user prompt as plain text (not the rendered HTML)."""
+    def _copy_message(self, msg_id: str) -> bool:
+        """Copies one message as plain text (not the rendered HTML)."""
         msg = next((m for m in self.messages if m.get('id') == msg_id), None)
-        if msg is None or msg.get('role') != 'user':
+        if msg is None or not msg.get('copy_enabled'):
             return False
-        text = str(msg.get('user_text') or '')
+        text = str(msg.get('copy_text') or '')
         if not text:
             return False
         QApplication.clipboard().setText(text)
-        self._set_user_copied(msg, True)
+        self._set_message_copied(msg, True)
         return True
 
-    def _rerender_user_meta(self, msg: dict):
-        """Re-renders a user bubble in place after a meta flag flipped."""
+    def _rerender_message(self, msg: dict):
+        """Re-renders a message in place after one of its flags flipped."""
         was_at_bottom = self._is_at_bottom()
-        self._render_user_bubble(msg)
+        self._render_message(msg)
         self._update_scroll_bar()
         self._follow_if_at_bottom(was_at_bottom)
         self.viewport().update()
 
-    def _set_user_copied(self, msg: dict, copied: bool):
+    def _set_message_copied(self, msg: dict, copied: bool):
         """Flips the copy icon to a check for a moment, so the click lands."""
         if not any(m is msg for m in self.messages):
             return
         if bool(msg.get('copied')) == bool(copied):
             return
         msg['copied'] = bool(copied)
-        self._rerender_user_meta(msg)
+        self._rerender_message(msg)
         if copied:
-            QTimer.singleShot(1600, lambda: self._set_user_copied(msg, False))
+            QTimer.singleShot(1600, lambda: self._set_message_copied(msg, False))
 
     def set_user_pending(self, msg, pending: bool = True):
         """Shows or clears the ``Pending`` status of a user bubble."""
@@ -1088,11 +1157,12 @@ class ChatWidget(QAbstractScrollArea):
         if bool(msg.get('pending')) == bool(pending):
             return False
         msg['pending'] = bool(pending)
-        self._rerender_user_meta(msg)
+        self._rerender_message(msg)
         return True
 
     def add_message(self, data, force_scroll=False, keep_stream=False, role=None,
-                    ts=None, user_text=None):
+                    ts=None, user_text=None, copy_text=None, copyable=False,
+                    actor=None):
         if role == 'user':
             # A user message splits the turn: the live block stays above it,
             # and the work that follows starts a new block below. Without the
@@ -1161,17 +1231,24 @@ class ChatWidget(QAbstractScrollArea):
             self._ensure_activity_timer()
         elif isinstance(data, str):
             html_content = data
+            has_footer = role in ('user', 'assistant')
             msg = {
                 'type': 'simple',
                 'id': f"msg-{uuid.uuid4().hex}",
                 'raw_content': html_content,
                 'role': role,
-                'ts': ts if ts is not None else (time.time() if role == 'user' else None),
+                'ts': ts if ts is not None else (
+                    time.time() if role in ('user', 'assistant') else None),
                 'user_text': user_text,
+                'has_footer': has_footer,
+                'footer_visible': False,
+                'copy_text': copy_text if copy_text is not None else user_text,
+                'copy_enabled': bool(copyable or (role == 'user' and user_text)),
+                'actor': actor or (self.current_assistant_name if role == 'assistant' else None),
                 'doc': doc
             }
-            if role == 'user':
-                self._render_user_bubble(msg)
+            if has_footer:
+                self._render_message(msg)
             else:
                 doc.setHtml(html_content)
         else:
@@ -1544,8 +1621,11 @@ class ChatWidget(QAbstractScrollArea):
             'doc': doc,
             'queued': True,
             'pending': True,
+            'has_footer': True,
+            'copy_text': text,
+            'copy_enabled': bool(str(text or '').strip()),
         }
-        self._render_user_bubble(msg)
+        self._render_message(msg)
         self.messages.append(msg)
         self._update_scroll_bar()
         self.viewport().update()
@@ -1561,7 +1641,7 @@ class ChatWidget(QAbstractScrollArea):
         # Its turn has come: the text goes out with the request that is about
         # to be built, so it is no longer pending.
         msg['pending'] = False
-        self._render_user_bubble(msg)
+        self._render_message(msg)
         self._update_scroll_bar()
         self.viewport().update()
         self._follow_if_at_bottom(was_at_bottom)
@@ -1578,6 +1658,8 @@ class ChatWidget(QAbstractScrollArea):
                 if self._streaming_msg is msg:
                     self._streaming_msg = None
                     self.is_streaming = False
+                if self._hover_msg is msg:
+                    self._hover_msg = None
                 if msg.get('type') == 'activity':
                     self._stop_activity_timer_if_idle()
                 self._update_scroll_bar()
@@ -1990,8 +2072,8 @@ class ChatWidget(QAbstractScrollArea):
         if not self.is_streaming or self._streaming_msg is None:
             doc = self._new_document()
             doc.setHtml("")
-            msg = {'type': 'simple', 'doc': doc, 'raw_content': '',
-                   'plain': '', 'actor': actor_name}
+            msg = {'type': 'simple', 'id': f"msg-{uuid.uuid4().hex}", 'doc': doc,
+                   'raw_content': '', 'plain': '', 'actor': actor_name}
             self.messages.append(msg)
             self._streaming_msg = msg
             self.is_streaming = True
@@ -2028,7 +2110,20 @@ class ChatWidget(QAbstractScrollArea):
         last_message = self._streaming_msg
         if last_message is not None:
             last_message['raw_content'] = final_html_content
-            last_message['doc'].setHtml(final_html_content)
+            # The finished answer gets the hover strip: the model that wrote
+            # it, when it answered and a copy button. A stream that never
+            # reaches this point (a stopped turn) keeps no strip and no copy.
+            text = str(last_message.get('plain') or '').strip()
+            last_message.update({
+                'role': 'assistant',
+                'ts': time.time(),
+                'has_footer': True,
+                'footer_visible': last_message is self._hover_msg,
+                'copy_text': text,
+                'copy_enabled': bool(text),
+                'actor': last_message.get('actor') or self.current_assistant_name,
+            })
+            self._render_message(last_message)
             self._update_scroll_bar()
             self.viewport().update()
         self.is_streaming = False

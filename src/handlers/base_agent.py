@@ -938,7 +938,7 @@ class BaseAgentHandler:
             # followed by a success, or while a background job still runs.
             self._activity_finalize("Done", "ok", collapse="auto")
             self._record_assistant_message(message)
-            self.ui.add_formatted_message(message)
+            self.ui.add_formatted_message(message, copyable=True)
             self._publish_suggestions(arguments.get('suggestions'))
             self.stop()
             return
@@ -949,7 +949,7 @@ class BaseAgentHandler:
             message = arguments.get('message', 'The assistant needs your input.')
             self._activity_finalize("Waiting for you", "waiting")
             self._record_assistant_message(message)
-            self.ui.add_formatted_message(message)
+            self.ui.add_formatted_message(message, copyable=True)
             self._publish_suggestions(arguments.get('suggestions'))
             self._set_state(VisionState.PAUSED_ON_ERROR)
             self._stop_thinking_timer()

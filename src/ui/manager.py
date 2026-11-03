@@ -31,6 +31,7 @@ from src.suggestions import normalize_suggestions
 from src.computer.terminal_policy import ACCESS_MODE_LABELS, normalize_mode as normalize_access_mode
 
 from . import editor_launcher, styles
+from .provider_icons import provider_icon
 from .utils import CustomToolTipManager, IconHoverFilter
 from .widgets.attachment_chip import AttachmentChip
 from .widgets.image_preview_dialog import ImagePreviewDialog
@@ -530,9 +531,10 @@ class UIManager(QWidget):
         self.mode_menu.addAction(self.vision_mode_action)
         self.mode_button.setMenu(self.mode_menu)
 
-        self.model_button = QPushButton("⚡ ...")
+        self.model_button = QPushButton("...")
         self.model_button.setMinimumSize(140, 36)
         self.model_button.setMaximumWidth(420)
+        self.model_button.setIconSize(QSize(16, 16))
         self.tooltip_manager.install(self.model_button, "Switch model (saved for this session)")
         self.model_button.clicked.connect(self._show_model_switch_popup)
         self.model_switch_popup = None
@@ -689,6 +691,8 @@ class UIManager(QWidget):
         self.controller.theme_manager.theme_changed.connect(self._update_icon_colors)
         self.controller.theme_manager.theme_changed.connect(
             self._refresh_model_effort_badge)
+        self.controller.theme_manager.theme_changed.connect(
+            self._refresh_model_button_icon)
         self.controller.theme_manager.theme_changed.connect(
             self._refresh_access_mode_chip)
         self._update_icon_colors()
@@ -1228,9 +1232,25 @@ class UIManager(QWidget):
         self.browser_mode_selected.emit()
 
     def refresh_model_button(self, title: str):
-        """Updates the toolbar model button text (called on switch/settings change)."""
-        self.model_button.setText(f"⚡ {title}")
+        """Updates the toolbar model button (called on switch/settings change).
+
+        The button leads with the provider's own brand glyph instead of the old
+        generic bolt: it says who answers. A custom endpoint has no bundled
+        glyph, so it simply gets no icon rather than a meaningless flash.
+        """
+        self.model_button.setText(title)
+        self._refresh_model_button_icon()
         self._refresh_model_effort_badge()
+
+    def _refresh_model_button_icon(self):
+        """Re-tints the model button's provider glyph for the current theme."""
+        button = getattr(self, "model_button", None)
+        if button is None:
+            return
+        provider_id = self.settings_manager.get("active_provider") or ""
+        color = self.controller.theme_manager.get_style("ICON_COLOR") or "#d4d4d4"
+        icon = provider_icon(provider_id, color, 16)
+        button.setIcon(icon if icon is not None else QIcon())
 
     def _active_effort_fields(self):
         """(provider_id, model_id, levels, current) for the active model."""
@@ -1896,14 +1916,21 @@ class UIManager(QWidget):
         error_style = self.controller.theme_manager.get_style("ERROR_MESSAGE_STYLE")
         self.add_message(f'<span style="{error_style}">{message}</span>', force_scroll=force_scroll)
 
-    def add_formatted_message(self, content: str, prefix_html: str = ""):
+    def add_formatted_message(self, content: str, prefix_html: str = "",
+                              copyable: bool = False, actor: str = None):
         """
         Processes raw text content, detects if it's Markdown, converts it to HTML,
         and adds it to the chat widget, optionally prepending a raw HTML prefix.
-        Single pipeline (see ui.text_render); behavior unchanged.
+        Single pipeline (see ui.text_render), as before.
+
+        The text is an assistant message: it carries the hover strip (model,
+        time, copy) and, when ``copyable`` says this is the model's final
+        answer, a copy button holding the plain text.
         """
         self.add_message(render_text(content, prefix_html, markdown_ok=True),
-                         force_scroll=True)
+                         force_scroll=True, role='assistant',
+                         copy_text=str(content or ''), copyable=copyable,
+                         actor=actor)
 
     def add_suggestions(self, items):
         """Clickable next-step suggestions under an assistant answer."""
@@ -1931,12 +1958,15 @@ class UIManager(QWidget):
         }, force_scroll=force_scroll)
 
     def add_message(self, html_content, force_scroll=False, keep_stream=False, role=None,
-                    ts=None, user_text=None):
+                    ts=None, user_text=None, copy_text=None, copyable=False,
+                    actor=None):
         if self.is_compact:
             force_scroll = True
         return self.chat_widget.add_message(html_content, force_scroll=force_scroll,
                                             keep_stream=keep_stream, role=role,
-                                            ts=ts, user_text=user_text)
+                                            ts=ts, user_text=user_text,
+                                            copy_text=copy_text, copyable=copyable,
+                                            actor=actor)
 
     def update_collapsible(self, msg, title: str, content_html: str) -> bool:
         """Updates an existing collapsible block, preserving its state."""

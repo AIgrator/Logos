@@ -232,25 +232,40 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `Request failed`, `Stopped` and `Waiting for you` keep their block open.
   Replay always folds (`collapse="always"`), so a restored session shows all
   work collapsed. There is no green `✓ Done` line under the answer.
-  A user bubble carries its own footer: the local send time and a copy button,
-  right-aligned under the bubble (`ChatWidget._user_meta_html`). The strip sits
+  Every message carries a footer strip under it: a user bubble the local send
+  time, an answer the model that wrote it, the time and - when the model
+  finished its turn with a conclusion - a copy button
+  (`ChatWidget._footer_html`, rendered by `_render_message`). The strip sits
   outside the bubble table because `ChatWidget._user_bubble_rect` paints the
-  background under the message's own text blocks only. `ts` is the journal
-  event's UTC stamp (live messages hand over `time.time()`), converted to the
-  reader's zone by `format_message_time` - `12:19` today, `3 Nov, 12:19` this
-  year, `3 Nov 2025, 12:19` older. The button is a painted icon
+  background under the message's own text blocks only. It stays hidden until
+  the pointer is over that message (`_message_index_at` + `_apply_hover` from
+  `mouseMoveEvent`, cleared by `leaveEvent`); the line itself is always rendered
+  (an empty `&nbsp;` paragraph), so revealing a strip never moves the transcript
+  under the cursor. `Pending` is the exception and shows without hover, because
+  the user has to see that the text has not reached the model yet.
+  `ts` is the journal event's UTC stamp (live messages hand over
+  `time.time()`), converted to the reader's zone by `format_message_time` -
+  `12:19` today, `3 Nov, 12:19` this year, `3 Nov 2025, 12:19` older. An
+  assistant strip names `msg['actor']`: the model id captured when the message
+  was created (`current_assistant_name` live, the session's model on replay,
+  moved forward by each `model` journal event). The button is a painted icon
   (`src/ui/widgets/transcript_icons.py`, `logos-icon:copy` / `:copied`, the
   same QPainter-as-document-resource approach as the status badges) and copies
-  `msg['user_text']`, the plain prompt rather than the rendered HTML; the icon
-  flips to a check for 1.6 s. The same strip dates a `queued` message, which
-  keeps its own dimmed HTML in `msg['queued_content']`.
-  The strip is chrome, not message text: `_render_user_bubble` stores where it
+  `msg['copy_text']`, the plain prompt or answer rather than the rendered HTML;
+  the icon flips to a check for 1.6 s. Only a completed final answer gets the
+  button (`copyable=True` from `finish` / `communicate_to_user`, from the final
+  `finalize_stream`, and on replayed assistant `message` events), so a stopped
+  turn and an interim `display_message` note never grow one. The same strip
+  dates a `queued` message, which keeps its own dimmed HTML in
+  `msg['queued_content']`.
+  The strip is chrome, not message text: `_render_message` stores where it
   starts (`msg['meta_start']`) and `_selectable_end` keeps selection endpoints
-  out of it, so dragging across a bubble never highlights or copies the
-  status, the time or the icon, and a click inside the strip anchors at the end
-  of the bubble body. Copy All takes a user message's body with a cursor that
-  stops at `meta_start`, and `_selected_plain_text` strips Qt's U+2029 / U+FDD0
-  / U+FDD1 layout markers (every bubble is a table) from anything copied.
+  out of it, so dragging across a message never highlights or copies the
+  status, the model name, the time or the icon, and a click inside the strip
+  anchors at the end of the body. Copy All takes a message's body with a cursor
+  that stops at `meta_start`, and `_selected_plain_text` strips Qt's U+2029 /
+  U+FDD0 / U+FDD1 layout markers (every bubble is a table) from anything
+  copied.
   A bubble whose text is accepted but has not reached the model yet leads the
   strip with `Pending` (accent color): a mid-task steer folded into the next
   planning turn (`BaseAgentHandler._steer_mid_task`, which no longer writes the
@@ -485,6 +500,12 @@ Anthropic variant speaks Messages (`{base}/v1/messages`, `anthropic-version`,
 content blocks, forced `tool_choice`) but deliberately omits native Anthropic
 extras (Computer Use, web search, strict schemas, adaptive thinking). Custom
 providers stay out of Vision either way.
+
+The composer's model button leads with the active provider's brand glyph
+(`src/ui/provider_icons.py`, the same bundled SVGs the provider tiles use,
+re-tinted on every theme change), so the toolbar says who answers; a custom
+endpoint has no bundled glyph and simply gets no icon instead of the old
+generic bolt.
 
 The page's **VISION (COMPUTER USE)** row chooses the default Vision model: a
 provider combo (configured OpenAI/Anthropic/Google providers with models where
