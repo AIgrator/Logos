@@ -171,6 +171,22 @@ STYLES = {
                 background-color: #f0f0f0;
             }
         """,
+        "STEP_STICKY_BAR_STYLE": """
+            QPushButton {
+                background-color: #ffffff;
+                color: #0550ae;
+                border: 1px solid #d0d7de;
+                border-top: none;
+                border-bottom-left-radius: 10px;
+                border-bottom-right-radius: 10px;
+                padding: 0 12px;
+                font-size: 12px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: #eef2f6;
+            }
+        """,
         # Terminal styles
         "TERMINAL_CONTAINER_BG": "#f6f8fa",
         "TERMINAL_CONTAINER_BORDER": "#0969da",
@@ -252,6 +268,22 @@ STYLES = {
             }
             QPushButton:hover {
                 background-color: #4a4a4a;
+            }
+        """,
+        "STEP_STICKY_BAR_STYLE": """
+            QPushButton {
+                background-color: #1c2128;
+                color: #9cdcfe;
+                border: 1px solid #30363d;
+                border-top: none;
+                border-bottom-left-radius: 10px;
+                border-bottom-right-radius: 10px;
+                padding: 0 12px;
+                font-size: 12px;
+                text-align: left;
+            }
+            QPushButton:hover {
+                background-color: #262d36;
             }
         """,
         # Terminal styles

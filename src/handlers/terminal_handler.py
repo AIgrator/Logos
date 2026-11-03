@@ -6,7 +6,6 @@ until the user's goal is achieved.
 import logging
 import platform
 import html
-import json
 import re
 from PySide6.QtCore import QObject, Slot, QThread, QTimer, Signal
 
@@ -17,7 +16,7 @@ from src.computer.terminal_policy import evaluate as evaluate_terminal_access
 from src.computer.terminal_policy import normalize_mode as normalize_access_mode
 from src.computer.tools.terminal.mcp_tools import servers_prompt_block
 
-from .base_agent import BaseAgentHandler, _clip_replay_value, _is_error_output
+from .base_agent import BaseAgentHandler, _is_error_output
 from .tool_exec_worker import ToolExecRelay, ToolExecWorker
 
 # Background-job await: after a launch, give the job a short startup window
@@ -333,9 +332,10 @@ class TerminalHandler(BaseAgentHandler):
         'replacements',
     )
 
-    def _replay_step_args(self, action_name: str, action_args: dict) -> str:
-        """Replayed arguments stay short: file bodies live in the step detail
-        (write_file) or in the result (execute_shell)."""
+    def _step_args_text(self, action_name: str, action_args: dict) -> str:
+        """Arguments stay short: file bodies live in the step detail
+        (write_file) or in the result (execute_shell), and the live step and
+        its replay must show the same call."""
         args = dict(action_args or {})
         if action_name in {'write_file', 'replace', 'replace_many'}:
             for key in self._BULKY_ARG_KEYS:
@@ -344,10 +344,7 @@ class TerminalHandler(BaseAgentHandler):
                     args[key] = f"<{size} chars>"
         if action_name == 'execute_shell':
             args.pop('command', None)
-        if not args:
-            return ""
-        return json.dumps(
-            _clip_replay_value(args), ensure_ascii=False, indent=2)
+        return super()._step_args_text(action_name, args)
 
     def _replay_step_detail(self, action_name: str, action_args: dict):
         """Written file bodies and edit diffs render as they did live."""

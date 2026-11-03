@@ -14,6 +14,12 @@ import time
 
 _TEXT_LIMIT = 30000
 _ARGS_LIMIT = 12000
+# A result longer than this is a preview: the transcript should stay a
+# timeline, not a terminal buffer. The rest stays one click away.
+_OUTPUT_PREVIEW_LINES = 25
+_OUTPUT_PREVIEW_CHARS = 3500
+# Width of the one-line argument peek next to the collapsed Arguments link.
+_ARGS_PREVIEW_CHARS = 110
 
 _STATUS_ICONS = {
     "running": ("", "COLLAPSIBLE_META"),
@@ -98,6 +104,16 @@ def _clip(text: str, limit: int) -> str:
         return text
     return text[:limit] + (
         f"\n… [truncated for display, {len(text) - limit} chars hidden]")
+
+
+def _one_line(text: str, limit: int) -> str:
+    """Flattens JSON onto one line, keeping both ends when it must shrink."""
+    flat = " ".join(str(text or "").split())
+    if len(flat) <= limit:
+        return flat
+    tail = 24
+    head = max(20, limit - tail - 1)
+    return flat[:head] + "…" + flat[-tail:]
 
 
 class ActivityBlockFormatter:
@@ -342,24 +358,85 @@ class ActivityBlockFormatter:
             return ""
 
     def _format_step_detail(self, msg: dict, row: dict, meta: str) -> str:
-        parts = []
-        args_text = str(row.get("args") or "").strip()
-        if args_text:
-            parts.append(
-                f'<div style="color: {meta}; font-size: 90%; '
-                f'margin-top: 4px;">Arguments</div>'
-                f"{self._pre(_clip(args_text, _ARGS_LIMIT))}")
-        output_text = str(row.get("output") or "").strip()
-        if output_text:
-            parts.append(
-                f'<div style="color: {meta}; font-size: 90%; '
-                f'margin-top: 4px;">Output</div>'
-                f"{self._pre(_clip(output_text, _TEXT_LIMIT))}")
+        parts = [
+            self._format_args(msg, row, meta),
+            self._format_output(msg, row, meta),
+        ]
         detail_html = row.get("detail_html")
         if detail_html:
             parts.append(f'<div style="margin-top: 6px;">{detail_html}</div>')
         return (f'<div style="margin: 2px 0 0 14px;">'
                 f'{"".join(part for part in parts if part)}</div>')
+
+    def _row_action(self, msg_id, row: dict, action: str) -> str:
+        row_id = html.escape(str(row.get("id") or ""), quote=True)
+        return f"activity:{msg_id}:{action}:{row_id}"
+
+    def _format_args(self, msg: dict, row: dict, meta: str) -> str:
+        """Collapsed argument peek, never open on its own.
+
+        The step title already names the action, and a written file or an edit
+        diff is rendered below as its own block, so the raw call is a
+        disclosure for the reader who asks for it - not part of the answer.
+        An empty payload (a call whose whole input is its title) is not
+        rendered at all.
+        """
+        args_text = str(row.get("args") or "").strip()
+        if not args_text or row.get("detail_html"):
+            return ""
+        expanded = bool(row.get("args_expanded"))
+        caret = "&#9662;" if expanded else "&#9656;"
+        peek = ""
+        if not expanded:
+            peek = (
+                f'&nbsp;<span style="color: {meta}; font-weight: normal; '
+                f'font-family: Consolas, monospace; font-size: 90%;">'
+                f"{html.escape(_one_line(args_text, _ARGS_PREVIEW_CHARS))}</span>")
+        body = self._pre(_clip(args_text, _ARGS_LIMIT)) if expanded else ""
+        return (
+            f'<div style="margin-top: 4px;">'
+            f'<a href="{self._row_action(msg.get("id"), row, "args")}" '
+            f'style="text-decoration: none; color: {meta}; font-size: 90%;">'
+            f"{caret}&nbsp;Arguments{peek}</a>{body}</div>")
+
+    @staticmethod
+    def _is_long_output(text: str) -> bool:
+        return (len(text.splitlines()) > _OUTPUT_PREVIEW_LINES
+                or len(text) > _OUTPUT_PREVIEW_CHARS)
+
+    @staticmethod
+    def _output_preview(text: str) -> str:
+        head = "\n".join(text.splitlines()[:_OUTPUT_PREVIEW_LINES])
+        return head[:_OUTPUT_PREVIEW_CHARS]
+
+    def _format_output(self, msg: dict, row: dict, meta: str) -> str:
+        """Step result, clamped to a readable preview with a way to see it all."""
+        text = _clip(str(row.get("output") or "").strip(), _TEXT_LIMIT)
+        if not text:
+            return ""
+        long_output = self._is_long_output(text)
+        opened = bool(row.get("output_expanded"))
+        shown = text if (opened or not long_output) else self._output_preview(text)
+        footer = ""
+        if long_output:
+            if opened:
+                label = "Show less"
+            else:
+                hidden_chars = len(text) - len(shown)
+                hidden_lines = len(text.splitlines()) - len(shown.splitlines())
+                unit = (f"{hidden_lines} more lines" if hidden_lines > 1
+                        else f"{hidden_chars} more characters")
+                label = f"Show all · {unit}"
+            footer = (
+                f'<div style="margin-top: 2px;">'
+                f'<a href="{self._row_action(msg.get("id"), row, "output")}" '
+                f'style="text-decoration: none; color: '
+                f'{self._get_style("COLLAPSIBLE_TITLE")}; font-size: 90%;">'
+                f"{html.escape(label)}</a></div>")
+        return (
+            f'<div style="margin-top: 4px;">'
+            f'<div style="color: {meta}; font-size: 90%;">Output</div>'
+            f"{self._pre(shown)}{footer}</div>")
 
     def _pre(self, text: str) -> str:
         # Table cell instead of pre styling: Qt ignores a pre's background,

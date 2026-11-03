@@ -462,6 +462,14 @@ class BrowserHandler(BaseAgentHandler):
             return description if len(description) <= 120 else description[:119] + "…"
         return super()._step_title(action_name, action_args)
 
+    def _step_args_text(self, action_name, action_args) -> str:
+        """The description is already the title, so it is not repeated in the
+        Arguments peek; whatever the call really carries (ref, text, script)
+        stays."""
+        args = dict(action_args or {})
+        args.pop('description', None)
+        return super()._step_args_text(action_name, args)
+
     def execute_action(self, action: dict) -> str | None:
         """Shows the UI on the GUI thread; the tool itself runs on the exec
         thread. Returns None (async): slots continue the loop on completion."""

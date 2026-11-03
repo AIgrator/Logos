@@ -102,6 +102,26 @@ def _middle_cut(text: str, limit: int = 140) -> str:
     return text[:head] + " … " + text[-tail:]
 
 
+def _compact_args(value):
+    """Drops null/empty leaves so a step's Arguments peek stays readable.
+
+    Models routinely send every declared key, so a one-line peek used to read
+    ``{"paths": ["index.html"], "offset": null, "limit": null}`` - three
+    quarters of it noise.
+    """
+    if isinstance(value, dict):
+        compact = {}
+        for key, item in value.items():
+            cleaned = _compact_args(item)
+            if cleaned is None or cleaned == "" or cleaned == [] or cleaned == {}:
+                continue
+            compact[str(key)] = cleaned
+        return compact
+    if isinstance(value, (list, tuple)):
+        return [_compact_args(item) for item in value]
+    return value
+
+
 def _clip_replay_value(value, limit: int = 2000):
     """Clips long strings inside a replayed tool call's arguments.
 
@@ -778,7 +798,7 @@ class BaseAgentHandler:
         if msg is None:
             return None
         try:
-            args_text = json.dumps(action_args or {}, ensure_ascii=False, indent=2)
+            args_text = self._step_args_text(action_name, action_args)
             row = self.ui.activity_add_step(
                 msg, self._step_title(action_name, action_args),
                 args=args_text, name=action_name)
@@ -1147,10 +1167,18 @@ class BaseAgentHandler:
         self._replay_msg = msg
         return msg
 
-    def _replay_step_args(self, action_name: str, action_args: dict) -> str:
-        """Arguments text for a replayed step (heirs may trim bulky fields)."""
+    def _step_args_text(self, action_name: str, action_args: dict) -> str:
+        """Arguments as shown in a step's collapsed Arguments box.
+
+        One renderer for live and replayed steps: the transcript must not show
+        a wall of file content while the turn runs and a trimmed call after a
+        reload. Heirs drop what their own title or detail already says.
+        """
+        compact = _compact_args(action_args or {})
+        if not compact:
+            return ""
         return json.dumps(
-            _clip_replay_value(action_args or {}), ensure_ascii=False, indent=2)
+            _clip_replay_value(compact), ensure_ascii=False, indent=2)
 
     def _replay_step_detail(self, action_name: str, action_args: dict):
         """Optional themed detail HTML for a replayed step."""
@@ -1164,7 +1192,7 @@ class BaseAgentHandler:
             row = self.ui.activity_add_step(
                 msg,
                 self._step_title(action_name, action_args),
-                args=self._replay_step_args(action_name, action_args),
+                args=self._step_args_text(action_name, action_args),
                 detail_html=self._replay_step_detail(action_name, action_args),
                 name=action_name,
             )

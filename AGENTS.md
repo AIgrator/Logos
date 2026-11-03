@@ -209,6 +209,29 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `Request failed`, `Stopped` and `Waiting for you` keep their block open.
   Replay always folds (`collapse="always"`), so a restored session shows all
   work collapsed. There is no green `✓ Done` line under the answer.
+  Inside an expanded step the raw call is a disclosure, not content: the
+  `Arguments` line stays folded to a one-line monospace peek and toggles through
+  an `activity:<message id>:args:<row id>` anchor (`row['args_expanded']`), and
+  it is not rendered at all when the call is already its title or its detail -
+  `BaseAgentHandler._step_args_text` drops null/empty leaves and hands the
+  trimming to the mode (`TerminalHandler` replaces file bodies with
+  `<N chars>` and removes the `execute_shell` command, `BrowserHandler` removes
+  the `description` that became the title), so a live step and its replay show
+  the same call; `_format_args` also skips a step whose `detail_html` already
+  renders the body. A long result is a preview of 25 lines / 3 500 characters
+  plus a `Show all · N more lines` link (`row['output_expanded']`, anchor
+  `...:output:<row id>`, `Show less` to fold back), because the transcript is
+  one `QTextDocument` and cannot nest a scroll area inside a card. A long step
+  (a written file, a big listing) is taller than the screen, so its own row
+  leaves the viewport while its content is read: a sticky bar
+  (`ChatWidget.step_sticky_button`) hangs at the top of the transcript with the
+  step title and the file it touched (`▴ Writing file · catalog.html`) and
+  folds that step on click, so the reader never scrolls back to the row first.
+  It is armed by the click that opens the step (`_mark_step_position` remembers
+  that y instead of scanning the document, `_remeasure_step_growth` measures
+  the height a toggle added from the rendered document) and is visible only
+  while that step's own content is on screen, so a short step never gets one;
+  collapsing the step, its run or the block disarms it.
   The plan lives outside the transcript: a live turn
   shows a compact `Step N / M` pill above the composer
   (`src/ui/widgets/plan_panel.py::PlanPanel`, mounted first in
