@@ -27,7 +27,6 @@
 ; Build dist\Logos.exe first (pyinstaller logos.spec), then compile this script.
 #define AppExePath AddBackslash(SourcePath) + "..\dist\Logos.exe"
 #define AppVersion GetStringFileInfo(AppExePath, "ProductVersion")
-#define AppVersionQuad GetFileVersion(AppExePath)
 #define AppPublisher "AIgrator"
 #define AppURL "https://github.com/AIgrator/Logos"
 #define AppExeName "Logos.exe"
@@ -42,7 +41,9 @@ AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}
-VersionInfoVersion={#AppVersionQuad}
+; The file version string is the same three-part number: GetFileVersion() would
+; pad it to four (0.3.1.0) and that trailing zero is what Explorer shows.
+VersionInfoVersion={#AppVersion}
 VersionInfoCompany={#AppPublisher}
 VersionInfoDescription={#AppName} Setup
 VersionInfoProductName={#AppName}
