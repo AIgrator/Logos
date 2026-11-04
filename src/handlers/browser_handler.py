@@ -559,9 +559,13 @@ class BrowserHandler(BaseAgentHandler):
         self._pending_action_args = action_args
         self._exec_ticket += 1
         self._step_count += 1
-        logging.info(f"BrowserHandler: dispatching ticket {self._exec_ticket} ({action_name}) to exec thread.")
+        # open_browser is the control tool a session without browser grants uses
+        # to attach this capability; here it is already attached, so it is just
+        # a navigation.
+        dispatch_name = "browser_goto" if action_name == "open_browser" else action_name
+        logging.info(f"BrowserHandler: dispatching ticket {self._exec_ticket} ({dispatch_name}) to exec thread.")
         self._tool_in_flight = True
-        self._service.dispatch(self._exec_ticket, action_name, action_args,
+        self._service.dispatch(self._exec_ticket, dispatch_name, action_args,
                                self._exec_relay)
         return None
 

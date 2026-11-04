@@ -681,6 +681,30 @@ class AppController(QObject):
         except Exception as e:
             logging.warning(f"Could not record capability '{mode}': {e}")
 
+    def attach_capability(self, capability: str) -> tuple[str, ...]:
+        """Adds one capability to the open session without switching the panel.
+
+        The ``open_browser`` tool calls this from inside a terminal turn: the
+        grants grow, the session header records them, and the next prompt is
+        built from the wider set, so the following steps may use the browser
+        tools. The open journal, transcript and handler stay untouched.
+        """
+        name = str(capability or "").strip().lower()
+        if name not in capabilities.MODE_GRANTS:
+            return self.session_capabilities
+        grants = capabilities.merge_grants(
+            self.session_capabilities, capabilities.grants_for_mode(name))
+        if tuple(grants) == tuple(self.session_capabilities):
+            return grants
+        self.session_capabilities = grants
+        if self.session_file and self.project_manager is not None:
+            if not self.project_manager.update_session_grants(
+                    self.session_file, self.session_mode or name, grants):
+                logging.warning(
+                    f"Could not record capability '{name}' in the session header.")
+        logging.info(f"Attached capability '{name}'; session grants are now {list(grants)}.")
+        return grants
+
     def _load_project_session(self):
         """Restores the most recent session stored in the project."""
         self.session_file = ""

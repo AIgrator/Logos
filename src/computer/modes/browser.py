@@ -23,6 +23,7 @@ from src.computer.tools.browser.actions import (
 )
 from src.computer.tools.common.communicate_to_user import communicate_to_user
 from src.computer.tools.common.finish import finish
+from src.computer.tools.common.open_browser import open_browser
 from src.computer.tools.common.update_plan import update_plan
 from src.computer.tools.common.use_skill import use_skill
 from src.computer.tools.terminal.fs.list_directory import list_directory
@@ -94,6 +95,7 @@ TOOLS_METADATA = {
     "search_file_content": _tolerant_fs_tool(search_file_content),
     "communicate_to_user": communicate_to_user,
     "finish": finish,
+    "open_browser": open_browser,
     "update_plan": update_plan,
     "use_skill": use_skill,
 }

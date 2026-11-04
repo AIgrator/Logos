@@ -34,7 +34,9 @@ terminal steps and browser steps in one timeline.
 declare the tools of a mode, and `src/computer/tool_registry.py` renders them
 into `cache/<mode>/tools.txt` and `cache/<mode>/response_formats.json`. The
 pydantic schemas in `src/computer/schemas/` carry a hardcoded name list per
-mode. Today: Chat 2, Terminal 29, Browser 23, Vision 21 tools.
+mode. Baseline: Chat 2, Terminal 29, Browser 26, Vision 21 tools (the counts
+now read 30 and 27 after `open_browser`; both agent schemas list the union from
+`schemas/agent_tools.py` instead of a per-mode list).
 
 **Modes are prompts.** `prompts/<mode>/system.txt` and per-mode user templates;
 `Brain.get_<mode>_prompts()` assembles them. The system prompt, the tool block
@@ -291,7 +293,12 @@ schema check reports no problems.
 > (native/catalog/hidden), the capability panels that replace the mode selector,
 > and one handler loop instead of two (today the browser handler sees only
 > `base+browser`, and a terminal capability attached beside it is used by
-> switching the panel to Terminal).
+> switching the panel to Terminal). Phase 2 has started with the first half:
+> `open_browser(url)` is a real tool that attaches the browser capability from
+> inside a terminal turn (grants grow, nothing is summarized, the page opens on
+> the shared service), and `browser_snapshot` works on the next step. The
+> `open_terminal()` half waits for the merged loop, because the browser handler
+> cannot execute terminal tools yet.
 
 **Phase 1 — one session, granted capabilities.**
 Capability changes stop creating sessions. UI panels attach/revoke. The selector
@@ -305,6 +312,12 @@ the "next step" availability rule.
 *Done when:* asked to "start the dev server and check the page", the model
 attaches Terminal, starts the server with `ready_url`, attaches Browser, checks
 the page, and everything is one turn in one session.
+
+> **Status.** `open_browser(url)` has landed (base tool, attaches the browser
+> capability and navigates in one step; the next prompt already lists the browser
+> tools). `open_terminal()` waits for the single agent loop: today Browser mode
+> cannot execute terminal tools, so attaching Terminal from there would grant
+> nothing the running handler can use.
 
 **Phase 3 — exposure budget.**
 Native/catalog split from the table above, `search_tools`, measurement of the

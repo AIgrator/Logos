@@ -507,6 +507,22 @@ no project is open) through `BrowserManager.screenshot_dir`, and the PNG is
 attached to the next request: persistently in Browser mode, and in a terminal
 turn while its last step was a browser one (`TerminalHandler._request_attachments`).
 
+`open_browser(url)` is the control tool a session uses to attach the browser
+capability from inside an agent turn (Phase 2 of
+[the vision plan](docs/future_vision.md)). It is a `base` tool, declared in both
+agent manifests, and intercepted before the terminal access policy like
+`browser_*`: `TerminalHandler._open_browser_action` calls
+`AppController.attach_capability("browser")` (grants merge, nothing is
+summarized, the panel does not switch) and then dispatches `browser_goto` on the
+shared service, so the step card and the journal record `open_browser` while the
+browser runs the navigation. `AppController.attach_capability` updates
+`session_capabilities` and the header's `capabilities`, so the next prompt's
+session profile already lists the browser tools and the envelope accepts them.
+In Browser mode the capability is already attached, so `BrowserHandler` treats
+the same action as a plain `browser_goto`. `open_terminal()` is deliberately not
+there yet: the browser handler cannot execute terminal tools until the two agent
+loops merge.
+
 ## Settings
 
 Settings is a full-window page, not a dialog: `src/ui/settings_window.py::SettingsPage`

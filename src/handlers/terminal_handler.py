@@ -565,6 +565,13 @@ class TerminalHandler(BaseAgentHandler):
             self._run_browser_action(action_name, action_args)
             return None
 
+        # open_browser attaches the browser capability and opens the page in
+        # the same step, so a terminal task can start using the browser
+        # without the user switching panels.
+        if action_name == "open_browser":
+            self._open_browser_action(action_args)
+            return None
+
         if not self._authorize_action(action_name, action_args):
             self._report_denied(action_name, action_args)
             return None
@@ -618,28 +625,28 @@ class TerminalHandler(BaseAgentHandler):
         grants = getattr(self.controller, "session_capabilities", ()) or ()
         return action_name in capabilities.tools_for_grants(grants)
 
-    def _run_browser_action(self, action_name: str, action_args: dict):
-        """Sends a browser_* call to the app's single browser thread.
+    def _run_browser_action(self, action_name: str, action_args: dict,
+                            dispatch_name: str = "", summary_name: str = ""):
+        """Sends a browser call to the app's single browser thread.
 
         Browser approval is the browser policy's own (classify_action), so the
         terminal access policy is deliberately skipped here: the call does not
         touch the shell, and the browser dialog already fails closed.
+
+        ``dispatch_name`` is the browser tool that actually runs when the model
+        called a control tool (``open_browser``); the journal still records the
+        name the model used.
         """
+        dispatch_name = dispatch_name or action_name
+        summary_name = summary_name or dispatch_name
         service = getattr(self.controller, "browser_service", None)
-        if service is None or not self._browser_granted(action_name):
+        if service is None or not self._browser_granted(dispatch_name):
             message = (f"**Tool Result:** Error: the browser capability is not "
                        f"attached to this session, so '{action_name}' is unavailable.")
-            if self._active_step is not None:
-                self._finish_active_step(
-                    status="error", output=self._strip_result_prefix(message),
-                    expanded=True)
-            else:
-                self._add_result_card(message, f"{action_name} · error", "error")
-            self.record_tool_result(message, status="error", name=action_name)
-            self._after_action_result(message, abort=True)
+            self._fail_step(action_name, message)
             return
         description = " ".join(str((action_args or {}).get("description") or "").split())
-        label = description or _action_summary(action_name, action_args)
+        label = description or _action_summary(summary_name, action_args)
         if len(label) > 120:
             label = label[:119] + "…"
         self._pending_action_label = label
@@ -648,10 +655,37 @@ class TerminalHandler(BaseAgentHandler):
         self._pending_action_args = action_args
         self._exec_ticket += 1
         logging.info(f"TerminalHandler: dispatching browser ticket {self._exec_ticket} "
-                     f"({action_name}) to the shared browser thread.")
+                     f"({dispatch_name}) to the shared browser thread.")
         self._tool_in_flight = True
-        service.dispatch(self._exec_ticket, action_name, action_args,
+        service.dispatch(self._exec_ticket, dispatch_name, action_args,
                          self._exec_relay)
+
+    def _open_browser_action(self, action_args: dict):
+        """Attaches the browser capability and opens a URL in one step."""
+        url = str((action_args or {}).get("url") or "").strip()
+        if not url:
+            self._fail_step("open_browser",
+                            "**Tool Result:** Error: 'url' is required.")
+            return
+        attach = getattr(self.controller, "attach_capability", None)
+        if callable(attach):
+            attach(capabilities.BROWSER)
+        args = {"url": url}
+        description = " ".join(str((action_args or {}).get("description") or "").split())
+        if description:
+            args["description"] = description
+        self._run_browser_action("open_browser", args, dispatch_name="browser_goto")
+
+    def _fail_step(self, action_name: str, message: str):
+        """Renders a failed step (no tool ran) and hands control back."""
+        if self._active_step is not None:
+            self._finish_active_step(
+                status="error", output=self._strip_result_prefix(message),
+                expanded=True)
+        else:
+            self._add_result_card(message, f"{action_name} · error", "error")
+        self.record_tool_result(message, status="error", name=action_name)
+        self._after_action_result(message, abort=True)
 
     @Slot(int, bool, str)
     def _on_browser_finished(self, ticket: int, ok: bool, text: str):

@@ -32,10 +32,13 @@ CHAT = "chat"
 CAPABILITIES = (BASE, TERMINAL, BROWSER, VISION, CHAT)
 
 #: Tools every agent session may use: read-only filesystem, control, skills.
+#: ``open_browser`` is a control tool: it asks for the browser capability rather
+#: than doing browser work itself, so it belongs to every agent session.
 BASE_TOOLS = (
     "read_files",
     "list_directory",
     "search_file_content",
+    "open_browser",
     "finish",
     "communicate_to_user",
     "update_plan",
