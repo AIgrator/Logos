@@ -57,8 +57,15 @@ class ToolRegistry:
 
     def _get_filtered_metadata(self, mode: str) -> dict:
         """
-        Loads tool metadata from the specified mode file.
+        Loads tool metadata for a mode, keeping only what its grants allow.
+
+        ``src.computer.capabilities`` is the authority on membership; the mode
+        module only supplies implementations. A tool that one side knows and
+        the other does not is logged, so a forgotten registration cannot
+        silently add a tool to the model's contract or drop one from it.
         """
+        from src.computer import capabilities
+
         filtered_meta = {}
         try:
             mode_module_name = f'src.computer.modes.{mode}'
@@ -81,7 +88,35 @@ class ToolRegistry:
             import logging
             logging.error(f"Error loading metadata for mode '{mode}': {e}", exc_info=True)
             return {}
-        return filtered_meta
+
+        granted = set(capabilities.tools_for_mode(mode))
+        declared = set(filtered_meta)
+        if granted != declared:
+            logging.warning(
+                "Tool manifest disagreement for mode '%s': only in grants %s, "
+                "only in the mode module %s (src/computer/capabilities.py is "
+                "authoritative).",
+                mode,
+                sorted(granted - declared),
+                sorted(declared - granted),
+            )
+        return {name: info for name, info in filtered_meta.items() if name in granted}
+
+    def generate_capability_catalogue(self, force: bool = False) -> str:
+        """Writes the capability → tool-name catalogue the grants are read from.
+
+        One file for every capability keeps the cache honest about what a
+        session may use, instead of four per-mode lists that can drift.
+        """
+        from src.computer import capabilities as caps
+
+        dest = os.path.join(self.get_cache_dir(), "capabilities", "tools.json")
+        if not force and os.path.exists(dest):
+            return dest
+        catalogue = {name: list(caps.TOOLS.get(name, ())) for name in caps.CAPABILITIES}
+        catalogue["_modes"] = {mode: list(grants) for mode, grants in caps.MODE_GRANTS.items()}
+        self._write_text(dest, json.dumps(catalogue, indent=2) + "\n")
+        return dest
 
     def generate_tools(self, force: bool = False) -> dict:
         generated_files = {}
@@ -188,6 +223,7 @@ class ToolRegistry:
         results = {
             'tools': self.generate_tools(force=force),
             'response_formats': self.generate_response_formats(force=force),
+            'capabilities': self.generate_capability_catalogue(force=force),
         }
         self._write_manifest_fingerprint()
         duration = time.perf_counter() - start
@@ -202,6 +238,8 @@ class ToolRegistry:
         sees the current contract (e.g. a new `press_enter` argument).
         """
         import hashlib
+        from src.computer import capabilities
+
         fingerprint = {}
         for mode in ['vision', 'terminal', 'chat', 'browser']:
             try:
@@ -214,6 +252,10 @@ class ToolRegistry:
                 }
             except Exception:
                 fingerprint[mode] = {"tools": [], "digest": ""}
+        fingerprint["capabilities"] = {
+            "sets": {name: list(capabilities.TOOLS.get(name, ())) for name in capabilities.CAPABILITIES},
+            "modes": {mode: list(grants) for mode, grants in capabilities.MODE_GRANTS.items()},
+        }
         return fingerprint
 
     def _fingerprint_path(self) -> str:

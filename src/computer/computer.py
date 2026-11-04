@@ -71,9 +71,14 @@ class Computer:
     def _load_mode_tools(self, mode: str):
         """
         Dynamically loads tool functions for the specified mode and binds them as methods.
+
+        Membership comes from ``src.computer.capabilities``: a tool the mode
+        module declares but no capability grants is dropped (and logged), so
+        the callable surface matches the contract the model is given.
         """
         start = time.perf_counter()
         import_start = start
+        from src.computer import capabilities
         try:
             mode_module_name = f'src.computer.modes.{mode}'
             mode_module = importlib.import_module(mode_module_name)
@@ -85,7 +90,17 @@ class Computer:
                 raw_metadata = mode_module.get_tools_metadata()
                 meta_duration = time.perf_counter() - meta_start
                 logging.info(f"  - get_tools_metadata() for mode '{mode}' took {meta_duration:.3f}s")
+                granted = set(capabilities.tools_for_mode(mode))
+                missing = sorted(granted - set(raw_metadata))
+                if missing:
+                    logging.error(
+                        "Mode '%s' grants tools it cannot provide: %s", mode, missing)
                 for tool_name, tool_func in raw_metadata.items():
+                    if tool_name not in granted:
+                        logging.warning(
+                            "Dropping tool '%s': no capability grants it for mode '%s'.",
+                            tool_name, mode)
+                        continue
                     # Bind the tool function as a method of this instance
                     setattr(self, tool_name, partial(tool_func, self))
         except Exception as e:

@@ -122,8 +122,8 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
 - `project.json` - id, name, timestamps. `name` may be a custom display name set
   from the project context menu; the folder itself is never renamed.
 - `sessions/` - one append-only JSONL file per session; the first line is a
-  `session` header (`schema_version`, `id`, `mode`, optional `title`, optional
-  `objective`) and later
+  `session` header (`schema_version`, `id`, `mode`, `capabilities`, optional
+  `title`, optional `objective`) and later
   lines are typed events (`message`, `reasoning`, `progress`, `plan`,
   `tool_call`, `tool_result`, `job_result`, `usage`, `compaction`, `error`,
   `suggestions`, `model`). `reasoning` events carry the
@@ -445,6 +445,19 @@ rewrites only the header. Deleting the open session clears the chat and leaves n
 journal behind; the next message creates a session in the current mode. Legacy
 `session-*.json` files are migrated to JSONL on load and the old file is kept as
 `.json.bak`.
+
+`src/computer/capabilities.py` is the single authority on which tools a session
+may use. A capability is what a session is allowed to do (`base`, `terminal`,
+`browser`, `vision`, plus `chat` until it becomes base-only); a mode is how the
+current build delivers it, so `MODE_GRANTS` maps `terminal` and `browser` to
+`base + <capability>` and `vision`/`chat` to their own whole sets. The journal
+header now records `capabilities`, and `grants_from_header` derives them from
+the legacy `mode` for journals written before it existed. `ToolRegistry` builds
+every cache file from those grants and drops (with a warning in the log) a tool
+that a mode module declares but no capability grants, so the two can no longer
+drift apart silently; `cache/capabilities/tools.json` is the generated
+catalogue. `AppController.session_capabilities` mirrors the open session's
+grants.
 
 `src/project_manager.py` owns this layout. The project root (not the Logos install
 directory) is the terminal/browser `working_directory` and the root passed to

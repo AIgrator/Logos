@@ -385,11 +385,18 @@ class ProjectManager:
         return event
 
     def _session_header(self, session_id: str, mode: str, root: str) -> dict:
+        from src.computer import capabilities
+
+        mode = mode or "chat"
         return {
             "type": "session",
             "schema_version": SESSION_SCHEMA_VERSION,
             "id": session_id,
-            "mode": mode or "chat",
+            "mode": mode,
+            # What the session may do, derived from the mode until sessions
+            # attach capabilities themselves (docs/future_vision.md, Phase 1).
+            # `mode` stays for the loader and for 0.3.x journals that lack this.
+            "capabilities": list(capabilities.grants_for_mode(mode)),
             "created_at": _now_iso(),
             "project_root": root,
             "cwd": root,
@@ -447,6 +454,8 @@ class ProjectManager:
                for row in trailing):
             return False
         header["mode"] = mode or "chat"
+        from src.computer import capabilities
+        header["capabilities"] = list(capabilities.grants_for_mode(header["mode"]))
         try:
             self._write_jsonl_atomic(path, [header] + trailing)
         except Exception as exc:

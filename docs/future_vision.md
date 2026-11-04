@@ -260,7 +260,7 @@ inside a session stays journaled as a `model` event, exactly as today.
 Each phase must leave the previous behavior intact and keep old sessions
 readable.
 
-**Phase 0 — foundation, no visible change.**
+**Phase 0 - foundation, no visible change.**
 `ToolSpec(capability, exposure)` in the registry; `capabilities` in the session
 header with migration; tool block and prompt assembled from grants; per-mode
 `tools.txt` files replaced by one capability catalogue. Modes still behave as
@@ -268,6 +268,15 @@ today, one mode per session, but the data model is capability-first.
 *Done when:* the three agent modes behave identically, old journals open, the
 generated tool block for a terminal session is equivalent to today's, and the
 schema check reports no problems.
+
+> **Status (branch `feature/unified-capabilities`).** The capability registry
+> (`src/computer/capabilities.py`), the `capabilities` header field with its
+> migration from `mode`, the generated `cache/capabilities/tools.json` and
+> `AppController.session_capabilities` have landed. The per-mode cache files and
+> the strict schemas were regenerated and diffed byte-for-byte against the old
+> build, so nothing the model sees has changed yet. Still open in this phase:
+> assembling the tool block and the prompt from grants instead of per-mode
+> modules, and the `exposure` axis (native/catalog/hidden).
 
 **Phase 1 — one session, granted capabilities.**
 Capability changes stop creating sessions. UI panels attach/revoke. The selector

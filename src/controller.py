@@ -34,6 +34,7 @@ from handlers.browser_handler import BrowserHandler
 from states import ControllerState, VisionState
 from hotkey_manager import HotkeyManager
 from src.computer.computer import Computer
+from src.computer import capabilities
 from indexer import Indexer
 # Heavy imports are deferred to background threads
 
@@ -82,6 +83,9 @@ class AppController(QObject):
         self.session_file = ""
         self.session_id = ""
         self.session_mode = "chat"
+        #: Capabilities the open session may use (src/computer/capabilities.py).
+        #: Derived from the mode until sessions attach them directly.
+        self.session_capabilities: tuple[str, ...] = capabilities.grants_for_mode("chat")
         self.session_turn_id = ""
         self.session_objective = ""
         self.session_events = []
@@ -558,6 +562,7 @@ class AppController(QObject):
     def _restore_session_mode(self, mode: str):
         mode = self._valid_mode(mode)
         self.session_mode = mode
+        self.session_capabilities = capabilities.grants_for_mode(mode)
         handlers = getattr(self, "chat_handler", None)
         if handlers is None:
             return
@@ -592,6 +597,7 @@ class AppController(QObject):
         self.session_id = self.project_manager.session_id(self.session_file)
         self.session_objective = ""
         self.session_mode = mode
+        self.session_capabilities = capabilities.grants_for_mode(mode)
         self.session_turn_id = ""
         self.session_events = []
         self._session_event_count = 0
@@ -628,6 +634,7 @@ class AppController(QObject):
         mode = self._valid_mode(mode)
         if self.project_manager is None or not self.project_root:
             self.session_mode = mode
+            self.session_capabilities = capabilities.grants_for_mode(mode)
             return
         if mode == self.session_mode:
             return
@@ -646,9 +653,11 @@ class AppController(QObject):
             if not self._session_has_content():
                 if not self.session_file:
                     self.session_mode = mode
+                    self.session_capabilities = capabilities.grants_for_mode(mode)
                     return
                 if self.project_manager.set_session_mode(self.session_file, mode):
                     self.session_mode = mode
+                    self.session_capabilities = capabilities.grants_for_mode(mode)
                     return
                 self._create_new_session(mode)
                 return
@@ -722,6 +731,10 @@ class AppController(QObject):
         self.session_id = data.get("id") or self.project_manager.session_id(path)
         self.session_objective = data.get("objective") or ""
         self.session_mode = self._valid_mode(data.get("mode") or "chat")
+        header = self.project_manager.read_session_header(path)
+        session_capabilities = capabilities.grants_from_header(
+            header or {"mode": self.session_mode})
+        self.session_capabilities = session_capabilities
         self.session_turn_id = ""
         self.session_events = list(events)
         self._session_event_count = len(events)
@@ -738,10 +751,15 @@ class AppController(QObject):
         self.conversation_history.extend(messages)
         if getattr(self, "chat_handler", None) is not None:
             self._restore_session_mode(self.session_mode)
+            # The journal is the record: keep the grants it stored instead of
+            # the mode defaults _restore_session_mode just installed.
+            self.session_capabilities = session_capabilities
         self._load_handoff_state()
         self._restore_agent_history()
         self._schedule_context_indicator_update()
-        logging.info(f"Loaded session with {len(messages)} messages from {path}")
+        logging.info(
+            f"Loaded session with {len(messages)} messages from {path} "
+            f"(capabilities: {', '.join(self.session_capabilities) or 'none'})")
 
     def _session_snapshot(self) -> list:
         """Serializable subset of the conversation (plain role/content turns)."""
