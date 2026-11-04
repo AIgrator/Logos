@@ -385,15 +385,16 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `Constraints`, `Checks`, `Current`, `Next`, `Unfinished`, `Files`,
   `Blockers`) and provenance (source session, event count, model,
   optional `handoff_from` / `handoff_consumed` and the compaction boundary
-  `compacted_through` / `compacted_event_count` / `compacted_at`). Summaries
-  never cross session
-  boundaries: switching
-  mode copies the previous summary once into the new session. The deterministic
-  fallback is always available (its `Current` comes from the last assistant
-  message, else the latest request - never raw tool output); the LLM refresh
-  runs in the worker thread and
+  `compacted_through` / `compacted_event_count` / `compacted_at`). A summary
+  belongs to its own session and is never copied into another one: attaching a
+  capability in place keeps the same journal (so there is no boundary to
+  bridge), while `handoff_prompt` still feeds a fresh Computer Use chain - which
+  cannot replay local events - from the summary of the session it continues. The
+  deterministic fallback is always available (its `Current` comes from the last
+  assistant message, else the latest request - never raw tool output); the LLM
+  refresh runs in the worker thread and
   is injected as chat system context, terminal/browser history, or the first
-  task of a fresh Vision/CUA chain when continuing from another session/mode.
+  task of a fresh Vision/CUA chain when continuing from another session.
   The Session context dialog states the summary source (LLM with provider/model,
   fallback, or handoff), its event coverage and whether a refresh is due, running
   or paused.
@@ -439,20 +440,24 @@ keyless client (search, popular list, ZIP install); the dialog
 `src/ui/skill_catalog_dialog.py` installs into `~/.logos/skills` after showing
 the author, license and source URL.
 
-Sessions are mode-locked: `chat`, `terminal`, `browser`, or `vision`. Switching
-mode in a non-empty session starts a new session; switching in an empty session
-rewrites only the header. Deleting the open session clears the chat and leaves no
-journal behind; the next message creates a session in the current mode. Legacy
-`session-*.json` files are migrated to JSONL on load and the old file is kept as
-`.json.bak`.
+Sessions are no longer mode-locked. Switching the active panel to `terminal`,
+`browser` or `vision` attaches that capability to the **open** session: the
+journal, the transcript and the events stay, `capabilities` in the header grows,
+and `_prepare_session_for_mode` neither starts a new file nor copies a handoff
+summary (`_seed_session_summary`, which did that, is gone). Switching in an
+empty session still only rewrites the header. Deleting the open session clears
+the chat and leaves no journal behind; the next message creates a session in the
+current mode. Legacy `session-*.json` files are migrated to JSONL on load and the
+old file is kept as `.json.bak`.
 
 `src/computer/capabilities.py` is the single authority on which tools a session
 may use. A capability is what a session is allowed to do (`base`, `terminal`,
 `browser`, `vision`, plus `chat` until it becomes base-only); a mode is how the
 current build delivers it, so `MODE_GRANTS` maps `terminal` and `browser` to
-`base + <capability>` and `vision`/`chat` to their own whole sets. The journal
-header now records `capabilities`, and `grants_from_header` derives them from
-the legacy `mode` for journals written before it existed. `ToolRegistry` builds
+`base + <capability>` and `vision`/`chat` to their own whole sets;
+`merge_grants` unions them when a capability is attached in place. The journal
+header records `capabilities`, and `grants_from_header` derives them from the
+legacy `mode` for journals written before it existed. `ToolRegistry` builds
 every cache file from those grants and drops (with a warning in the log) a tool
 that a mode module declares but no capability grants, so the two can no longer
 drift apart silently; `cache/capabilities/tools.json` is the generated

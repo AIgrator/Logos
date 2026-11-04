@@ -630,7 +630,14 @@ class AppController(QObject):
             logging.warning(f"Could not store session objective: {e}")
 
     def _prepare_session_for_mode(self, mode: str):
-        """Keep one mode per session; a non-empty mode change starts a new one."""
+        """Attach a mode's capability to the open session.
+
+        Phase 1 of docs/future_vision.md: a session with content keeps its
+        journal and its transcript when another capability is chosen. The new
+        capability is added to the grants and recorded in the header; nothing
+        is summarized, cleared or copied, because there is no session boundary
+        to bridge anymore. An empty session still just rewrites its header.
+        """
         mode = self._valid_mode(mode)
         if self.project_manager is None or not self.project_root:
             self.session_mode = mode
@@ -638,51 +645,36 @@ class AppController(QObject):
             return
         if mode == self.session_mode:
             return
-        previous_file = self.session_file
-        previous_id = self.session_id
-        context_settings = self._summary_settings()
-        handoff_on_switch = bool(
-            context_settings.get("handoff_enabled", True)
-            and context_settings.get("handoff_on_mode_switch", True))
-        if self._session_has_content() and handoff_on_switch:
-            self._capture_handoff_summary()
+        if not self._session_has_content():
+            if not self.session_file:
+                self.session_mode = mode
+                self.session_capabilities = capabilities.grants_for_mode(mode)
+                return
+            if self.project_manager.set_session_mode(self.session_file, mode):
+                self.session_mode = mode
+                self.session_capabilities = capabilities.grants_for_mode(mode)
+                return
+            self._create_new_session(mode)
+            return
+        if self.session_file and not os.path.exists(self.session_file):
+            self._create_new_session(mode)
+            return
+
+        grants = capabilities.merge_grants(
+            self.session_capabilities, capabilities.grants_for_mode(mode))
         try:
-            if self.session_file and not os.path.exists(self.session_file):
-                self._create_new_session(mode)
-                return
-            if not self._session_has_content():
-                if not self.session_file:
-                    self.session_mode = mode
-                    self.session_capabilities = capabilities.grants_for_mode(mode)
-                    return
-                if self.project_manager.set_session_mode(self.session_file, mode):
-                    self.session_mode = mode
-                    self.session_capabilities = capabilities.grants_for_mode(mode)
-                    return
-                self._create_new_session(mode)
-                return
             self._persist_session()
         except Exception as e:
-            logging.warning(f"Could not prepare session for {mode} mode: {e}")
-        self.conversation_history.clear()
-        self.pending_attachments.clear()
+            logging.warning(f"Could not persist the session before attaching {mode}: {e}")
+        self.session_mode = mode
+        self.session_capabilities = grants
         try:
-            self.ui.clear_thumbnails()
-            self._update_attachment_menu()
+            if not self.project_manager.update_session_grants(
+                    self.session_file, mode, grants):
+                logging.warning(
+                    f"Could not record capability '{mode}' in the session header.")
         except Exception as e:
-            logging.warning(f"Could not clear attachments on mode change: {e}")
-        try:
-            self._create_new_session(mode)
-            if handoff_on_switch:
-                self._seed_session_summary(previous_file, previous_id)
-        except Exception as e:
-            logging.warning(f"Could not create a new {mode} session: {e}")
-            self.session_file = ""
-        self._reset_agent_histories()
-        try:
-            self.ui.clear_chat()
-        except Exception:
-            pass
+            logging.warning(f"Could not record capability '{mode}': {e}")
 
     def _load_project_session(self):
         """Restores the most recent session stored in the project."""
@@ -891,29 +883,6 @@ class AppController(QObject):
                 self._handoff_meta = handoff.read_meta(self.session_file)
         self._handoff_summary = summary or ""
         return self._handoff_summary
-
-    def _seed_session_summary(self, source_file: str, source_id: str = "") -> bool:
-        """Copy the previous session's summary once into a new mode session."""
-        if (not source_file or not self.session_file
-                or os.path.normcase(os.path.abspath(source_file))
-                == os.path.normcase(os.path.abspath(self.session_file))):
-            return False
-        summary = handoff.read_summary(source_file)
-        if not summary:
-            return False
-        written = handoff.write_summary(
-            self.session_file,
-            summary,
-            source_session=source_file,
-            event_count=0,
-            source="handoff",
-            handoff_from=source_id or os.path.basename(source_file),
-        )
-        if not written:
-            return False
-        self._handoff_summary = written
-        self._handoff_meta = handoff.read_meta(self.session_file)
-        return True
 
     def project_baseline_prompt(self) -> str:
         """Stable AGENTS.md rules for the active project (empty when absent)."""

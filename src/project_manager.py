@@ -463,6 +463,39 @@ class ProjectManager:
             return False
         return True
 
+    def update_session_grants(self, path: str, mode: str, grants) -> bool:
+        """Records a capability attached to a session that already has content.
+
+        Rewrites only the first line: the events below are untouched, because
+        attaching a capability no longer starts a new journal (Phase 1 of
+        docs/future_vision.md).
+        """
+        from src.computer import capabilities
+
+        if not path or not path.endswith(SESSION_EXT) or not os.path.isfile(path):
+            return False
+        try:
+            with open(path, encoding="utf-8") as fh:
+                records = [json.loads(line) for line in fh if line.strip()]
+        except Exception as exc:
+            logging.warning(f"Could not read session header {path}: {exc}")
+            return False
+        if not records or not isinstance(records[0], dict):
+            return False
+        header = records[0]
+        if header.get("type") != "session":
+            return False
+        header["mode"] = mode or header.get("mode") or "chat"
+        header["capabilities"] = list(
+            capabilities.normalize_grants(grants)
+            or capabilities.grants_from_header(header))
+        try:
+            self._write_jsonl_atomic(path, [header] + records[1:])
+        except Exception as exc:
+            logging.warning(f"Could not update session capabilities {path}: {exc}")
+            return False
+        return True
+
     def _update_session_header(self, path: str, field: str, value: str) -> bool:
         """Rewrites one header field atomically; legacy JSON uses the top level."""
         text = " ".join(str(value or "").split())

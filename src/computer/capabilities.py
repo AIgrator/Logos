@@ -171,6 +171,16 @@ def tools_for_mode(mode: str) -> tuple[str, ...]:
     return tools_for_grants(grants_for_mode(mode))
 
 
+def merge_grants(*sets: Iterable[str]) -> tuple[str, ...]:
+    """Ordered union of several grant sets (a capability attached in place)."""
+    merged: list[str] = []
+    for values in sets:
+        for capability in normalize_grants(values):
+            if capability not in merged:
+                merged.append(capability)
+    return normalize_grants(merged)
+
+
 def capability_of_tool(name: str) -> str | None:
     """Which capability owns a tool, or None when nothing grants it."""
     for capability in CAPABILITIES:
