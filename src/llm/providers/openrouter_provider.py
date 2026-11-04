@@ -159,33 +159,16 @@ class OpenRouterProvider(BaseLLMProvider):
             raise FatalError(f"An unexpected error in OpenRouter provider (web_search): {e}") from e
 
     def _get_tools_from_cache(self):
-        if self._tools_cache is not None:
+        from src.llm import tool_catalog
+
+        stamp = tool_catalog.catalogue_stamp()
+        if self._tools_cache is not None and getattr(self, "_tools_stamp", None) == stamp:
             return self._tools_cache
 
-        schema_files = [
-            'cache/terminal/response_formats.json',
-            'cache/vision/response_formats.json',
-            'cache/browser/response_formats.json'
-        ]
-        all_schemas = {}
-
-        for file_path in schema_files:
-            try:
-                with open(file_path, encoding='utf-8') as f:
-                    schemas = json.load(f)
-                    all_schemas.update(schemas)
-            except FileNotFoundError:
-                logging.warning(f"Could not find schema file: '{file_path}'. Skipping.")
-                continue
-            except json.JSONDecodeError as e:
-                logging.error(f"Failed to parse JSON from '{file_path}': {e}", exc_info=True)
-                continue
-            except Exception as e:
-                logging.error(f"Failed to load or parse tools from '{file_path}': {e}", exc_info=True)
-                continue
+        all_schemas = tool_catalog.load_schemas()
 
         if not all_schemas:
-            logging.error("No tool schemas could be loaded. Please ensure 'cache/terminal/response_formats.json', 'cache/vision/response_formats.json' and/or 'cache/browser/response_formats.json' exist and are valid.")
+            logging.error("No tool schemas could be loaded. Please ensure the files under 'cache/' exist and are valid.")
             return []
 
         formatted_tools = []
@@ -205,6 +188,7 @@ class OpenRouterProvider(BaseLLMProvider):
                     "type": "function",
                     "function": function
                 })
+        self._tools_stamp = stamp
         self._tools_cache = formatted_tools
         return formatted_tools
 

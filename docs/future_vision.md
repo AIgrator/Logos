@@ -281,10 +281,17 @@ schema check reports no problems.
 > open session (`_prepare_session_for_mode` merges grants and rewrites only the
 > header, `ProjectManager.update_session_grants`), and the single Chromium of the
 > app lives in `BrowserService`, which Terminal can dispatch `browser_*` calls
-> into. Still open in this phase: assembling the tool block and the prompt from
-> grants instead of per-mode modules (so a terminal turn actually sees the
-> browser tools), the `exposure` axis (native/catalog/hidden), and the capability
-> panels that replace the mode selector.
+> into. The tool block and the response format now follow the grants
+> (`ToolRegistry.generate_session_profile` writes `cache/session/<handler>/`,
+> `session_tools.py` feeds the prompt, `tool_catalog.py` merges the session files
+> over the per-mode ones and stamps the provider caches), so a terminal turn in a
+> session that also holds Browser is told about the browser tools and its
+> envelope accepts them; a pure terminal or browser grant set stays byte-for-byte
+> identical to the per-mode files. Still open in this phase: the `exposure` axis
+> (native/catalog/hidden), the capability panels that replace the mode selector,
+> and one handler loop instead of two (today the browser handler sees only
+> `base+browser`, and a terminal capability attached beside it is used by
+> switching the panel to Terminal).
 
 **Phase 1 — one session, granted capabilities.**
 Capability changes stop creating sessions. UI panels attach/revoke. The selector

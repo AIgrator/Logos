@@ -22,6 +22,7 @@ from typing import Any
 import requests
 from PIL import Image
 
+from . import tool_catalog
 from .base_provider import BaseLLMProvider
 from .exceptions import (
     FatalError,
@@ -34,12 +35,6 @@ from .llm_parsing import repair_json_string
 logger = logging.getLogger(__name__)
 
 _PROVIDER_ID_RE = re.compile(r"^[a-z0-9_-]{1,32}$")
-
-_SCHEMA_FILES = (
-    'cache/terminal/response_formats.json',
-    'cache/vision/response_formats.json',
-    'cache/browser/response_formats.json',
-)
 
 # Wire format spoken by a custom endpoint.
 PROTOCOL_OPENAI = "openai"
@@ -248,16 +243,7 @@ def register_custom_providers(definitions: list):
 
 def _load_response_schemas() -> dict:
     """Response-format definitions written by the schema generator."""
-    schemas = {}
-    for path in _SCHEMA_FILES:
-        try:
-            with open(path, encoding='utf-8') as f:
-                schemas.update(json.load(f))
-        except FileNotFoundError:
-            logger.warning("Custom provider: schema file '%s' missing.", path)
-        except (OSError, json.JSONDecodeError) as e:
-            logger.error("Custom provider: cannot read '%s': %s", path, e)
-    return schemas
+    return tool_catalog.load_schemas()
 
 
 # --------------------------------------------------------------------------
@@ -326,7 +312,8 @@ class CustomOpenAIProvider(BaseLLMProvider):
         return f"{self.base_url}/chat/completions"
 
     def _tools_from_cache(self) -> list:
-        if self._tools_cache is not None:
+        stamp = tool_catalog.catalogue_stamp()
+        if self._tools_cache is not None and getattr(self, "_tools_stamp", None) == stamp:
             return self._tools_cache
         tools = []
         for name, info in _load_response_schemas().items():
@@ -340,6 +327,7 @@ class CustomOpenAIProvider(BaseLLMProvider):
                         "parameters": params,
                     },
                 })
+        self._tools_stamp = stamp
         self._tools_cache = tools
         return tools
 
@@ -646,7 +634,8 @@ class CustomAnthropicProvider(BaseLLMProvider):
         return f"{self.base_url}/v1/messages"
 
     def _tools_from_cache(self) -> list:
-        if self._tools_cache is not None:
+        stamp = tool_catalog.catalogue_stamp()
+        if self._tools_cache is not None and getattr(self, "_tools_stamp", None) == stamp:
             return self._tools_cache
         tools = []
         for name, info in _load_response_schemas().items():
@@ -657,6 +646,7 @@ class CustomAnthropicProvider(BaseLLMProvider):
                     "description": info.get("description", ""),
                     "input_schema": params,
                 })
+        self._tools_stamp = stamp
         self._tools_cache = tools
         return tools
 

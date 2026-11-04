@@ -1440,6 +1440,23 @@ class BaseAgentHandler:
             logging.warning(f"{type(self).__name__} skills lookup failed: {e}")
             return ""
 
+    def session_tools_block(self) -> str:
+        """Tool list for this session's granted capabilities, or ''.
+
+        Built from the grants rather than from the mode, so a terminal turn that
+        also holds the browser capability is actually told about the browser
+        tools it can now call. Returns '' when nothing can be built; the prompt
+        then falls back to the per-mode cache file.
+        """
+        try:
+            from src.computer.session_tools import session_tools_text
+            settings = getattr(self.controller, "settings", None) or self.settings
+            grants = getattr(self.controller, "session_capabilities", ()) or ()
+            return session_tools_text(settings, grants, self.MODE_NAME)
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} session tool block failed: {e}")
+            return ""
+
     # -- heir contract -----------------------------------------------------
 
     def build_prompts(self):

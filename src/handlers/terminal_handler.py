@@ -286,6 +286,7 @@ class TerminalHandler(BaseAgentHandler):
             history=history,
             available_skills=self.skills_block(),
             available_mcp_servers=self.mcp_servers_block(),
+            available_tools=self.session_tools_block(),
         )
 
     def mcp_servers_block(self) -> str:

@@ -126,35 +126,38 @@ class ToolRegistry:
             if not force and os.path.exists(dest):
                 continue
 
-            lines = []
             try:
-                meta = self._get_filtered_metadata(mode)
-                for meta_name, info in meta.items():
-                    tool = info.get('tool') or {}
-                    name = tool.get('name') or meta_name
-                    desc = tool.get('description') or tool.get('strategic') or ''
-                    lines.append(f"- name: {name}")
-                    if desc:
-                        q = desc.replace('"', '\\"')
-                        lines.append(f"  description: \"{q}\"")
-
-                    args = tool.get('arguments') or {}
-                    if args:
-                        lines.append("  arguments:")
-                        for arg_name, arg_schema in args.items():
-                            if isinstance(arg_schema, dict):
-                                a_desc = arg_schema.get('description') or ''
-                            else:
-                                a_desc = str(arg_schema)
-                            a_desc_q = a_desc.replace('"', '\\"')
-                            lines.append(f"    {arg_name}: \"{a_desc_q}\"")
-                    lines.append("")
+                data = self._tools_text(self._get_filtered_metadata(mode))
             except Exception:
-                lines = []
+                data = '\n'
 
-            data = '\n'.join(lines).rstrip() + '\n'
             self._write_text(dest, data)
         return generated_files
+
+    def _tools_text(self, meta: dict) -> str:
+        """The ``{available_tools}`` block for one metadata set, in its order."""
+        lines = []
+        for meta_name, info in (meta or {}).items():
+            tool = info.get('tool') or {}
+            name = tool.get('name') or meta_name
+            desc = tool.get('description') or tool.get('strategic') or ''
+            lines.append(f"- name: {name}")
+            if desc:
+                q = desc.replace('"', '\\"')
+                lines.append(f"  description: \"{q}\"")
+
+            args = tool.get('arguments') or {}
+            if args:
+                lines.append("  arguments:")
+                for arg_name, arg_schema in args.items():
+                    if isinstance(arg_schema, dict):
+                        a_desc = arg_schema.get('description') or ''
+                    else:
+                        a_desc = str(arg_schema)
+                    a_desc_q = a_desc.replace('"', '\\"')
+                    lines.append(f"    {arg_name}: \"{a_desc_q}\"")
+            lines.append("")
+        return '\n'.join(lines).rstrip() + '\n'
 
     def generate_response_formats(self, force: bool = False) -> dict:
         """
@@ -212,6 +215,141 @@ class ToolRegistry:
                 json.dump(formats_dict, f, indent=2)
         return generated_files
 
+    def generate_session_profile(self, grants, handlers=None, force: bool = False) -> dict:
+        """Builds the tool block and strict schema for one session's grants.
+
+        A session may hold several capabilities at once, so its tool list is no
+        longer a mode constant. Each agent handler gets its own view (the tools
+        it can execute for these grants, see ``capabilities.HANDLER_CAPABILITIES``)
+        under ``cache/session/<handler>/``; the provider layer merges those files
+        last, so the granted set wins over the per-mode definition of the same
+        envelope name. A pure terminal or browser grant set produces exactly the
+        per-mode block, so nothing the model sees changes for today's sessions.
+        """
+        from src.computer import capabilities
+
+        grants = capabilities.normalize_grants(grants)
+        if not ({capabilities.TERMINAL, capabilities.BROWSER} & set(grants)):
+            # No agent capability in this session: blank the views so a previous
+            # session's granted set cannot keep overriding the catalogue.
+            self._clear_session_views(grants)
+            return {}
+        wanted = ([str(name).strip().lower() for name in handlers]
+                  if handlers else list(capabilities.HANDLER_SCHEMAS))
+        views = {}
+        for handler in wanted:
+            if handler not in capabilities.HANDLER_SCHEMAS:
+                continue
+            tools = capabilities.tools_for_handler(handler, grants)
+            if not tools:
+                continue
+            views[handler] = self._generate_session_view(
+                handler, grants, tools, force=force)
+        return views
+
+    def _session_dir(self, handler: str) -> str:
+        return os.path.join(self.get_cache_dir(), 'session', handler)
+
+    def _clear_session_views(self, grants) -> None:
+        """Empties the session files (a session without an agent capability)."""
+        signature = {"grants": list(grants), "tools": [], "handler": "",
+                     "gen": SCHEMA_GEN_VERSION}
+        for handler in ("terminal", "browser"):
+            dest = self._session_dir(handler)
+            self._write_text(os.path.join(dest, 'tools.txt'), '')
+            self._write_text(os.path.join(dest, 'response_formats.json'), '{}')
+            self._write_text(os.path.join(dest, 'profile.json'),
+                             json.dumps({**signature, "handler": handler}, indent=2) + '\n')
+
+    def _generate_session_view(self, handler: str, grants, tools, force: bool = False) -> dict:
+        """One handler's tool block and response format for a grant set."""
+        dest = self._session_dir(handler)
+        tools_path = os.path.join(dest, 'tools.txt')
+        formats_path = os.path.join(dest, 'response_formats.json')
+        meta_path = os.path.join(dest, 'profile.json')
+        signature = {
+            "grants": list(grants),
+            "tools": list(tools),
+            "handler": handler,
+            "gen": SCHEMA_GEN_VERSION,
+        }
+        if (not force and os.path.exists(tools_path)
+                and os.path.exists(formats_path) and os.path.exists(meta_path)):
+            try:
+                with open(meta_path, encoding='utf-8') as handle:
+                    if json.load(handle) == signature:
+                        return {"tools": tools_path, "response_formats": formats_path,
+                                "changed": False}
+            except (OSError, json.JSONDecodeError):
+                pass
+
+        meta = self._metadata_for_tools(tools, handler)
+        self._write_text(tools_path, self._tools_text(meta))
+
+        schema_name = None
+        formats = {}
+        try:
+            from src.computer import capabilities
+            schema_name = capabilities.HANDLER_SCHEMAS.get(handler)
+        except Exception:
+            schema_name = None
+        if schema_name:
+            try:
+                module = importlib.import_module(f'src.computer.schemas.{handler}')
+                entry = module.generate_response_formats_dict().get(schema_name)
+            except Exception as error:
+                logging.error(
+                    "Could not build the %s response format for grants %s: %s",
+                    handler, list(grants), error, exc_info=True)
+                entry = None
+            if entry:
+                entry = dict(entry)
+                if meta:
+                    from src.computer.schemas.strict import (
+                        build_strict_schema,
+                        build_strict_schema_flat,
+                    )
+                    description = entry.get('description')
+                    entry['strict_schema'] = build_strict_schema(
+                        schema_name, meta, description=description)
+                    # Browser tools all accept **kwargs, so the single-branch
+                    # fallback is safe there (see BUILD_STRICT_SCHEMA_FLAT).
+                    if handler == 'browser':
+                        entry['strict_schema_flat'] = build_strict_schema_flat(
+                            schema_name, meta, description=description)
+                formats[schema_name] = entry
+        self._write_text(formats_path, json.dumps(formats, indent=2))
+        self._write_text(meta_path, json.dumps(signature, indent=2) + '\n')
+        return {"tools": tools_path, "response_formats": formats_path,
+                "changed": True}
+
+    def _metadata_for_tools(self, tools, handler=None) -> dict:
+        """Manifest entries for a tool-name list, in declaration order.
+
+        The handler's own manifest is read first, so a grant set equal to a mode
+        produces that mode's block byte for byte; tools of a second capability
+        are appended after it.
+        """
+        from src.computer import capabilities
+
+        wanted = set(tools or ())
+        sources = []
+        if handler in (capabilities.TERMINAL, capabilities.BROWSER):
+            sources.append(handler)
+        for capability in (capabilities.TERMINAL, capabilities.BROWSER):
+            if capability not in sources:
+                sources.append(capability)
+        merged = {}
+        for capability in sources:
+            try:
+                meta = self._get_filtered_metadata(capability)
+            except Exception:
+                continue
+            for name, info in meta.items():
+                if name in wanted and name not in merged:
+                    merged[name] = info
+        return merged
+
     def generate_all(self, force: bool = False) -> dict:
         start = time.perf_counter()
         # Manifest fingerprint: prompt/cache files must never diverge from the
@@ -226,6 +364,10 @@ class ToolRegistry:
             'capabilities': self.generate_capability_catalogue(force=force),
         }
         self._write_manifest_fingerprint()
+        # Startup has no open session: drop any per-session view left by the
+        # previous run so a new session's grants are the only thing that shapes
+        # the catalogue (each handler rebuilds its own view on the next turn).
+        self._clear_session_views(())
         duration = time.perf_counter() - start
         logging.info(f"ToolRegistry.generate_all completed in {duration:.3f}s")
         return results

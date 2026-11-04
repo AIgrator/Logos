@@ -467,6 +467,7 @@ class BrowserHandler(BaseAgentHandler):
             history=self.model_history(),
             current_url=self.current_url(),
             available_skills=self.skills_block(),
+            available_tools=self.session_tools_block(),
         )
         return system_prompt, user_prompt
 

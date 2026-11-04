@@ -464,6 +464,27 @@ drift apart silently; `cache/capabilities/tools.json` is the generated
 catalogue. `AppController.session_capabilities` mirrors the open session's
 grants.
 
+The tool block and the response format follow the session's grants, not its
+mode (`src/computer/session_tools.py`, `src/llm/tool_catalog.py`).
+`ToolRegistry.generate_session_profile(grants, handlers)` writes
+`cache/session/<handler>/{tools.txt,response_formats.json,profile.json}`; the
+signature in `profile.json` (grants + tool names + schema generation) is checked
+while the prompt is built, so attaching a capability regenerates the view on the
+next turn and a pure `base+terminal` / `base+browser` grant set produces exactly
+the per-mode block and envelope, byte for byte. `HANDLER_CAPABILITIES` narrows
+that to what one handler can execute: terminal sees `base+terminal+browser`
+(it routes `browser_*` into the shared browser service), browser still sees only
+`base+browser` until the two loops merge. The provider layer (`tool_catalog`)
+merges `cache/session/*` over `cache/<mode>/*`, so the granted envelope wins
+under the same name (`terminal_tool_code` / `browser_tool_code`), and each
+provider keys its formatted-tool cache on `catalogue_stamp()` (file mtimes) so a
+grant change cannot be answered with yesterday's contract. The two agent
+`ToolCall` models (`schemas/terminal.py`, `schemas/browser.py`) list
+`AGENT_TOOL_NAMES` — the union of the three agent capabilities — because the
+envelope must accept a tool of a capability attached beside it; permission is
+decided at execution time. Startup clears the session views, since no session is
+open yet.
+
 `src/project_manager.py` owns this layout. The project root (not the Logos install
 directory) is the terminal/browser `working_directory` and the root passed to
 `Indexer`; `.logos` is ignored by the indexer. Do not hardcode `Indexer('.')` or

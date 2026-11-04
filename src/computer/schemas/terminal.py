@@ -3,8 +3,13 @@ import json
 from pydantic import BaseModel, Field
 from typing import Any, Literal
 
+from src.computer.schemas.agent_tools import AGENT_TOOL_NAMES
+
 class ToolCall(BaseModel):
-    name: Literal['execute_shell', 'list_directory', 'write_file', 'search_file_content', 'finish', 'find_files', 'create_directory', 'replace', 'replace_many', 'web_search', 'web_fetchs', 'download_file', 'path_exists', 'display_message', 'communicate_to_user', 'read_files', 'delete_files', 'move_files', 'copy_files', 'poll_shell_job', 'stop_shell_job', 'wait_seconds', 'get_clipboard_content', 'use_skill', 'mcp_list', 'mcp_get', 'mcp_call', 'update_plan'] = Field(..., example="execute_shell")
+    # Union of the agent tools: a session may grant the browser capability next
+    # to the terminal one, so the envelope must accept its names. Permission is
+    # checked at execution (TerminalHandler routes browser_* to the service).
+    name: Literal[*AGENT_TOOL_NAMES] = Field(..., example="execute_shell")
     arguments: dict[str, Any] | None = Field(default=None, example={"command": "ls -l"})
 
 class TerminalToolCodePayload(BaseModel):

@@ -280,18 +280,27 @@ def compact_chat_history(history: list, settings: dict | None = None) -> list:
 
 
 def tool_schema_text(mode: str, schema_name: str | None) -> str:
-    """Serialized tool definition sent with a structured request, if any."""
+    """Serialized tool definition sent with a structured request, if any.
+
+    The session-granted copy (``cache/session/<mode>/response_formats.json``)
+    wins over the per-mode file, matching what the providers actually send.
+    """
     if not schema_name or not mode:
         return ""
-    path = os.path.join("cache", str(mode), "response_formats.json")
-    try:
-        with open(path, encoding="utf-8") as handle:
-            formats = json.load(handle)
-    except (OSError, json.JSONDecodeError):
-        logger.debug("Could not load tool schema for %s/%s", mode, schema_name)
-        return ""
-    info = formats.get(schema_name) if isinstance(formats, dict) else None
+    info = None
+    for path in (os.path.join("cache", "session", str(mode), "response_formats.json"),
+                 os.path.join("cache", str(mode), "response_formats.json")):
+        try:
+            with open(path, encoding="utf-8") as handle:
+                formats = json.load(handle)
+        except (OSError, json.JSONDecodeError):
+            continue
+        info = formats.get(schema_name) if isinstance(formats, dict) else None
+        if isinstance(info, dict):
+            break
+        info = None
     if not isinstance(info, dict):
+        logger.debug("Could not load tool schema for %s/%s", mode, schema_name)
         return ""
     params = info.get("strict_schema") or info.get("schema") or {}
     return json.dumps(

@@ -140,7 +140,7 @@ class Brain:
 
         return system_prompt, user_prompt
 
-    def get_terminal_prompts(self, user_request: str, os_info: str, history: list, available_skills: str = "", available_mcp_servers: str = "") -> tuple[str, str]:
+    def get_terminal_prompts(self, user_request: str, os_info: str, history: list, available_skills: str = "", available_mcp_servers: str = "", available_tools: str = "") -> tuple[str, str]:
         """Formats the system and user prompts for the terminal agent."""
         system_template = self.get_terminal_system_template()
         user_template = self.get_terminal_user_template()
@@ -158,7 +158,7 @@ class Brain:
         response_format_block = f"{instructions}\n\n{example}"
 
         system_prompt = self._apply_replacements(system_template, {
-            "available_tools": self.get_terminal_tools(),
+            "available_tools": available_tools or self.get_terminal_tools(),
             "available_skills": available_skills or "No skills are installed.",
             "available_mcp_servers": available_mcp_servers or "No MCP servers are configured.",
             "response_format_instructions": response_format_block
@@ -197,7 +197,7 @@ class Brain:
             logging.error(f"Could not load browser response formats: {e}")
             return {}
 
-    def get_browser_prompts(self, user_request: str, os_info: str, history: list, current_url: str = "not open yet", available_skills: str = "") -> tuple[str, str]:
+    def get_browser_prompts(self, user_request: str, os_info: str, history: list, current_url: str = "not open yet", available_skills: str = "", available_tools: str = "") -> tuple[str, str]:
         """Formats the system and user prompts for the browser agent."""
         system_template = self.get_browser_system_template()
         user_template = self.get_browser_user_template()
@@ -212,7 +212,7 @@ class Brain:
         response_format_block = f"{instructions}\n\n{example}"
 
         system_prompt = self._apply_replacements(system_template, {
-            "available_tools": self.get_browser_tools(),
+            "available_tools": available_tools or self.get_browser_tools(),
             "available_skills": available_skills or "No skills are installed.",
             "response_format_instructions": response_format_block
         })

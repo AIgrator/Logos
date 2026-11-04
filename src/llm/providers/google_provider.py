@@ -645,26 +645,15 @@ class GoogleProvider(BaseLLMProvider):
         return self._prepare_contents(prompt, attachments, history)
 
     def _load_strict_schema(self, schema_name: str):
-        """Load the strict (constrained-decoding) schema for a response format."""
-        if not schema_name:
-            return None
-        for file_path in (
-            'cache/terminal/response_formats.json',
-            'cache/vision/response_formats.json',
-            'cache/browser/response_formats.json',
-        ):
-            try:
-                with open(file_path, encoding='utf-8') as f:
-                    schemas = json.load(f)
-            except (FileNotFoundError, json.JSONDecodeError):
-                continue
-            except Exception as e:
-                logging.error(f"Failed to load '{file_path}' for strict schema: {e}")
-                continue
-            info = schemas.get(schema_name)
-            if info and info.get("strict_schema"):
-                return info["strict_schema"]
-        return None
+        """Load the strict (constrained-decoding) schema for a response format.
+
+        The session files are searched first (see ``src.llm.tool_catalog``), so a
+        session that attached a capability gets its granted tool set even when
+        the per-mode file for that envelope name is older.
+        """
+        from src.llm import tool_catalog
+
+        return tool_catalog.strict_schema(schema_name)
 
     def _supports_thinking_summary(self) -> bool:
         model = (self.model or "").lower()

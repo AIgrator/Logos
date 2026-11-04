@@ -3,8 +3,12 @@ import json
 from pydantic import BaseModel, Field
 from typing import Any, Literal
 
+from src.computer.schemas.agent_tools import AGENT_TOOL_NAMES
+
 class ToolCall(BaseModel):
-    name: Literal['browser_goto', 'browser_snapshot', 'browser_click', 'browser_fill', 'browser_select_option', 'browser_hover', 'browser_press', 'browser_read', 'browser_console', 'browser_network', 'browser_screenshot', 'browser_find', 'browser_wait_for', 'browser_navigate_back', 'browser_tabs', 'browser_handle_dialog', 'browser_close', 'read_files', 'list_directory', 'search_file_content', 'finish', 'communicate_to_user', 'use_skill', 'update_plan'] = Field(..., example="browser_goto")
+    # Union of the agent tools (see schemas/agent_tools.py): the session's grants,
+    # not the envelope, decide which of them may run.
+    name: Literal[*AGENT_TOOL_NAMES] = Field(..., example="browser_goto")
     arguments: dict[str, Any] | None = Field(default=None, example={"url": "https://example.com"})
 
 class BrowserToolCodePayload(BaseModel):

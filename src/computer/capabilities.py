@@ -139,6 +139,25 @@ MODE_GRANTS: dict[str, tuple[str, ...]] = {
     "vision": (VISION,),
 }
 
+#: Envelope each agent handler answers with (the model's response format).
+HANDLER_SCHEMAS: dict[str, str] = {
+    TERMINAL: "terminal_tool_code",
+    BROWSER: "browser_tool_code",
+}
+
+#: Capabilities each agent handler can *execute* today.
+#:
+#: The terminal handler dispatches ``browser_*`` calls into the shared browser
+#: service (see ``BrowserService``), so it can run every granted agent tool. The
+#: browser handler still owns only ``base`` + ``browser``: a terminal capability
+#: attached next to it is used by switching the panel to Terminal, which keeps
+#: the same session and journal. This asymmetry disappears when the two loops
+#: become one handler (Phase 1 of [the vision plan](../../docs/future_vision.md)).
+HANDLER_CAPABILITIES: dict[str, tuple[str, ...]] = {
+    TERMINAL: (BASE, TERMINAL, BROWSER),
+    BROWSER: (BASE, BROWSER),
+}
+
 #: A fresh session without a mode yet starts here.
 DEFAULT_GRANTS = MODE_GRANTS["chat"]
 
@@ -169,6 +188,20 @@ def tools_for_grants(grants: Iterable[str]) -> tuple[str, ...]:
 def tools_for_mode(mode: str) -> tuple[str, ...]:
     """Tool names a session in ``mode`` is granted today."""
     return tools_for_grants(grants_for_mode(mode))
+
+
+def tools_for_handler(handler: str, grants: Iterable[str]) -> tuple[str, ...]:
+    """Tools one agent handler can run for a session's grants.
+
+    Never wider than the grants: an ungranted capability's tools stay invisible
+    even when the handler is able to execute them.
+    """
+    handler = (handler or "").strip().lower()
+    allowed = HANDLER_CAPABILITIES.get(handler)
+    if allowed is None:
+        return tools_for_grants(grants)
+    granted = set(tools_for_grants(grants))
+    return tuple(name for name in tools_for_grants(allowed) if name in granted)
 
 
 def merge_grants(*sets: Iterable[str]) -> tuple[str, ...]:
