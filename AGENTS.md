@@ -575,6 +575,48 @@ through `on_settings_changed` and Settings → Terminal shows the same value.
 The chip is hidden outside Terminal mode and participates in both toolbar
 layouts (`_reflow_toolbar`).
 
+## Screenshots (Terminal mode)
+
+`screenshot` (`src/computer/tools/terminal/system/screenshot.py`, capture in
+`src/computer/screen_capture.py`) lets the Terminal agent look at the desktop
+instead of guessing. With no arguments it captures the primary display;
+`window_title` (case-insensitive part of the title) or `process_id` captures one
+window; `left`/`top`/`right`/`bottom` capture a rectangle given by its top-left
+and bottom-right corners. Window capture is Windows-only: `PrintWindow` with
+`PW_RENDERFULLCONTENT` first (the only way to read a window that other windows
+cover), then a `BitBlt` of the window DC, then bringing the window forward and
+grabbing its rectangle off the screen; a single-color frame counts as a failed
+render. Screen and region grabs go through mss, on every platform, always on
+the primary monitor for the full-screen case. All coordinates are physical
+pixels - `main.py` asks for Per-Monitor V2 DPI awareness before `QApplication`
+exists, so the tool, mss and the Qt window share one space. A partial region (1
+to 3 coordinates) is an error, not a guess, and so is `right <= left` or
+`bottom <= top`.
+
+The PNG is saved to `<project>/.logos/screenshots/screenshot_<timestamp>.png`
+(the app's `APP_SCREENSHOTS_DIR` when no project is open) and the result carries
+`path`, `relative_path`, `width`, `height`, `bytes`, `target`, `method`
+(`printwindow` / `screen` / `region`) and `attached`. The newest 200 files are
+kept, older ones are pruned like `mcp_outputs`. For screen and region captures
+the tool hides Logos' own `QMainWindow`s through
+`QMetaObject.invokeMethod(..., BlockingQueuedConnection)`, waits for the
+compositor, then restores them, so the app never covers what is being captured;
+`hide_app: false` keeps it in the picture, and capturing Logos' own window with
+the default `hide_app` is rejected with a hint to pass `false`.
+
+The image itself reaches the model once: `screenshot` calls
+`Computer.set_pending_screenshot`, and `TerminalHandler._request_attachments`
+(consumed by `BaseAgentHandler._plan_next_action`) reads up to the last four
+pending files into the next request and forgets them, unlike Browser mode where
+a screenshot lives until the next navigation. A fresh task drops leftovers
+(`TerminalHandler.start_task`). Attachment is gated only by a catalogue entry
+that explicitly lists modalities without `image`; an uncatalogued model (older
+or newer than `models.json`, or a hand-typed custom one) still gets the image,
+like Browser mode, so a text-only model fails the request loudly instead of the
+agent silently working blind. The result's `attached: false` plus `note` is
+what the model sees when the catalogue said no. `screenshot` is read-only for
+`terminal_policy.py`, so it never asks for approval.
+
 ## Browser engine
 
 Browser mode drives a real Chromium through Playwright, and that binary is not

@@ -112,6 +112,16 @@ def _action_summary(action_name: str, action_args: dict) -> str:
     if name == 'wait_seconds':
         seconds = args.get('seconds', '?')
         return f"Waiting {seconds}s"
+    if name == 'screenshot':
+        if all(args.get(key) is not None for key in ('left', 'top', 'right', 'bottom')):
+            return (f"Screenshot · region {args.get('left')},{args.get('top')} → "
+                    f"{args.get('right')},{args.get('bottom')}")
+        window = _shorten_text(args.get('window_title'), 50)
+        if window:
+            return f"Screenshot · window '{window}'"
+        if args.get('process_id'):
+            return f"Screenshot · window pid {args.get('process_id')}"
+        return "Screenshot · full screen"
     if name in {'poll_shell_job', 'stop_shell_job'}:
         job_id = args.get('job_id', '?')
         verb = "Check" if name == 'poll_shell_job' else "Stop"
@@ -284,6 +294,40 @@ class TerminalHandler(BaseAgentHandler):
         except Exception as error:
             logging.warning(f"{type(self).__name__} MCP servers lookup failed: {error}")
             return "No MCP servers are configured."
+
+    def start_task(self, user_text: str):
+        """A fresh task never inherits captures of an abandoned one."""
+        if self.state == VisionState.IDLE:
+            clear = getattr(self.computer, "clear_pending_screenshots", None)
+            if callable(clear):
+                clear()
+        super().start_task(user_text)
+
+    def _request_attachments(self) -> list:
+        """Attach the screenshots captured since the previous request, once.
+
+        The images are consumed here rather than kept like the Browser one: a
+        screenshot is a snapshot of a moment, and re-sending it on every later
+        turn would cost tokens without telling the model anything new.
+        """
+        computer = getattr(self, "computer", None)
+        take = getattr(computer, "take_pending_screenshots", None)
+        paths = take() if callable(take) else []
+        attachments = []
+        for path in paths:
+            try:
+                with open(path, "rb") as handle:
+                    attachments.append(handle.read())
+            except OSError as error:
+                logging.warning(f"Could not attach the screenshot '{path}': {error}")
+        if attachments:
+            logging.info("Attaching %d screenshot(s) to the next Terminal request: %s",
+                         len(attachments), ", ".join(paths))
+        return attachments
+
+    def _payload_image_count(self) -> int:
+        computer = getattr(self, "computer", None)
+        return len(getattr(computer, "pending_screenshots", []) or [])
 
     def _dedent_lines(self, lines: list[str]) -> list[str]:
         """
@@ -1075,6 +1119,34 @@ class TerminalHandler(BaseAgentHandler):
                 'content': text,
                 'plain_content': text,
                 'copy_payloads': {'output': text},
+            }
+
+        elif tool_name == 'screenshot':
+            path = str(result.get('path') or '')
+            target = str(result.get('target') or 'screenshot')
+            width = result.get('width')
+            height = result.get('height')
+            dims = f"{width}x{height}" if width and height else "unknown size"
+            attached = bool(result.get('attached'))
+            if attached:
+                verdict = ("The image is attached to this turn: look at it before "
+                           "deciding what to do next.")
+            else:
+                verdict = ("The active model cannot receive images, so the file is only "
+                           "an artifact on disk; switch to a model with image input to see it.")
+            note = str(result.get('note') or '')
+            hint = str(result.get('hint') or '')
+            output_for_llm = f"**Tool Result:** Screenshot saved: {path} ({dims}, {target}). {verdict}"
+            if hint:
+                output_for_llm += f"\n{hint}"
+            details = "\n".join(part for part in (path, dims, target, note, hint) if part)
+            output_for_ui = {
+                'type': 'collapsible',
+                'title': f"Screenshot · {target}",
+                'content': details,
+                'plain_content': f"Screenshot: {path}\n{dims}\n{target}",
+                'copy_payloads': {'output': path},
+                'title_color': self._theme("SUCCESS_COLOR" if attached else "WARNING_COLOR"),
             }
 
         else:

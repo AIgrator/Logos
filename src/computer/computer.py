@@ -37,6 +37,9 @@ class Computer:
         self.progress_callback = None
         from src.computer.shell_jobs import ShellJobManager
         self.shell_jobs = ShellJobManager()
+        # Set by the Terminal `screenshot` tool, consumed once by the next
+        # request so the model actually sees what it captured.
+        self.pending_screenshots = []
         self._load_mode_tools(mode)
 
     def _resolve_path(self, path: str) -> str:
@@ -46,6 +49,24 @@ class Computer:
         if self.working_directory:
             return os.path.join(self.working_directory, path)
         return path
+
+    def set_pending_screenshot(self, path: str) -> None:
+        """Remembers a screenshot for the next request to attach."""
+        path = str(path or "")
+        if not path:
+            return
+        # A batch may capture several views at once (window, then a region);
+        # keep the newest few instead of silently dropping the earlier ones.
+        self.pending_screenshots = (self.pending_screenshots + [path])[-4:]
+
+    def take_pending_screenshots(self) -> list:
+        """Hands the remembered screenshots over once, then forgets them."""
+        paths, self.pending_screenshots = self.pending_screenshots, []
+        return paths
+
+    def clear_pending_screenshots(self) -> None:
+        """Drops captures that never reached a request (stopped task)."""
+        self.pending_screenshots = []
 
     def _load_mode_tools(self, mode: str):
         """

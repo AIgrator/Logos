@@ -214,6 +214,7 @@ Vision mode does not use a local tool manifest. Actions come from the provider's
 *   **File System**: `list_directory`, `read_files`, `write_file`, `search_file_content`, `find_files`, `create_directory`, `delete_files`, `move_files`, `copy_files`, `path_exists`.
 *   **File Editing**: `replace`, `replace_many`.
 *   **System**: `execute_shell` (incl. background jobs), `poll_shell_job`, `stop_shell_job`, `wait_seconds`.
+*   **Desktop Capture**: `screenshot` grabs the whole primary display, one window (by part of its title or by PID) or a rectangle given by its top-left and bottom-right corners, saves the PNG under `<project>/.logos/screenshots/` and attaches it to the next turn so the model actually sees the result. Logos hides its own window during a screen or region capture, and `hide_app: false` keeps it in the picture.
 *   **Web Tools**: `web_search`, `web_fetchs`, `download_file`.
 *   **MCP**: `mcp_list`, `mcp_get`, `mcp_call` for tools exposed by configured MCP servers (see the [MCP guide](./docs/mcp.md)).
 *   **Skills**: `use_skill` loads an installed Agent Skill on demand (see the [skills guide](./docs/skills.md)).

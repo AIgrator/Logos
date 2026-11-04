@@ -13,6 +13,7 @@ from src.computer.tools.terminal.fs.write_file import write_file
 from src.computer.tools.terminal.mcp_tools import mcp_call, mcp_get, mcp_list
 from src.computer.tools.terminal.system.execute_shell import execute_shell
 from src.computer.tools.terminal.system.poll_shell_job import poll_shell_job
+from src.computer.tools.terminal.system.screenshot import screenshot
 from src.computer.tools.terminal.system.stop_shell_job import stop_shell_job
 from src.computer.tools.terminal.system.wait_seconds import wait_seconds
 from src.computer.tools.web.download_file import download_file
@@ -40,6 +41,7 @@ TOOLS_METADATA = {
     "write_file": write_file,
     "execute_shell": execute_shell,
     "poll_shell_job": poll_shell_job,
+    "screenshot": screenshot,
     "stop_shell_job": stop_shell_job,
     "wait_seconds": wait_seconds,
     "download_file": download_file,

@@ -36,7 +36,7 @@ DEFAULT_ACCESS_MODE = "ask"
 _READ_ONLY_TOOLS = {
     "read_files", "list_directory", "search_file_content", "find_files",
     "path_exists", "get_clipboard_content", "use_skill", "wait_seconds",
-    "poll_shell_job", "stop_shell_job", "mcp_list", "mcp_get",
+    "poll_shell_job", "stop_shell_job", "mcp_list", "mcp_get", "screenshot",
 }
 
 _NETWORK_TOOLS = {"web_fetchs", "web_search", "download_file"}
@@ -59,6 +59,7 @@ _ACTION_SUMMARIES = {
     "web_fetchs": "Open web pages",
     "web_search": "Search the web",
     "mcp_call": "Run an MCP tool",
+    "screenshot": "Take a screenshot",
 }
 
 _SENSITIVE_DIRS = {".ssh", ".aws", ".azure", ".gnupg", ".kube"}
