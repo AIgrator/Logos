@@ -11,6 +11,8 @@ from PySide6.QtCore import QObject, Slot, QThread, QTimer, Signal
 
 from states import VisionState
 from ui.terminal_html_formatter import TerminalHtmlFormatter
+from src.browser.policy import UNTRUSTED_RESULT_TOOLS
+from src.computer import capabilities
 from src.computer.computer import Computer
 from src.computer.terminal_policy import evaluate as evaluate_terminal_access
 from src.computer.terminal_policy import normalize_mode as normalize_access_mode
@@ -309,25 +311,54 @@ class TerminalHandler(BaseAgentHandler):
         The images are consumed here rather than kept like the Browser one: a
         screenshot is a snapshot of a moment, and re-sending it on every later
         turn would cost tokens without telling the model anything new.
+
+        A `browser_screenshot` taken by this turn is added too (peeked, not
+        consumed, exactly like Browser mode): without it a browser step inside a
+        terminal turn could only describe the picture, never show it.
         """
         computer = getattr(self, "computer", None)
         take = getattr(computer, "take_pending_screenshots", None)
         paths = take() if callable(take) else []
         attachments = []
+        shown_paths = []
         for path in paths:
             try:
                 with open(path, "rb") as handle:
                     attachments.append(handle.read())
+                shown_paths.append(path)
             except OSError as error:
                 logging.warning(f"Could not attach the screenshot '{path}': {error}")
-        if attachments:
+        browser_path = self._browser_screenshot_path()
+        if browser_path:
+            try:
+                with open(browser_path, "rb") as handle:
+                    attachments.append(handle.read())
+                shown_paths.append(browser_path)
+            except OSError as error:
+                logging.warning(f"Could not attach the browser screenshot '{browser_path}': {error}")
+        if shown_paths:
             logging.info("Attaching %d screenshot(s) to the next Terminal request: %s",
-                         len(attachments), ", ".join(paths))
+                         len(shown_paths), ", ".join(shown_paths))
         return attachments
+
+    def _browser_screenshot_path(self) -> str:
+        """Latest browser screenshot, only while this turn is using the browser."""
+        if not str(self._pending_action_name or "").startswith("browser_"):
+            return ""
+        service = getattr(self.controller, "browser_service", None)
+        mgr = service.manager() if service is not None else None
+        peek = getattr(mgr, "peek_screenshot_path", None)
+        try:
+            return peek() if callable(peek) else ""
+        except Exception:
+            return ""
 
     def _payload_image_count(self) -> int:
         computer = getattr(self, "computer", None)
-        return len(getattr(computer, "pending_screenshots", []) or [])
+        count = len(getattr(computer, "pending_screenshots", []) or [])
+        if self._browser_screenshot_path():
+            count += 1
+        return count
 
     def _dedent_lines(self, lines: list[str]) -> list[str]:
         """
@@ -526,6 +557,13 @@ class TerminalHandler(BaseAgentHandler):
         if not isinstance(action_args, dict):
             action_args = {}
 
+        # A session can grant the browser capability next to terminal tools;
+        # those calls run on the shared browser thread (Playwright affinity),
+        # not on the terminal exec thread.
+        if self._is_browser_action(action_name):
+            self._run_browser_action(action_name, action_args)
+            return None
+
         if not self._authorize_action(action_name, action_args):
             self._report_denied(action_name, action_args)
             return None
@@ -569,6 +607,108 @@ class TerminalHandler(BaseAgentHandler):
         self._tool_in_flight = True
         self._exec_worker.dispatch.emit(self._exec_ticket, action_name, action_args)
         return None
+
+    # -- browser capability routed to the shared browser thread --------
+
+    def _is_browser_action(self, action_name) -> bool:
+        return str(action_name or "").startswith("browser_")
+
+    def _browser_granted(self, action_name: str) -> bool:
+        grants = getattr(self.controller, "session_capabilities", ()) or ()
+        return action_name in capabilities.tools_for_grants(grants)
+
+    def _run_browser_action(self, action_name: str, action_args: dict):
+        """Sends a browser_* call to the app's single browser thread.
+
+        Browser approval is the browser policy's own (classify_action), so the
+        terminal access policy is deliberately skipped here: the call does not
+        touch the shell, and the browser dialog already fails closed.
+        """
+        service = getattr(self.controller, "browser_service", None)
+        if service is None or not self._browser_granted(action_name):
+            message = (f"**Tool Result:** Error: the browser capability is not "
+                       f"attached to this session, so '{action_name}' is unavailable.")
+            if self._active_step is not None:
+                self._finish_active_step(
+                    status="error", output=self._strip_result_prefix(message),
+                    expanded=True)
+            else:
+                self._add_result_card(message, f"{action_name} · error", "error")
+            self.record_tool_result(message, status="error", name=action_name)
+            self._after_action_result(message, abort=True)
+            return
+        description = " ".join(str((action_args or {}).get("description") or "").split())
+        label = description or _action_summary(action_name, action_args)
+        if len(label) > 120:
+            label = label[:119] + "…"
+        self._pending_action_label = label
+        self._update_activity_step(self._active_step, title=label)
+        self._pending_action_name = action_name
+        self._pending_action_args = action_args
+        self._exec_ticket += 1
+        logging.info(f"TerminalHandler: dispatching browser ticket {self._exec_ticket} "
+                     f"({action_name}) to the shared browser thread.")
+        self._tool_in_flight = True
+        service.dispatch(self._exec_ticket, action_name, action_args,
+                         self._exec_relay)
+
+    @Slot(int, bool, str)
+    def _on_browser_finished(self, ticket: int, ok: bool, text: str):
+        """A browser step finished; render it in this turn like any tool."""
+        if ticket != self._exec_ticket:
+            logging.info(f"Stale browser result ignored (ticket {ticket} != {self._exec_ticket}).")
+            return
+        self._tool_in_flight = False
+        try:
+            self.ui.hide_tool_progress(ticket)
+        except Exception:
+            pass
+        action_name = self._pending_action_name or "browser"
+        if not ok:
+            denied = str(text or "").lower().startswith("action denied")
+            message = f"**Tool Result:** Error: {text}"
+            if self._active_step is not None:
+                self._finish_active_step(
+                    status="denied" if denied else "error",
+                    output=self._strip_result_prefix(message), expanded=True)
+            else:
+                self._add_result_card(
+                    message, f"{action_name} · {'denied' if denied else 'error'}",
+                    "denied" if denied else "error")
+            self.record_tool_result(
+                message, status="denied" if denied else "error", name=action_name)
+            self._after_action_result(message, abort=True)
+            return
+        output = text or "(ok, no output)"
+        if self._active_step is not None:
+            self._finish_active_step(output=output)
+        else:
+            self._add_result_card(output, f"{action_name} · ok")
+        if action_name in UNTRUSTED_RESULT_TOOLS:
+            result_text = (
+                "**Tool Result:**\n<untrusted_page_content>\n"
+                f"{output}\n</untrusted_page_content>")
+        else:
+            result_text = f"**Tool Result:**\n```\n{output}\n```"
+        self.record_tool_result(result_text, name=action_name, display=output)
+        self._after_action_result(result_text)
+
+    @Slot(int, str)
+    def _on_browser_error(self, ticket: int, error_message: str):
+        self._on_tool_error(ticket, error_message)
+
+    @Slot(int, object)
+    def _on_browser_approval(self, ticket: int, checks):
+        """GUI-thread modal for a risky browser step (fail closed)."""
+        service = getattr(self.controller, "browser_service", None)
+        approved = False
+        if service is not None and ticket == self._exec_ticket:
+            try:
+                approved = bool(self.controller.ask_safety_approval(checks))
+            except Exception as e:
+                logging.error(f"Browser approval dialog failed: {e}")
+        if service is not None:
+            service.resolve_approval(ticket, approved)
 
     def _handle_web_request(self, action_name: str, action_args: dict):
         """ Handles web_fetchs and web_search asynchronously using a WebTaskThread."""
@@ -1553,6 +1693,15 @@ class TerminalHandler(BaseAgentHandler):
             self._awaiting_job_id = None
 
     def _cleanup_task(self):
+        if self._tool_in_flight:
+            # A browser step does not run on the terminal exec thread; drop it
+            # through the shared service so its queued work never lands later.
+            try:
+                service = getattr(self.controller, "browser_service", None)
+                if service is not None:
+                    service.cancel()
+            except Exception as e:
+                logging.warning(f"Browser cancel failed: {e}")
         self._exec_ticket += 1
         self._tool_in_flight = False
         self.cancel_job_wait()

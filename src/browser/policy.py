@@ -35,6 +35,12 @@ _SENSITIVE_FIELD_WORDS = {
     "api key", "token", "private key", "seed phrase", "recovery phrase",
 }
 
+# Tool results that carry page-authored text (untrusted data, not orders).
+UNTRUSTED_RESULT_TOOLS = frozenset({
+    "browser_read", "browser_snapshot", "browser_find", "browser_eval",
+    "browser_console", "browser_network",
+})
+
 _dns_cache: dict[str, tuple[str, ...]] = {}
 _dns_lock = threading.Lock()
 

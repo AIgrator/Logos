@@ -65,7 +65,7 @@ class BrowserManager:
                  timeout_ms: int = 30000, block_ads: bool = True,
                  easylist_path: str | None = None, allowed_domains=None,
                  network_access: str = DEFAULT_NETWORK_ACCESS,
-                 log_dir: str | None = None):
+                 log_dir: str | None = None, screenshot_dir: str = "screenshots"):
         self.headless = headless
         self.profile_dir = profile_dir
         self.timeout_ms = timeout_ms
@@ -74,6 +74,9 @@ class BrowserManager:
         # Console/network capture: memory rings always, a file when log_dir is
         # set (<project>/.logos/browser_logs). See browser/logs.py.
         self._log_dir = log_dir or ""
+        # Where browser_screenshot saves its PNGs (<project>/.logos/screenshots
+        # when a project is open; the owner decides, see BrowserService).
+        self.screenshot_dir = screenshot_dir or "screenshots"
         self.logs = BrowserEventLog()
         self._diag_pages = set()  # id(page) with console/network listeners
         self.allowed_domains = list(allowed_domains or [])
@@ -1309,14 +1312,31 @@ class BrowserManager:
         import os
         from datetime import datetime
         self.ensure_launched()
-        os.makedirs("screenshots", exist_ok=True)
+        os.makedirs(self.screenshot_dir, exist_ok=True)
         path = os.path.join(
-            "screenshots",
+            self.screenshot_dir,
             f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png")
         self.screenshot(path)
+        self._prune_screenshots()
         self._last_screenshot_path = path
         logger.info(f"Browser screenshot saved: {path}")
         return path
+
+    def _prune_screenshots(self, keep: int = 200) -> None:
+        """Keeps the newest N shots so a long project never grows forever."""
+        try:
+            import os
+            names = [name for name in os.listdir(self.screenshot_dir)
+                     if name.lower().endswith(".png")]
+            paths = [os.path.join(self.screenshot_dir, name) for name in names]
+            paths.sort(key=os.path.getmtime, reverse=True)
+            for stale in paths[keep:]:
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
+        except OSError as error:
+            logger.debug(f"Could not prune screenshots: {error}")
 
     def consume_screenshot_path(self) -> str | None:
         """Returns the pending screenshot path once (then clears it)."""

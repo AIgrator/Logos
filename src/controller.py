@@ -30,7 +30,7 @@ from ui.theme_manager import ThemeManager
 from handlers.chat_handler import ChatHandler
 from handlers.vision_handler import VisionHandler
 from handlers.terminal_handler import TerminalHandler
-from handlers.browser_handler import BrowserHandler
+from handlers.browser_handler import BrowserHandler, BrowserService
 from states import ControllerState, VisionState
 from hotkey_manager import HotkeyManager
 from src.computer.computer import Computer
@@ -185,9 +185,15 @@ class AppController(QObject):
                                  working_directory=self.working_directory)
         self._last_llm_request = None  # (user_prompt, attachments, system_prompt, history, schema) for Retry
         self._last_llm_error = False  # True if the last request ended with an error card
+        # One Chromium for the whole app, on its own long-lived thread: a panel
+        # switch or a Terminal Stop must never spawn a second browser.
+        self.browser_service = BrowserService(
+            settings_provider=lambda: self.settings,
+            working_directory=self.working_directory,
+            settings_manager=self.settings_manager)
         self.vision_handler = VisionHandler(self)
         self.terminal_handler = TerminalHandler(self, self.theme_manager, working_directory=self.working_directory)
-        self.browser_handler = BrowserHandler(self, working_directory=self.working_directory)
+        self.browser_handler = BrowserHandler(self)
         comp_duration = time.perf_counter() - comp_start
         logging.info(f"LocalDesktopComputer initialized in {comp_duration:.3f}s")
 
@@ -445,10 +451,9 @@ class AppController(QObject):
         except Exception as e:
             logging.warning(f"MCP shutdown failed: {e}")
         try:
-            handler = getattr(self, "browser_handler", None)
-            shutdown = getattr(handler, "shutdown", None)
-            if callable(shutdown):
-                shutdown()
+            service = getattr(self, "browser_service", None)
+            if service is not None:
+                service.shutdown()
         except Exception as e:
             logging.warning(f"Browser shutdown failed during shutdown: {e}")
         try:
@@ -3326,8 +3331,7 @@ class AppController(QObject):
 
         # Live ad-blocking toggle (no browser restart needed).
         try:
-            computer = getattr(self.browser_handler, "computer", None)
-            mgr = getattr(computer, "browser_manager", None) if computer else None
+            mgr = self.browser_service.manager() if self.browser_service else None
             if mgr is not None and hasattr(mgr, "set_block_ads"):
                 browser_settings = (new_settings.get("browser", {}) or {})
                 mgr.set_block_ads(bool(browser_settings.get("block_ads", True)))

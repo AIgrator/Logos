@@ -469,6 +469,23 @@ directory) is the terminal/browser `working_directory` and the root passed to
 `Indexer`; `.logos` is ignored by the indexer. Do not hardcode `Indexer('.')` or
 `os.getcwd()` for project-scoped paths.
 
+`BrowserService` (`src/handlers/browser_handler.py`) owns the app's single
+`BrowserManager` and the plain thread it runs on (`BrowserExecWorker`, name
+`browser-exec`), so a panel switch or a hard Terminal Stop never starts a second
+Chromium. Both handlers dispatch through it and pass their own GUI-thread
+`ToolExecRelay`, so a browser step renders in the turn that asked for it:
+`TerminalHandler.execute_action` routes every `browser_*` call there (before the
+terminal access policy, since the browser policy classifies it), and
+`BrowserHandler.computer` is just a property over the service's Computer.
+`AppController.browser_service` is created before the handlers and shut down in
+`cleanup()`; `BrowserHandler.shutdown()` only delegates. Do not build a
+`Computer(mode='browser')` or a `BrowserManager` anywhere else — one profile and
+one login state are the point. `browser_screenshot` saves into
+`<project>/.logos/screenshots` (newest 200 kept; the configured app folder when
+no project is open) through `BrowserManager.screenshot_dir`, and the PNG is
+attached to the next request: persistently in Browser mode, and in a terminal
+turn while its last step was a browser one (`TerminalHandler._request_attachments`).
+
 ## Settings
 
 Settings is a full-window page, not a dialog: `src/ui/settings_window.py::SettingsPage`

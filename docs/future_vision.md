@@ -42,9 +42,10 @@ and the response format are all mode-shaped.
 
 **Handlers are mode-shaped.** `TerminalHandler`, `BrowserHandler` and
 `VisionHandler` share the same loop from `BaseAgentHandler` (observe → act →
-assess), but each owns its resources: Terminal owns `ShellJobManager` and the
-MCP manager, Browser owns the Playwright `BrowserManager` and Chromium, Vision
-owns the provider's Computer Use chain. `ChatHandler` has no tool loop at all.
+assess). Terminal owns `ShellJobManager` and the MCP manager; the Playwright
+`BrowserManager` and Chromium belong to the whole app (`BrowserService`, see
+Phase 1) and both agent handlers dispatch into it; Vision owns the provider's
+Computer Use chain. `ChatHandler` has no tool loop at all.
 
 **The UI is mode-shaped.** A mode selector switches handlers, `_active_mode_key`
 drives the toolbar, the composer and the panels; compact mode is a window
@@ -269,14 +270,21 @@ today, one mode per session, but the data model is capability-first.
 generated tool block for a terminal session is equivalent to today's, and the
 schema check reports no problems.
 
-> **Status (branch `feature/unified-capabilities`).** The capability registry
+> **Status (branch `feature/one-session-capabilities`).** The capability registry
 > (`src/computer/capabilities.py`), the `capabilities` header field with its
 > migration from `mode`, the generated `cache/capabilities/tools.json` and
 > `AppController.session_capabilities` have landed. The per-mode cache files and
 > the strict schemas were regenerated and diffed byte-for-byte against the old
-> build, so nothing the model sees has changed yet. Still open in this phase:
-> assembling the tool block and the prompt from grants instead of per-mode
-> modules, and the `exposure` axis (native/catalog/hidden).
+> build, so nothing the model sees has changed yet.
+>
+> Phase 1 has started: choosing another panel now attaches its capability to the
+> open session (`_prepare_session_for_mode` merges grants and rewrites only the
+> header, `ProjectManager.update_session_grants`), and the single Chromium of the
+> app lives in `BrowserService`, which Terminal can dispatch `browser_*` calls
+> into. Still open in this phase: assembling the tool block and the prompt from
+> grants instead of per-mode modules (so a terminal turn actually sees the
+> browser tools), the `exposure` axis (native/catalog/hidden), and the capability
+> panels that replace the mode selector.
 
 **Phase 1 — one session, granted capabilities.**
 Capability changes stop creating sessions. UI panels attach/revoke. The selector

@@ -8,18 +8,23 @@ No desktop screenshots are involved: grounding comes from the DOM snapshot.
 The loop mechanics (states, single-step plan -> execute -> observe cycle,
 pause/resume/stop, user communication) live in BaseAgentHandler; here only
 browser specifics remain: prompts, Playwright manager, result rendering.
+
+The browser itself is not the handler's property: `BrowserService` owns the one
+Chromium instance of the app on its own long-lived thread, and both this handler
+and TerminalHandler dispatch into it (a session can grant both capabilities).
 """
 import logging
+import os
 import platform
 import queue
 import threading
 import time
 
-from PySide6.QtCore import Slot
+from PySide6.QtCore import QObject, Slot
 
-from src.browser.policy import (BrowserCancelledError, classify_action,
-                               is_sensitive_text, redact_url,
-                               resolve_network_access)
+from src.browser.policy import (UNTRUSTED_RESULT_TOOLS, BrowserCancelledError,
+                                classify_action, is_sensitive_text, redact_url,
+                                resolve_network_access)
 from src.computer.computer import Computer
 from src.executor.executor import Executor
 from states import VisionState
@@ -29,12 +34,6 @@ from .tool_exec_worker import ToolExecRelay
 
 _CLOSE_SENTINEL = object()
 _STOP_SENTINEL = object()
-
-# Tool results that contain page-authored text (untrusted data, not orders).
-_UNTRUSTED_RESULT_TOOLS = frozenset({
-    "browser_read", "browser_snapshot", "browser_find", "browser_eval",
-    "browser_console", "browser_network",
-})
 
 
 def _setting_bool(settings: dict, key: str, default: bool) -> bool:
@@ -63,7 +62,8 @@ class BrowserExecWorker:
 
     Playwright objects are created and used ONLY here (affinity): the
     BrowserManager object is built lazily on first tool call, launched and
-    closed on this same thread. Results travel back via the GUI-thread relay.
+    closed on this same thread. Results travel back via the GUI-thread relay
+    of the handler that dispatched the call.
 
     Deliberately NOT a QThread with queued slots: Playwright's sync API
     (greenlets) crashes the process when driven from under a Qt event-loop
@@ -72,14 +72,12 @@ class BrowserExecWorker:
     plain queue; the GUI side never blocks.
     """
 
-    def __init__(self, computer, executor, ensure_manager, relay: ToolExecRelay,
-                 approval_enabled: bool = True, approval_timeout: float = 300.0):
+    def __init__(self, computer, executor, ensure_manager):
         self.computer = computer
         self.executor = executor
         self._ensure_manager = ensure_manager
-        self._relay = relay
-        self.approval_enabled = bool(approval_enabled)
-        self.approval_timeout = max(1.0, float(approval_timeout))
+        self.approval_enabled = True
+        self.approval_timeout = 300.0
         self._cancel_event = threading.Event()
         self._generation = 0
         self._active_generation = None
@@ -104,12 +102,13 @@ class BrowserExecWorker:
         self._started = True
         self._thread.start()
 
-    def dispatch(self, ticket: int, action_name: str, action_args: dict):
+    def dispatch(self, ticket: int, action_name: str, action_args: dict,
+                 relay: ToolExecRelay):
         self._cancel_event.clear()
         with self._gen_lock:
             generation = self._generation
         self.start()
-        self._queue.put((generation, ticket, action_name, action_args))
+        self._queue.put((generation, ticket, action_name, action_args, relay))
 
     def cancel(self):
         self._cancel_event.set()
@@ -137,7 +136,7 @@ class BrowserExecWorker:
         self._approval_event.set()
 
     def _request_approval(self, generation: int, ticket: int,
-                          checks: list) -> bool:
+                          checks: list, relay: ToolExecRelay) -> bool:
         if not checks or not self.approval_enabled:
             return True
         if not self._is_current(generation):
@@ -147,7 +146,7 @@ class BrowserExecWorker:
         self._approval_event.clear()
         logging.info(f"BrowserExecWorker: ticket {ticket} awaiting user approval "
                      f"for {[c.get('code') for c in checks]}.")
-        self._relay.browser_approval_needed.emit(ticket, checks)
+        relay.browser_approval_needed.emit(ticket, checks)
         deadline = time.monotonic() + self.approval_timeout
         while time.monotonic() < deadline:
             if self._approval_event.wait(0.1):
@@ -167,13 +166,13 @@ class BrowserExecWorker:
                     self._close_browser()
                     self._close_done.set()
                     continue
-                generation, ticket, action_name, action_args = item
-                self._run_tool(generation, ticket, action_name, action_args)
+                generation, ticket, action_name, action_args, relay = item
+                self._run_tool(generation, ticket, action_name, action_args, relay)
             finally:
                 self._queue.task_done()
 
     def _run_tool(self, generation: int, ticket: int, action_name: str,
-                  action_args: dict):
+                  action_args: dict, relay: ToolExecRelay):
         if not self._is_current(generation):
             logging.info(f"BrowserExecWorker: stale ticket {ticket} ({action_name}) dropped.")
             return
@@ -193,9 +192,9 @@ class BrowserExecWorker:
                 element = {}
             checks = classify_action(action_name, action_args or {}, element,
                                      getattr(mgr, "last_known_url", ""))
-            if not self._request_approval(generation, ticket, checks):
+            if not self._request_approval(generation, ticket, checks, relay):
                 logging.info(f"BrowserExecWorker: ticket {ticket} ({action_name}) denied.")
-                self._relay.browser_finished.emit(
+                relay.browser_finished.emit(
                     ticket, False,
                     "Action denied by the user (safety check). Do not retry it. "
                     "Ask the user what they want to do instead via communicate_to_user.")
@@ -210,7 +209,7 @@ class BrowserExecWorker:
         except Exception as e:  # noqa: BLE001 - report back to the loop
             if self.is_active_current():
                 logging.error(f"Browser tool execution error in worker: {e}", exc_info=True)
-                self._relay.browser_error.emit(ticket, str(e))
+                relay.browser_error.emit(ticket, str(e))
             return
         finally:
             with self._gen_lock:
@@ -220,10 +219,10 @@ class BrowserExecWorker:
             logging.info(f"BrowserExecWorker: ticket {ticket} ({action_name}) done but cancelled.")
             return
         if result.ok:
-            self._relay.browser_finished.emit(
+            relay.browser_finished.emit(
                 ticket, True, result.output_text or "(ok, no output)")
         else:
-            self._relay.browser_finished.emit(ticket, False, result.error or "unknown error")
+            relay.browser_finished.emit(ticket, False, result.error or "unknown error")
 
     def _close_browser(self):
         """Closes the controlled browser on the worker thread (affinity)."""
@@ -253,34 +252,137 @@ class BrowserExecWorker:
             logging.warning("Browser exec thread did not stop in time; continuing shutdown.")
 
 
+class BrowserService(QObject):
+    """The app's single controlled browser, shared by every capability.
+
+    One Chromium, one profile, one thread: `BrowserExecWorker` and the
+    `Computer` it drives live here, not in a handler, so switching panels or
+    replacing the Terminal exec thread after a hard Stop never spawns a second
+    browser. Handlers dispatch with their own GUI-thread relay, so a browser
+    step from a terminal turn renders in that turn, not in the browser panel.
+    """
+
+    def __init__(self, settings_provider, working_directory=None,
+                 settings_manager=None, parent=None):
+        super().__init__(parent)
+        self._settings_provider = settings_provider
+        self._settings_manager = settings_manager
+        self.computer = Computer(mode="browser",
+                                 working_directory=working_directory,
+                                 settings_manager=settings_manager)
+        self.executor = Executor(self.computer, ui=None)
+        self._worker = BrowserExecWorker(
+            self.computer, self.executor, self._ensure_manager)
+        self._worker.start()
+
+    # -- ownership ------------------------------------------------------
+
+    def manager(self):
+        """The live BrowserManager, or None when no browser is open.
+
+        GUI-thread readers (prompts, screenshot attachment, redaction) use
+        this cache; Playwright objects are only touched on the worker thread.
+        """
+        return getattr(self.computer, "browser_manager", None)
+
+    def dispatch(self, ticket: int, action_name: str, action_args: dict,
+                 relay: ToolExecRelay):
+        self._apply_approval_settings()
+        self._worker.dispatch(ticket, action_name, action_args, relay)
+
+    def cancel(self):
+        """Drops queued and in-flight browser work (Stop, task cleanup)."""
+        self._worker.cancel()
+
+    def resolve_approval(self, ticket: int, approved: bool) -> None:
+        self._worker.resolve_approval(ticket, approved)
+
+    def shutdown(self, close_timeout: float = 3.0, join_timeout: float = 3.0) -> None:
+        self._worker.shutdown(close_timeout, join_timeout)
+
+    # -- worker-thread setup --------------------------------------------
+
+    def _apply_approval_settings(self):
+        settings = (self._settings_provider() or {}).get("browser", {}) or {}
+        self._worker.approval_enabled = _setting_bool(
+            settings, "require_approval", True)
+        self._worker.approval_timeout = max(
+            1.0, _setting_float(settings, "approval_timeout_seconds", 300.0))
+
+    def _ensure_manager(self):
+        """Creates and attaches the BrowserManager on first use.
+
+        Runs ONLY on the browser thread (called from the worker): Playwright
+        objects must be created where they are used.
+        """
+        from src.browser.manager import BrowserManager
+        from src.browser.logs import resolve_log_dir
+        mgr = getattr(self.computer, "browser_manager", None)
+        if mgr is not None:
+            return mgr
+        browser_settings = (self._settings_provider() or {}).get("browser", {}) or {}
+        mgr = BrowserManager(
+            headless=_setting_bool(browser_settings, "headless", False),
+            profile_dir=browser_settings.get("profile_dir", "cache/browser_profile"),
+            timeout_ms=_setting_int(browser_settings, "default_timeout_ms", 30000),
+            block_ads=_setting_bool(browser_settings, "block_ads", True),
+            allowed_domains=browser_settings.get("allowed_domains") or [],
+            network_access=resolve_network_access(browser_settings),
+            log_dir=resolve_log_dir(
+                str(getattr(self.computer, "working_directory", "") or "")),
+            screenshot_dir=self._screenshot_dir(),
+        )
+        self.computer.browser_manager = mgr
+        # The browser_* tools also look for a factory on the Computer.
+        self.computer.browser_factory = lambda: mgr
+        return mgr
+
+    def _screenshot_dir(self) -> str:
+        """``<project>/.logos/screenshots``, else the app's screenshot folder.
+
+        A bare relative folder would land in the install directory, and a
+        browser step inside a terminal turn shares the project's shot history.
+        """
+        root = str(getattr(self.computer, "working_directory", "") or "")
+        if root and os.path.isdir(root):
+            try:
+                from src.project_manager import PROJECT_DIRNAME
+            except Exception:
+                PROJECT_DIRNAME = ".logos"
+            return os.path.join(root, PROJECT_DIRNAME, "screenshots")
+        try:
+            configured = (self._settings_manager.get("APP_SCREENSHOTS_DIR")
+                          if self._settings_manager is not None else "")
+        except Exception:
+            configured = ""
+        if configured:
+            return str(configured)
+        return os.path.join(os.getcwd(), "screenshots")
+
+
 class BrowserHandler(BaseAgentHandler):
     MODE_NAME = "browser"
     SCHEMA_NAME = "browser_tool_code"
 
-    def __init__(self, controller, working_directory=None):
+    def __init__(self, controller):
         super().__init__(controller)
-        self.computer = Computer(mode='browser', working_directory=working_directory)
+        self._service = controller.browser_service
         self.os_info = f"{platform.system()} {platform.release()}"
-        self.executor = Executor(self.computer, ui=None)
 
         # Relay first: it must live on the GUI thread so results are queued
         # back here (direct connects would run slots on the worker thread).
-        browser_settings = (self.settings or {}).get("browser", {}) or {}
         self._exec_relay = ToolExecRelay(self)
-        self._exec_worker = BrowserExecWorker(
-            self.computer, self.executor,
-            self._ensure_browser_manager, self._exec_relay,
-            approval_enabled=_setting_bool(browser_settings, "require_approval", True),
-            approval_timeout=_setting_float(
-                browser_settings, "approval_timeout_seconds", 300.0),
-        )
-        self._exec_worker.start()
         self._exec_ticket = 0
         self._pending_action_name = None
         self._pending_action_args = None
         self._history_dirty = False
         self._task_started = 0.0
         self._step_count = 0
+
+    @property
+    def computer(self):
+        """The shared browser Computer (one Chromium for the whole app)."""
+        return self._service.computer
 
     # -- mode specifics -------------------------------------------------
 
@@ -292,40 +394,12 @@ class BrowserHandler(BaseAgentHandler):
         # Plain-string cache: live mgr.url() calls are forbidden off the
         # worker thread (Playwright affinity), so prompts read the cache.
         try:
-            mgr = getattr(self.computer, "browser_manager", None)
+            mgr = self._service.manager()
             if mgr is not None:
                 return getattr(mgr, "last_known_url", "") or "not open yet"
         except Exception:
             pass
         return "not open yet"
-
-    def _ensure_browser_manager(self):
-        """Create and attach the shared BrowserManager on first use.
-
-        Runs ONLY on the exec thread (called from the worker): Playwright
-        objects must be created where they are used.
-        """
-        from src.browser.manager import BrowserManager
-        from src.browser.logs import resolve_log_dir
-        mgr = getattr(self.computer, "browser_manager", None)
-        if mgr is not None:
-            return mgr
-        settings = self.settings if isinstance(self.settings, dict) else {}
-        browser_settings = settings.get("browser", {}) or {}
-        mgr = BrowserManager(
-            headless=_setting_bool(browser_settings, "headless", False),
-            profile_dir=browser_settings.get("profile_dir", "cache/browser_profile"),
-            timeout_ms=_setting_int(browser_settings, "default_timeout_ms", 30000),
-            block_ads=_setting_bool(browser_settings, "block_ads", True),
-            allowed_domains=browser_settings.get("allowed_domains") or [],
-            network_access=resolve_network_access(browser_settings),
-            log_dir=resolve_log_dir(
-                str(getattr(self.computer, "working_directory", "") or "")),
-        )
-        self.computer.browser_manager = mgr
-        # The browser_* tools also look for a factory on the Computer.
-        self.computer.browser_factory = lambda: mgr
-        return mgr
 
     def _cleanup_task(self):
         # The controlled browser (and its thread) persist across tasks;
@@ -335,7 +409,7 @@ class BrowserHandler(BaseAgentHandler):
         self._tool_in_flight = False
         self._history_dirty = True
         try:
-            self._exec_worker.cancel()
+            self._service.cancel()
         except Exception:
             pass
 
@@ -378,13 +452,11 @@ class BrowserHandler(BaseAgentHandler):
         super()._continue_loop(last_command_output, from_job_wait)
 
     def shutdown(self):
-        """Stops the exec thread and closes the browser (bounded, for app exit)."""
+        """Closes the shared browser and stops its thread (bounded, for exit)."""
         self._exec_ticket += 1
         self._tool_in_flight = False
         try:
-            worker = getattr(self, "_exec_worker", None)
-            if worker is not None:
-                worker.shutdown()
+            self._service.shutdown()
         except Exception as e:
             logging.warning(f"Browser shutdown failed: {e}")
 
@@ -403,7 +475,7 @@ class BrowserHandler(BaseAgentHandler):
 
     def _payload_image_count(self) -> int:
         try:
-            mgr = getattr(self.computer, "browser_manager", None)
+            mgr = self._service.manager()
             peek = getattr(mgr, "peek_screenshot_path", None)
             return 1 if callable(peek) and peek() else 0
         except Exception:
@@ -413,7 +485,7 @@ class BrowserHandler(BaseAgentHandler):
         """Attaches the latest browser_screenshot to the request (persistent:
         peek, don't consume — navigation/tab-change already invalidate it)."""
         try:
-            mgr = getattr(self.computer, "browser_manager", None)
+            mgr = self._service.manager()
             peek = getattr(mgr, "peek_screenshot_path", None)
             if mgr is None or not callable(peek):
                 return []
@@ -429,7 +501,7 @@ class BrowserHandler(BaseAgentHandler):
 
     def _element_for_args(self, action_args: dict) -> dict:
         try:
-            mgr = getattr(self.computer, "browser_manager", None)
+            mgr = self._service.manager()
             if mgr is None:
                 return {}
             return mgr.describe_ref((action_args or {}).get("ref"))
@@ -488,21 +560,22 @@ class BrowserHandler(BaseAgentHandler):
         self._step_count += 1
         logging.info(f"BrowserHandler: dispatching ticket {self._exec_ticket} ({action_name}) to exec thread.")
         self._tool_in_flight = True
-        self._exec_worker.dispatch(self._exec_ticket, action_name, action_args)
+        self._service.dispatch(self._exec_ticket, action_name, action_args,
+                               self._exec_relay)
         return None
 
     @Slot(int, object)
     def _on_browser_approval(self, ticket: int, checks):
         """GUI-thread modal for worker-requested risky actions (fail closed)."""
         if ticket != self._exec_ticket:
-            self._exec_worker.resolve_approval(ticket, False)
+            self._service.resolve_approval(ticket, False)
             return
         approved = False
         try:
             approved = bool(self.controller.ask_safety_approval(checks))
         except Exception as e:
             logging.error(f"Browser approval dialog failed: {e}")
-        self._exec_worker.resolve_approval(ticket, approved)
+        self._service.resolve_approval(ticket, approved)
 
     @Slot(int, bool, str)
     def _on_browser_finished(self, ticket: int, ok: bool, text: str):
@@ -531,7 +604,7 @@ class BrowserHandler(BaseAgentHandler):
             self._finish_active_step(output=output)
         else:
             self._add_result_card(output, f"{action_name} · ok")
-        if action_name in _UNTRUSTED_RESULT_TOOLS:
+        if action_name in UNTRUSTED_RESULT_TOOLS:
             result_text = (
                 "**Tool Result:**\n<untrusted_page_content>\n"
                 f"{output}\n</untrusted_page_content>")
