@@ -1,321 +1,374 @@
-# Future Vision: Grounding Backends, New Modes, Thin Client
+# Future Vision: One Session, Three Capabilities
 
-This document records the agreed evolution plan for Logos AI Assistant
-(discussed October 2026, status updated 2026-10-26). It explains the principles
-and what is already done, not the implementation details. Implementation details
-belong in per-step technical docs; current behavior is in
-[system_architecture.md](./system_architecture.md).
+> Status: agreed 2026-11-04. This document replaces the mode-centric plan that
+> used to live here. It describes **what the application should become**, the
+> principles behind it and how we will know we got there. Implementation details
+> belong in per-step technical notes; current behavior stays documented in
+> [system_architecture.md](./system_architecture.md).
+>
+> Work happens on a **local branch only** for now. Nothing here is pushed until
+> the plan is executed and reviewed.
 
-## Where we stand
+## The goal in one paragraph
 
-Logos is a provider-agnostic desktop agent with four modes
-(Chat / Vision / Terminal / Browser) and a "conductor, not performer" philosophy:
-the model plans and evaluates, deterministic code executes, the user reviews or
-approves risky steps.
+A person should be able to say "run my project's dev server and check that the
+login page works" in **one session** and watch the assistant open a terminal,
+start the server, open a browser, click through the form, read the console and
+fix the code — without the human touching a mode switcher. Chat, Terminal and
+Browser stop being separate universes with separate sessions and separate
+histories. They become **capabilities of one agent in one timeline**. Vision
+stays the fourth capability, granted only where the chosen model can drive it.
 
-What changed since the original plan:
+## Where we are today
 
-- **Vision is on the agent loop.** The strategic plan, the plan-approval screen,
-  `strategic_plan` / `evaluation` schemas and the old Vision FSM are gone.
-  `VisionHandler` uses the same observe → act → assess discipline as
-  Terminal/Browser and grounds through the provider's native Computer Use
-  protocol. Escalation (`communicate_to_user`, safety dialogs, pause on repeated
-  failure) replaces plan approval as the safety valve.
-- **The local screen-recognition stack is gone.** Torch/OCR/YOLO/Florence,
-  EasyOCR language management and the OmniParser analyzer were removed from the
-  code and manifests. There is no background model loading; Vision mode is ready
-  immediately and works through `native` grounding only. xAI, OpenRouter and
-  other providers without a computer-use tool cannot drive Vision today.
-- **Browser mode is shipped.** It uses a persistent Playwright Chromium profile,
-  DOM snapshots with stable element refs, screenshots with ref badges, URL/private
-  network policy and per-action approvals. This is the `dom` grounding path.
-- **Projects and persistent sessions exist.** Each project owns `.logos/` with
-  JSONL session journals, a rolling handoff summary and restored history.
-  Sessions are mode-locked: one session runs one mode. Attachments are durable:
-  stable files are referenced by path and pasted images are copied into the
-  session folder. Tabs/parallel sessions are deliberately out of scope.
-- **The base install is thin.** Removing the ML stack achieved the size/startup
-  goal without optional model downloads. If a local grounding backend returns,
-  it must stay an optional add-on rather than a base dependency.
+Honest inventory of the current build (0.3.1), because the target is defined
+against it.
 
-Two structural limitations from the original note are therefore resolved:
+**Modes are sessions.** A session is locked to one mode. The journal header
+stores `mode`, `AppController.session_mode` is the single source of truth, and
+switching mode in a non-empty session starts a **new session** plus a one-time
+handoff summary. Each mode therefore has its own transcript; nothing interleaves
+terminal steps and browser steps in one timeline.
 
-1. Vision no longer needs a separate planning universe; it runs the same loop
-   and can be extended with shell/file tools.
-2. Native provider toolsets no longer conflict with plan approval, because plan
-   approval no longer exists.
+**Modes are toolsets.** `src/computer/modes/{chat,terminal,browser,vision}.py`
+declare the tools of a mode, and `src/computer/tool_registry.py` renders them
+into `cache/<mode>/tools.txt` and `cache/<mode>/response_formats.json`. The
+pydantic schemas in `src/computer/schemas/` carry a hardcoded name list per
+mode. Today: Chat 2, Terminal 29, Browser 23, Vision 21 tools.
 
-## Principle 1: separate grounding from execution
+**Modes are prompts.** `prompts/<mode>/system.txt` and per-mode user templates;
+`Brain.get_<mode>_prompts()` assembles them. The system prompt, the tool block
+and the response format are all mode-shaped.
 
-The intended interface is still `GroundingBackend` — "where do coordinates come
-from?" — with three possible implementations:
+**Handlers are mode-shaped.** `TerminalHandler`, `BrowserHandler` and
+`VisionHandler` share the same loop from `BaseAgentHandler` (observe → act →
+assess), but each owns its resources: Terminal owns `ShellJobManager` and the
+MCP manager, Browser owns the Playwright `BrowserManager` and Chromium, Vision
+owns the provider's Computer Use chain. `ChatHandler` has no tool loop at all.
 
-- `native` — coordinates/actions from the provider's own computer-use tool
-  (`computer_use_turn`: OpenAI computer, Anthropic computer toolset, Google
-  Gemini 3.x computer use). **Implemented and currently the only Vision
-  backend.**
-- `dom` — Playwright accessibility/DOM refs for web pages. **Implemented inside
-  Browser mode** (`BrowserManager`), though not yet expressed as a shared
-  `GroundingBackend` implementation.
-- `local` — a recognizer service (UI-TARS / OmniParser V2 or another model) for
-  providers without native computer use. **Not implemented.** The old local
-  triple pipeline was deleted, not extracted.
+**The UI is mode-shaped.** A mode selector switches handlers, `_active_mode_key`
+drives the toolbar, the composer and the panels; compact mode is a window
+variant, not a mode.
 
-`VisionHandler` is already on the shared agent loop: no strategic plan, no
-`strategic_plan`/`evaluation` schemas, no plan-review UI. The remaining work is to
-formalize the backend seam and make the coordinate source switchable again
-without changing the loop.
+**Model capability is already unified.** `ModeCapabilities` puts chat, terminal
+and browser in one `general` group; only Vision requires a CUA provider. So the
+model layer is already ready for "one session, several capabilities"; the
+session and tool layers are what still say "one mode".
 
-Order of work: **native first (done), then the recognizer service** if demand for
-non-CUA providers justifies it. The service must expose a stable element schema
-and a conformance test so any recognizer can plug in.
+**What already works in our favor:** background jobs with no timeout and
+`ready_url` probing, the screenshot tool (window / screen / region) with
+one-shot attachment, the browser ref-based toolset, console/network capture
+written to `<project>/.logos/browser_logs/`, per-capability approval policies,
+project-scoped journals with replay, and a rolling summary.
 
-## Principle 2: modes differ by toolset, not by universe
+**What breaks for the user:** a web-development loop needs three manual
+switches per iteration (Terminal → Browser → Terminal), three sessions, three
+histories, and a summary instead of the real context. The dev server survives
+the switch, the page does not: Chromium closes on leaving Browser mode, so the
+next iteration starts with `browser_goto` again.
 
-New modes reuse the same handler core and the same correction/escalation
-protocol:
+## What we want instead
 
-- **Browser mode** (`backend=dom`, Playwright): open site → authenticate → fill
-  and submit forms. **Shipped.** The OpenAI `browser_authentication` idea —
-  secrets entered by the user in our UI, never shown to the model — is not
-  implemented yet; the current approval flow protects password fields but the
-  model still supplies the value. This is the next Browser hardening step.
-- **Native execution inside Vision mode** (`backend=native`): **shipped** for
-  Google, Anthropic and OpenAI through `supports_computer_use()` /
-  `computer_use_turn()`. Provider-specific behavior is documented in the
-  provider files and the CUA prompt.
-- **Unified Vision+shell toolset**: **partially prepared, not active.** The
-  `vision` manifest already contains shell and file tools, and Vision settings
-  gate `allow_shell_commands`; the CUA loop does not read that manifest. The
-  model still acts only through provider-native computer actions. Wiring the
-  manifest into the CUA loop would resolve the last part of limitation (1).
-- **MCP as a toolset source**: Terminal connects to user-configured MCP
-  servers through three meta-tools (`mcp_list`, `mcp_get`, `mcp_call`). Servers
-  come from settings and the project's `.mcp.json`; project entries require
-  explicit trust, every call passes the Terminal access policy, hung servers are
-  isolated by a circuit breaker and oversized output spills into the project.
-  **Shipped.** Browser/Chat MCP, direct `mcp__<server>__<tool>` names and OAuth
-  were deliberately dropped from this round. No per-app integrations are
-  written by hand.
-- **Cross-mode pilot (Blender)**: Terminal builds through Blender MCP
-  (`create_object`, transforms, materials — headless, no GUI), Vision verifies
-  the result via a rendered preview through the screen-evaluation loop.
-  **Not implemented**; the MCP client it depends on is now shipped.
+1. **One session, one timeline.** A session is a conversation plus an action
+   log, not a mode. Terminal steps, browser steps and chat answers interleave in
+   one journal and one transcript.
+2. **Capabilities, not modes.** A session carries a set of granted capabilities:
+   `base` (always), `terminal`, `browser`, `vision`. Tools and prompt sections
+   are derived from that set.
+3. **No mode switcher.** The UI exposes capabilities through their panels: the
+   Terminal panel and the Browser panel attach their capability when used. A
+   single toggle can revoke one. Vision is a panel too, but it can only be
+   attached when the active model supports Computer Use.
+4. **The model can attach capabilities itself.** `open_terminal()` and
+   `open_browser(url)` are real, callable tools that attach the capability and
+   return a handle. A sentence in the system prompt is a hint; a tool is a
+   mechanism. After a successful call the capability's tools are available on
+   the **next** step.
+5. **Nothing silently widens access.** Attaching a capability is visible in the
+   transcript ("Terminal attached"), and each capability keeps its own approval
+   policy: Terminal access mode, Browser `classify_action`, Vision confirmation.
+   A grant changes *what is possible*, never *what is allowed without asking*.
 
-## Principle 3: thin client distribution
+## Principles
 
-The heavy ML dependencies (torch/CUDA, transformers, EasyOCR models) are
-**removed**, not optional. The base install is PySide6 plus app code and starts
-without model loading. Consequences:
+### P1. Grants and exposure are different axes
 
-- No more one-file PyInstaller bundles with the whole `.venv` + CUDA + Hugging
-  Face caches.
-- Use one-dir builds wrapped in an Inno Setup installer; portable ZIP + launcher
-  script remains the zero-friction option.
-- If `local` grounding returns, it must be downloaded on demand via the setup
-  wizard and never become a required dependency.
+- **Grants** answer "what may this session do now": `base`, `terminal`,
+  `browser`, `vision`.
+- **Exposure** answers "how do these tools reach the model": `native` (declared
+  in the request schema), `catalog` (listed in a short catalogue, loaded on
+  demand by `search_tools`), `hidden` (exists but is not advertised).
 
-## Principle 4: long-lived sessions (one mode per session)
+Tool availability is a function of the **current grants**, never of history
+("the browser was opened once, so always send browser tools").
 
-One-off tasks ("empty the recycle bin") stay as they are. Alongside them, Logos
-grows **persistent sessions**: a named thread with a history of what was done, a
-rolling summary and the user's attachments, living for weeks and surviving
-restarts. A session is a conversation plus an action log, not a snapshot of the
-live machine.
+### P2. Base is always on
 
-Chat and Terminal behave like mature CLI agents: the transcript and project
-files are the state. Browser and Vision are different — they drive an external
-live environment. Browser/CUA products persist auth profiles and task history,
-not a frozen page or desktop: ChatGPT agent keeps cookies across sessions like a
-regular browser; Claude Code with Chrome shares the user's browser login state;
-browser-use persists profiles (cookies, localStorage, login) but not open tabs;
-Anthropic's computer use leaves screenshots and actions in the application's
-environment, not on the provider. Cloud agents such as Devin and Manus can
-snapshot a VM/sandbox; Logos runs on the user's real desktop and cannot copy that
-approach.
+`base` tools are the ones that make the agent useful before any capability is
+attached: `read_files`, `list_directory`, `search_file_content`, `finish`,
+`communicate_to_user`, `update_plan`, `use_skill`, `open_terminal`,
+`open_browser`. They are project-scoped and read-only except for the two
+openers. Chat becomes a base-only session — which is exactly what "chat with
+file access" should have been.
 
-**Scope decision (2026-10-26):** one session runs one mode. There are no tabs, no
-parallel sessions in one window, no screen arbiter and no virtual displays on the
-roadmap. Switching sessions is explicit: Logos restores completed history from
-the journal and stops in-flight work instead of pretending to suspend it.
+### P3. The tool list changes on capability change, never per message
 
-**Current state:** project-scoped sessions, JSONL journals, autosave,
-restore/replay, rename/delete, mode locking, the auto-derived session objective,
-the session-scoped rolling summary and the `AGENTS.md` project baseline are
-implemented. Browser/Vision resumes also get a deterministic summary derived
-from the current session's journal. Attachments follow the policy below: files
-are referenced by path, pasted images are copied into
-`.logos/attachments/<session-id>/` and deduplicated by SHA-256.
+A turn must keep a stable tool block: changing it every request destroys prompt
+caching and confuses the model. Recompute the tool block only when a grant is
+added or removed, and keep the rest of the system prompt identical.
 
-### Session contents
+### P4. A capability owns its resources
 
-- **Title.** Derived from the first request and renameable. It is a short label,
-  not a mandatory goal form.
-- **Objective.** An auto-derived one-line goal stored in the session header. It
-  starts as the first request. Browser and Vision need it because the live
-  page/desktop is gone.
-- **Journal.** Append-only typed events: messages, reasoning, tool calls and
-  results, job results, usage, model switches, errors. It is the source of truth
-  for replay and for rebuilding the model-facing agent history.
-- **Session summary.** A rolling summary with fixed sections (Objective, Done,
-  Decisions, Constraints, Checks, Current, Next, Unfinished, Files, Blockers)
-  stored next to the journal. It is scoped to one session; a Browser or Vision
-  resume also gets a deterministic state block derived from that session's
-  journal.
-- **Mode-switch handoff.** Switching mode copies the previous session's summary
-  once into the new session (`source=handoff`, `handoff_from`). Explicit "New
-  session" starts empty. Nothing is shared through a project-wide summary file.
-- **Project baseline.** Root `AGENTS.md` is read as stable rules, never
-  generated, and injected separately in every mode.
-- **Attachments.** Handled by the policy below.
+`terminal` owns `ShellJobManager` and the MCP manager; `browser` owns the single
+Playwright `BrowserManager` and its Chromium; `vision` owns the CUA chain. A
+capability is attached lazily on first need and stays attached for the session.
+Handlers stop being session owners and become capability providers.
 
-### Attachments policy
+### P5. One browser, one shell manager, app-wide
 
-Do not copy the whole project into `.logos`. Use three tiers:
+There is exactly one Chromium per application, owned by the controller, shared
+by whatever capability is attached — never one per handler. Same for the shell
+job manager. Two persistent contexts on one profile cannot coexist, and two
+profiles would silently split logins and cookies. The browser is also bound to
+one long-lived worker thread it was started on — a capability borrows the
+browser, it never runs it on its own tool thread, which may be replaced after a
+hard Stop.
 
-1. **Files with a stable source path are referenced, not copied.** The journal
-   records the name, project-relative path when the file is inside the project
-   (absolute otherwise), size and content hash. On reopen a changed file is
-   marked "changed", a missing one "missing". The source stays the source of
-   truth.
-2. **Pasted images and explicit user attachments with no stable source path** are
-   copied to `.logos/attachments/<session-id>/` and deduplicated by SHA-256.
-   Without a copy these bytes are lost on restart; Claude Code solves the same
-   problem with a per-session `images/` folder.
-3. **Automatic Vision/CUA screenshots are not session artifacts.** They stay in
-   the debug screenshot folder with the existing retention window (7 days by
-   default). Only screenshots the user explicitly attaches or pins are copied
-   into the session.
+### P6. Approvals stay per capability and fail closed
 
-Attachments appear as cards (name, type, size, changed/missing badge), not as a
-re-sent image on every turn. Deleting a session removes its attachment folder
-after confirmation, and per-file/per-session caps prevent disk bloat.
+- Terminal keeps `terminal.access_mode` (`ask` / `auto` / `full`) and the
+  read-only allowlist.
+- Browser keeps `classify_action` and `browser.require_approval`; `browser_eval`
+  keeps asking every time.
+- Vision keeps its confirmation flow.
+- MCP keeps its trust gate and its read-only/risky split.
 
-Model-facing delivery follows the same reference-first rule. Terminal and
-Browser receive a block of attachment references (name, kind, size, path, live
-status) and open the file on demand with `read_files`, `list_directory` or
-`search_file_content`; Browser includes those read-only filesystem tools.
-Chat has no tool loop, so text-file contents are inlined once in the current
-request and only referenced afterwards. The Session journal shows the recorded
-path, size, SHA-256, stored flag and live status under the carrying message.
+Attaching a capability is a grant of possibility, not a grant of trust.
 
-### What "resume" means
+### P7. Read-only work never asks; anything that changes the world does
 
-On reopen Logos restores the transcript and tool cards, rebuilds the model-facing
-agent history and injects the session objective plus the relevant summary. What
-"the relevant summary" means depends on the mode:
+The existing split stays: `read_files`, `browser_snapshot`, `browser_console`,
+`screenshot` and friends run silently; `execute_shell` with a state-changing
+command, `browser_click` on a risky control, file deletes, sensitive paths and
+out-of-project writes ask according to their capability's policy.
 
-- **Chat / Terminal.** The transcript and rebuilt agent history are enough;
-  project files are read live, not snapshotted.
-- **Browser.** The journal supplies the action and URL history; the persistent
-  Playwright profile supplies cookies/logins. Open tabs, DOM and scroll position
-  are not restored; the agent can navigate to the last URL from history.
-- **Vision.** A fresh CUA chain observes the current screen. It gets the session
-  objective and summary, not the old screenshots or desktop state.
+### P8. Revoking is explicit and immediate
 
-In all modes, in-flight shell jobs and a running agent turn are stopped, not
-resumed. Switching sessions intentionally cancels the current run.
+A capability is revoked only by an explicit action (toggle, session end, project
+switch, application exit). Closing a panel hides it, it does not revoke — the
+model may still be mid-task. On revoke, the capability closes its resources
+(Chromium, MCP clients, background jobs) in a bounded, logged way.
 
-This is the same boundary browser/CUA and CLI products draw: they persist
-app-owned history and auth profiles, not a frozen page or desktop. Claude Code
-persists the conversation, not the filesystem; Cline restores the conversation
-and checks file states against checkpoints; opencode compacts old history into a
-summary and keeps the recent tail.
+## Session model
 
-### Explicitly not planned
+**Header.** The journal header gains `capabilities: ["base", "terminal", ...]`.
+The legacy `mode` field stays readable forever, so 0.3.1 sessions keep opening.
 
-- **Tabs / parallel sessions in one window.** Useful for IDE agents that
-  orchestrate several coding agents, but Logos deliberately runs one session at a
-  time. The sidebar session list is the navigation surface.
-- **Watch-type sessions with diffing.** No mature analogue; a monitored feed is a
-  scheduling/automation feature, not a session type.
-- **Screen arbiter, session → display binding, virtual displays.** Only needed
-  when several Vision tasks run in parallel. With one active session there is
-  nothing to arbitrate; revisit only if parallel Vision becomes a real goal.
-- **Per-tab pause/serialize.** Pause/resume belongs to the one active agent.
-  Session switching intentionally stops work; there is no suspended handler to
-  restore.
-- **Full browser/desktop snapshot.** Cloud agents such as Devin and Manus can
-  snapshot a VM/sandbox; Logos runs on the user's real machine and persists only
-  app-owned state.
+**Migration.** `chat → base`, `terminal → base+terminal`,
+`browser → base+browser`, `vision → base+vision`. Migration happens on load and
+is written back on the next append; no separate migration pass.
 
-## Guiding scenario: "tell the computer, get the result"
+**No new session on capability change.** Adding browser to a terminal session
+keeps the same journal, the same transcript and the same summary. "New session"
+resets grants to `base`.
 
-The end state this plan serves: a person says what they want — a file
-created or edited, a 3D scene, a picture, Windows settings configured
-through endless settings windows — and the computer performs it,
-returning the finished result instead of instructions for the user to
-click through. (Today the user screenshots a settings window, sends it
-to a chatbot, gets back "click here", and still clicks themselves;
-Logos inverts this: the user states the goal, the agent clicks.)
+**Summaries.** The handoff summary stops being the bridge between modes, because
+there are no mode boundaries inside a session. It remains for explicit session
+switches and for compaction of long sessions. The compaction boundary and the
+summary sections are unchanged.
 
-Voice input is the natural interface for this scenario but is
-explicitly out of scope for now — text input carries the full design
-until the execution core is ready. Voice will dock onto the same
-`start_task(user_text)` entry point later without architectural changes.
+**Transcript.** One timeline. Steps from different capabilities sit in the same
+turn blocks; the step icon/color still identifies the capability, so a reader can
+tell a shell step from a browser step at a glance.
 
-## Status of the agreed build order
+## Tool exposure plan
 
-| # | Step | Status |
+Phase 1 ships **all tools of every granted capability** as `native`, because
+that is the smallest correct step. The split below is the target for Phase 3,
+when we measure the prompt cost of base+terminal+browser in one request.
+
+| Capability | Native (always declared) | Catalog (on demand) |
 |---|---|---|
-| 1 | `GroundingBackend` interface + unified Vision+shell toolset | Native CUA shipped; interface not formalized; Vision manifest not wired into the CUA loop. **Next foundation.** |
-| 2 | Browser mode on Playwright | **Shipped** (DOM refs, policy, approvals, budgets). User-entered secrets still pending. |
-| 3 | Native execution for Google, then Anthropic/OpenAI | **Shipped** for all three. |
-| 4 | Long-lived sessions: JSONL store, autosave, summarization, restore, durable attachments, per-session objective/state | **Shipped:** JSONL sessions, autosave, restore/replay, auto-derived objective, deterministic per-session summary for Browser/Vision resume, durable attachments with reference/copy tiers. Tabs, parallel sessions and the screen arbiter were **dropped** (one mode per session). |
-| 5 | Thin client | **Effective:** ML stack removed; optional backends are no longer needed. Installer/packaging cleanup remains. |
-| 6 | MCP client + Blender cross-mode pilot | MCP client **shipped** (Terminal meta-tools, settings page, trust gate, keychain secrets, circuit breaker, output spill). Blender pilot **pending.** |
-| 7 | Replace the local triple pipeline with a single grounding model (UI-TARS / OmniParser V2) | **Obsolete in current form** — the local pipeline was deleted. Revisit only if a `local` backend is reintroduced. |
-| 8 | Parallel Vision sessions / virtual displays | **Dropped.** Only meaningful with several simultaneous Vision sessions; out of scope while one session runs at a time. |
+| base | read_files, list_directory, search_file_content, finish, communicate_to_user, update_plan, use_skill, open_terminal, open_browser | — |
+| terminal | execute_shell, poll_shell_job, stop_shell_job, write_file, replace, replace_many, delete_files, copy_files, move_files, screenshot, web_fetchs, web_search, wait_seconds, download_file, get_clipboard_content | mcp_list, mcp_get, mcp_call |
+| browser | browser_goto, browser_snapshot, browser_click, browser_fill, browser_press, browser_read, browser_screenshot, browser_wait_for, browser_tabs, browser_close | browser_eval, browser_console, browser_network, browser_frames, browser_handle_dialog, browser_select_option, browser_hover, browser_find, browser_navigate_back |
+| vision | the provider's Computer Use toolset plus the CUA prompt | — |
 
-## Backlog: known execution gaps (low priority, tracked — do not lose)
+`search_tools` (or an equivalent) returns the schema of a catalog entry and adds
+it to the next request. Code Mode — a JavaScript sandbox that composes tool
+calls — stays out of scope; our scale does not need it.
 
-- **Native terminal tools ignore timeout and Stop.** `execute_shell` is bounded by
-  `shell_timeout_seconds` and killed (whole process tree) on Stop, but direct tools
-  (`copy_files`, `write_file`, `read_files`, `delete_files`, `move_files`, …) run on
-  the worker thread with no time bound and do not honor cancellation: a long or hung
-  call blocks subsequent dispatches (they queue behind it), and `quit()` cannot release
-  a thread blocked inside `run()` (`QThread.terminate()` is forbidden — state corruption).
-  `ToolExecWorker.cancel()` only prevents delivery of a late result; it cannot stop the
-  running function. Fix direction (ONLY when it becomes a priority, not now):
-  cooperative cancellation — long tools check `Computer.cancel_event` per file/batch.
-  Infinite loops are structurally impossible (no loop tool; shell loops die at the
-  timeout). Proven painless so far (76s copy completed, no hangs observed); revisit
-  only on real hangs.
+## Prompts
 
-- **Client-side streaming tool execution (Chat first).** Provider-side streaming
-  tool calls are used where the vendor executes them (OpenAI, Anthropic, Google
-  server-side search; xAI Live Search). The client-side path is still a dead end:
-  `tool_call_received` has no subscribers and `all_tool_calls` is only logged.
-  Current state per provider: OpenAI, Anthropic, Google and xAI declare
-  `supports_streaming_tools` and yield typed chunks; OpenRouter and Hugging Face
-  do not send `tools` in the stream. Reliability win over hand-formed JSON: the
-  call arrives framed (name + arguments as separate fields, JSON parsed
-  server-side or accumulated to `stop`), so envelope errors (quotes/brackets) are
-  structurally impossible; semantic correctness (right tool, right values) stays
-  the model's job, guarded by our `json.loads` fallback + pydantic
-  `ChatFunctionCall` + skip. Work items (Chat only — agent modes need whole
-  validated actions per turn, not fragments): connect `tool_call_received` to
-  execution, feed results back into the conversation, and make OpenRouter/HF
-  send `tools`. HF additionally blocked by billing (402 on accounts without
-  credits).
+The assembled system prompt becomes:
 
-- **Per-task folders + cross-mode handoff.** A task ("check the news")
-  gets its own folder accumulating all context (chat transcript, turn
-  screenshots, traces, downloaded artifacts); later modes reuse it
-  (browser finds info → terminal/vision consume it). Handoff need not
-  be end-to-end automation: manual carry (user grabs browser findings
-  into the folder, vision/terminal pick them up) covers most cases and
-  is simpler than cross-mode orchestration. Seeds exist
-  (per-task `cua_<tag>/` shots, command_history, trace lines) but no
-  folder lifecycle, no handoff protocol, no UI. Project sessions and the
-  handoff summary cover part of the context problem; task-level artifact
-  folders remain separate work.
+```
+base instructions
++ Terminal section      (if terminal granted)
++ Browser section       (if browser granted)
++ Vision CUA section    (if vision granted)
++ skills catalogue
++ MCP servers block     (if terminal granted)
++ AGENTS.md baseline
++ response format for the granted tool set
+```
 
-## Non-goals (explicitly deferred)
+Sections keep their current text; they are no longer selected by mode but
+concatenated by grant. The single-line "you may open a browser" hint is not the
+mechanism — `open_browser` is. The prompt only explains when using it is worth
+it.
 
-- Adding ~20 new direct LLM providers: other models stay reachable
-  through the OpenRouter provider's nested dropdown. A new direct
-  provider is justified only for a native API (e.g. Alibaba DashScope
-  or Zhipu) with real demand — see `adding_new_llm_provider_guide.md`.
-- Chasing benchmark SOTA for its own sake: OSWorld-Verified is adopted
-  only as a regression metric, not a target.
+## UI
+
+- The mode selector is replaced by capability controls: **Terminal**,
+  **Browser**, **Vision**. Each shows attached/not attached.
+- Opening the Terminal or Browser panel attaches that capability (same click
+  that reveals the panel). Vision is disabled, with an explanation, when the
+  active model has no Computer Use.
+- The workspace shows the panels of attached capabilities; the right panel's
+  Session tab lists capability chips instead of a mode.
+- The composer's access chip (Terminal) and the browser approval dialogs keep
+  working unchanged.
+- Home screen: "New session" starts with `base` only. A first message like "run
+  the tests" lets the model attach Terminal by itself.
+- Compact mode remains a window variant and is unaffected.
+
+## Lifecycle and safety
+
+- **Attach** is lazy: first use of a capability tool, an `open_*` call, or a
+  panel click.
+- **Stop** cancels the current step and, as today, stops background jobs and the
+  running turn. We keep today's predictable "Stop means stop everything"
+  semantics; a softer "stop the turn, keep the server" is a later, separate
+  decision.
+- **Project switch and exit** close Chromium, MCP clients and jobs, as today.
+- **Grants do not leak across projects**: a capability attaches to the current
+  project's session only.
+- **Vision** is never attached automatically: without a CUA-capable provider it
+  cannot run, and silently switching models is not allowed.
+
+## Model handling
+
+Chat, Terminal and Browser share the `general` group, so one model can serve all
+three capabilities; the picker does not change when a capability is attached.
+Vision is the exception: attaching it requires a CUA model, so the UI offers the
+configured Vision model and explains the requirement otherwise. A model switch
+inside a session stays journaled as a `model` event, exactly as today.
+
+## Roadmap
+
+Each phase must leave the previous behavior intact and keep old sessions
+readable.
+
+**Phase 0 — foundation, no visible change.**
+`ToolSpec(capability, exposure)` in the registry; `capabilities` in the session
+header with migration; tool block and prompt assembled from grants; per-mode
+`tools.txt` files replaced by one capability catalogue. Modes still behave as
+today, one mode per session, but the data model is capability-first.
+*Done when:* the three agent modes behave identically, old journals open, the
+generated tool block for a terminal session is equivalent to today's, and the
+schema check reports no problems.
+
+**Phase 1 — one session, granted capabilities.**
+Capability changes stop creating sessions. UI panels attach/revoke. The selector
+becomes three capability controls. Every granted capability's tools are native.
+*Done when:* attaching Browser inside a terminal session keeps the same journal
+and transcript, and the model can use terminal and browser tools in one turn.
+
+**Phase 2 — the model attaches capabilities.**
+`open_terminal()` and `open_browser(url)` as real tools with visible notices and
+the "next step" availability rule.
+*Done when:* asked to "start the dev server and check the page", the model
+attaches Terminal, starts the server with `ready_url`, attaches Browser, checks
+the page, and everything is one turn in one session.
+
+**Phase 3 — exposure budget.**
+Native/catalog split from the table above, `search_tools`, measurement of the
+prompt prefix. *Done when:* base+terminal+browser fits a sane native budget
+(≈30 tools) and the rest is reachable on demand without confusing the model.
+
+**Phase 4 — cleanup.**
+Mode defaults become capability defaults (`mode_models.terminal`,
+`mode_models.browser`), the mode selector and mode notices disappear from the UI,
+docs and README move to capability wording, and `mode` stays only as a legacy
+field read by the loader.
+*Done when:* the word "mode" no longer shapes the agent, the UI or the docs, and
+a fresh install has no switcher to click.
+
+## Acceptance checklist
+
+Use this to decide whether the plan was achieved. Every line is something a
+person can observe, not an internal detail.
+
+1. **One loop.** "Run the dev server, open the login page, click through it and
+   fix what breaks" completes in one session, with terminal and browser steps in
+   one timeline, and no mode switch performed by the human.
+2. **One journal.** That session's JSONL contains both shell and browser
+   events, one objective and one summary; its header lists the capabilities.
+3. **No switcher.** The main window has no mode selector; the capability
+   controls are the entry point.
+4. **Self-attach.** The model can attach a capability by calling `open_browser` /
+   `open_terminal`; the transcript shows the attachment, and the capability's
+   tools are usable on the next step.
+5. **Self-repair loop.** Started from the console error or the network 500, the
+   model edits the code, restarts the server and re-checks the page without the
+   human copying anything between sessions.
+6. **One Chromium.** While testing, the machine runs a single Chromium instance
+   (one profile, one login state). Entering or leaving a panel does not spawn a
+   second one.
+7. **Clean stop.** Stop closes Chromium and the dev server; no orphan processes
+   remain (`tasklist` shows neither `chrome.exe` from our profile nor the
+   `python -m http.server`).
+8. **Restart fidelity.** Reopening the session restores the transcript, the
+   capabilities and the summary; the browser is not resurrected, and the agent
+   can navigate to the last URL from history.
+9. **Old sessions.** Sessions created by 0.3.1 open, replay and continue with
+   their capability mapped from `mode`.
+10. **Approvals unchanged.** In `ask`, a state-changing shell command still
+    prompts; a risky browser click still prompts; `browser_eval` still asks every
+    time; sensitive paths are still refused. Attaching a capability asks for
+    nothing extra.
+11. **Prompt stability.** Within a turn the tool block and prompt prefix do not
+    change; they change only when a capability is attached or revoked.
+12. **Vision is fenced.** Vision cannot be attached with a non-CUA model, and no
+    model switch happens silently.
+
+## What stays from the previous vision
+
+The grounding split (`native` / `dom` / `local`), the thin client, project-scoped
+persistent sessions with JSONL journals, the rolling summary, durable
+attachments, the MCP client, the approval philosophy and the "tell the computer,
+get the result" scenario are still the plan. This document only replaces the
+part that said "one session runs one mode".
+
+## Non-goals
+
+- **Tabs / parallel sessions.** One active session stays the rule.
+- **`switch_mode` ping-pong.** The agent never hops between modes; capabilities
+  attach in place.
+- **Code Mode / JS sandbox.** A catalogue and `search_tools` are enough at our
+  scale.
+- **Porting or forking OpenCode.** The Qt/Python product and its own agent loop
+  stay; only architectural ideas are borrowed.
+- **Per-mode MCP servers or per-mode approval policies.** Capabilities own them,
+  not modes.
+- **Auto-granting Vision.** Computer Use needs a paid CUA provider and an
+  explicit user choice.
+- **Parallel Vision sessions / virtual displays.** Revisit only if parallel
+  sessions ever become a goal.
+
+## Open questions
+
+1. **Revoke on panel close?** Recommendation: keep the grant until session end,
+   revoke only by an explicit toggle, so a task can finish after the user hides a
+   panel.
+2. **Chat with base tools?** Recommendation: yes — read-only filesystem plus
+   `open_terminal` / `open_browser`. It turns Chat into the entry point instead of
+   a dead end, and removes the "Chat cannot start work" limitation.
+3. **Native budget.** 30 tools or 35? Decide after Phase 3 measurement.
+4. **Stop semantics.** Keep "stop everything" (today) or "stop the turn, keep the
+   server"? Recommendation: keep today's behavior in Phase 1, revisit with real
+   usage data.
+5. **Vision placement.** A separate panel, or a toggle inside Terminal once a CUA
+   model is selected? Recommendation: separate panel, because it changes the
+   provider toolset.
