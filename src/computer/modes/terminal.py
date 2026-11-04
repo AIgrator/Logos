@@ -24,6 +24,7 @@ from src.computer.tools.common.display_message import display_message
 from src.computer.tools.common.finish import finish
 from src.computer.tools.common.get_clipboard_content import get_clipboard_content
 from src.computer.tools.common.open_browser import open_browser
+from src.computer.tools.common.open_terminal import open_terminal
 from src.computer.tools.common.update_plan import update_plan
 from src.computer.tools.common.use_skill import use_skill
 
@@ -53,6 +54,7 @@ TOOLS_METADATA = {
     "finish": finish,
     "get_clipboard_content": get_clipboard_content,
     "open_browser": open_browser,
+    "open_terminal": open_terminal,
     "update_plan": update_plan,
     "use_skill": use_skill,
     "mcp_list": mcp_list,

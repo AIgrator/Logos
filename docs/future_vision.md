@@ -35,8 +35,8 @@ declare the tools of a mode, and `src/computer/tool_registry.py` renders them
 into `cache/<mode>/tools.txt` and `cache/<mode>/response_formats.json`. The
 pydantic schemas in `src/computer/schemas/` carry a hardcoded name list per
 mode. Baseline: Chat 2, Terminal 29, Browser 26, Vision 21 tools (the counts
-now read 30 and 27 after `open_browser`; both agent schemas list the union from
-`schemas/agent_tools.py` instead of a per-mode list).
+now read 31 and 28 after `open_browser` and `open_terminal`; both agent schemas
+list the union from `schemas/agent_tools.py` instead of a per-mode list).
 
 **Modes are prompts.** `prompts/<mode>/system.txt` and per-mode user templates;
 `Brain.get_<mode>_prompts()` assembles them. The system prompt, the tool block
@@ -289,16 +289,21 @@ schema check reports no problems.
 > over the per-mode ones and stamps the provider caches), so a terminal turn in a
 > session that also holds Browser is told about the browser tools and its
 > envelope accepts them; a pure terminal or browser grant set stays byte-for-byte
-> identical to the per-mode files. Still open in this phase: the `exposure` axis
-> (native/catalog/hidden), the capability panels that replace the mode selector,
-> and one handler loop instead of two (today the browser handler sees only
-> `base+browser`, and a terminal capability attached beside it is used by
-> switching the panel to Terminal). Phase 2 has started with the first half:
-> `open_browser(url)` is a real tool that attaches the browser capability from
-> inside a terminal turn (grants grow, nothing is summarized, the page opens on
-> the shared service), and `browser_snapshot` works on the next step. The
-> `open_terminal()` half waits for the merged loop, because the browser handler
-> cannot execute terminal tools yet.
+> identical to the per-mode files. The last piece of this phase is the merged
+> loop: `TerminalHandler` is now the app's only agent loop and presents as
+> either Terminal or Browser (`presentation`, `schema_name`, `tool_view`), so
+> `AppController.browser_handler` is the same object as `terminal_handler`. A
+> browser turn can run shell tools and a terminal turn can run `browser_*` ones,
+> because one handler owns both the exec thread and the shared browser service;
+> the panel only picks the system prompt, the response envelope and the
+> `cache/session` view, and the browser step/time budgets and the persistent
+> screenshot rule follow the browser presentation. Still open in this phase: the
+> `exposure` axis (native/catalog/hidden) and the capability panels that replace
+> the mode selector. Phase 2 has started with the first half: `open_browser(url)`
+> is a real tool that attaches the browser capability from inside a terminal turn
+> (grants grow, nothing is summarized, the page opens on the shared service), and
+> `browser_snapshot` works on the next step. The `open_terminal()` half is
+> described under Phase 2 below.
 
 **Phase 1 — one session, granted capabilities.**
 Capability changes stop creating sessions. UI panels attach/revoke. The selector
@@ -313,11 +318,13 @@ the "next step" availability rule.
 attaches Terminal, starts the server with `ready_url`, attaches Browser, checks
 the page, and everything is one turn in one session.
 
-> **Status.** `open_browser(url)` has landed (base tool, attaches the browser
-> capability and navigates in one step; the next prompt already lists the browser
-> tools). `open_terminal()` waits for the single agent loop: today Browser mode
-> cannot execute terminal tools, so attaching Terminal from there would grant
-> nothing the running handler can use.
+> **Status.** Both halves have landed. `open_browser(url)` is a base tool that
+> attaches the browser capability and navigates in one step; `open_terminal()`
+> is a base control tool that attaches the terminal capability (and starts the
+> MCP manager) with a visible notice and a tool result telling the model the
+> shell/file/MCP tools are available on the next step. Because the two panels
+> share one loop, either call grants tools the running handler can actually
+> execute.
 
 **Phase 3 — exposure budget.**
 Native/catalog split from the table above, `search_tools`, measurement of the

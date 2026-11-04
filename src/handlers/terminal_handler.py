@@ -7,11 +7,13 @@ import logging
 import platform
 import html
 import re
+import time
 from PySide6.QtCore import QObject, Slot, QThread, QTimer, Signal
 
 from states import VisionState
 from ui.terminal_html_formatter import TerminalHtmlFormatter
 from src.browser.policy import UNTRUSTED_RESULT_TOOLS
+from src.browser.policy import is_sensitive_text, redact_url
 from src.computer import capabilities
 from src.computer.computer import Computer
 from src.computer.terminal_policy import evaluate as evaluate_terminal_access
@@ -44,6 +46,20 @@ def _running_job_id(result) -> int | None:
         except Exception:
             return None
     return None
+
+
+def _setting_int(settings: dict, key: str, default: int) -> int:
+    try:
+        return int(settings.get(key, default) or default)
+    except (TypeError, ValueError):
+        return default
+
+
+def _setting_float(settings: dict, key: str, default: float) -> float:
+    try:
+        return float(settings.get(key, default) or default)
+    except (TypeError, ValueError):
+        return default
 
 
 class JobEventRelay(QObject):
@@ -140,6 +156,11 @@ def _action_summary(action_name: str, action_args: dict) -> str:
         if name == 'mcp_get':
             return f"Inspecting MCP tool · {target}" if target else "Inspecting MCP tool"
         return f"MCP call · {target}" if target else "MCP call"
+    if name.startswith('browser_') or name == 'open_browser':
+        description = _shorten_text(args.get('description'), 120)
+        if description:
+            return description
+        return name.replace('_', ' ').capitalize()
     return f"Running {name.replace('_', ' ')}"
 
 
@@ -214,9 +235,32 @@ class WebTaskThread(QThread):
 
 
 class TerminalHandler(BaseAgentHandler):
+    """The app's single agent loop, presented as Terminal or as Browser.
+
+    Both capabilities run here: shell and file tools go to the exec thread,
+    ``browser_*`` calls go to the shared browser service (Playwright affinity),
+    and the capability set decides what the model is told about. The panel the
+    turn belongs to only changes the presentation: system prompt, response
+    envelope and the ``cache/session`` view that feeds the tool block.
+    """
+
     MODE_NAME = "terminal"
     SCHEMA_NAME = "terminal_tool_code"
     PROMPTS_SUBDIR = "terminal"
+
+    @property
+    def presentation(self) -> str:
+        """``browser`` while the Browser panel drives the turn, else terminal."""
+        mode = str(getattr(self.controller, "session_mode", "") or "").lower()
+        return "browser" if mode == "browser" else "terminal"
+
+    @property
+    def schema_name(self) -> str:
+        return "browser_tool_code" if self.presentation == "browser" else "terminal_tool_code"
+
+    @property
+    def tool_view(self) -> str:
+        return self.presentation
 
     def __init__(self, controller, theme_manager, working_directory=None):
         super().__init__(controller)
@@ -246,6 +290,11 @@ class TerminalHandler(BaseAgentHandler):
         self._job_commands = {}
         self._job_cwds = {}
         self._handled_job_ids = set()
+        # Browser presentation bookkeeping (one loop since Phase 1): the step
+        # budget and the fresh-history rule belong to a browser task only.
+        self._history_dirty = False
+        self._task_started = 0.0
+        self._step_count = 0
 
         self._job_event_relay = JobEventRelay()
         self._job_event_relay.event_received.connect(self._on_job_event)
@@ -269,6 +318,15 @@ class TerminalHandler(BaseAgentHandler):
             base_dir=lambda: self.computer.working_directory)
 
     def build_prompts(self):
+        if self.presentation == "browser":
+            return self.brain.get_browser_prompts(
+                user_request=self.original_user_request,
+                os_info=self.os_info,
+                history=self.model_history(),
+                current_url=self._current_browser_url(),
+                available_skills=self.skills_block(),
+                available_tools=self.session_tools_block(),
+            )
         # Live jobs are appended transiently (never stored): every planning
         # turn — including guidance-steered ones — sees what is already
         # running, so the model polls instead of relaunching it.
@@ -289,6 +347,21 @@ class TerminalHandler(BaseAgentHandler):
             available_tools=self.session_tools_block(),
         )
 
+    def _current_browser_url(self) -> str:
+        """The page the browser shows, read from the GUI-safe cache.
+
+        Live ``BrowserManager.url()`` calls are forbidden off the worker thread
+        (Playwright affinity), so a prompt reads the last known address instead.
+        """
+        try:
+            service = getattr(self.controller, "browser_service", None)
+            manager = service.manager() if service is not None else None
+            if manager is not None:
+                return getattr(manager, "last_known_url", "") or "not open yet"
+        except Exception:
+            pass
+        return "not open yet"
+
     def mcp_servers_block(self) -> str:
         """Configured MCP servers (state and one-line description) for the prompt."""
         manager = getattr(getattr(self, "computer", None), "mcp_manager", None)
@@ -298,13 +371,50 @@ class TerminalHandler(BaseAgentHandler):
             logging.warning(f"{type(self).__name__} MCP servers lookup failed: {error}")
             return "No MCP servers are configured."
 
-    def start_task(self, user_text: str):
+    def start_task(self, user_text: str, attachment_context: str | None = None):
         """A fresh task never inherits captures of an abandoned one."""
         if self.state == VisionState.IDLE:
             clear = getattr(self.computer, "clear_pending_screenshots", None)
             if callable(clear):
                 clear()
+            if self.presentation == "browser":
+                # Stop/Cancel idles the handler without BaseAgentHandler.stop()
+                # in the cancel path; drop that stale task's history on the next
+                # fresh start instead of feeding it to an unrelated task.
+                if self._history_dirty:
+                    self.command_history = []
+                    self._history_dirty = False
+                self._consecutive_errors = 0
+                self._assessment_sent = False
+                self._last_action_sig = None
+            self._task_started = time.monotonic()
+            self._step_count = 0
+        if attachment_context:
+            self.command_history.append(attachment_context)
         super().start_task(user_text)
+
+    def _continue_loop(self, last_command_output=None, from_job_wait=False):
+        """Adds the Browser task budget on top of the shared loop."""
+        if (self.presentation == "browser" and self.state == VisionState.EXECUTING
+                and self._task_started):
+            settings = (self.settings or {}).get("browser", {}) or {}
+            max_steps = _setting_int(settings, "max_steps", 50)
+            max_seconds = _setting_float(settings, "max_task_seconds", 1800.0)
+            reason = None
+            if max_steps > 0 and self._step_count >= max_steps:
+                reason = (f"step budget exhausted ({self._step_count}/{max_steps} tool "
+                          f"calls). Ask the user how to continue.")
+            elif (max_seconds > 0
+                  and time.monotonic() - self._task_started >= max_seconds):
+                reason = (f"time budget exhausted ({max_seconds:.0f}s). "
+                          f"Ask the user how to continue.")
+            if reason:
+                logging.warning(f"Browser task stopping: {reason}")
+                self.ui.add_message(
+                    f"<i>Browser task stopped: {reason}</i>", force_scroll=True)
+                self.stop()
+                return
+        super()._continue_loop(last_command_output, from_job_wait)
 
     def _request_attachments(self) -> list:
         """Attach the screenshots captured since the previous request, once.
@@ -343,8 +453,15 @@ class TerminalHandler(BaseAgentHandler):
         return attachments
 
     def _browser_screenshot_path(self) -> str:
-        """Latest browser screenshot, only while this turn is using the browser."""
-        if not str(self._pending_action_name or "").startswith("browser_"):
+        """Latest browser screenshot to attach to the next request.
+
+        Browser presentation keeps it like Browser mode did (peek, not consume:
+        navigation or a tab switch invalidates it). A terminal turn only carries
+        it while its last step was a browser one, so an old shot never rides
+        along unrelated terminal work.
+        """
+        if (self.presentation != "browser"
+                and not str(self._pending_action_name or "").startswith("browser_")):
             return ""
         service = getattr(self.controller, "browser_service", None)
         mgr = service.manager() if service is not None else None
@@ -420,7 +537,45 @@ class TerminalHandler(BaseAgentHandler):
                     args[key] = f"<{size} chars>"
         if action_name == 'execute_shell':
             args.pop('command', None)
+        if action_name.startswith('browser_') or action_name == 'open_browser':
+            # The description is already the step title, so the peek drops it.
+            args.pop('description', None)
         return super()._step_args_text(action_name, args)
+
+    def _element_for_args(self, action_args: dict) -> dict:
+        """Element a ref points at, for secret redaction (never raises)."""
+        try:
+            service = getattr(self.controller, "browser_service", None)
+            mgr = service.manager() if service is not None else None
+            if mgr is None:
+                return {}
+            return mgr.describe_ref((action_args or {}).get("ref"))
+        except Exception:
+            return {}
+
+    def _redact_action_args(self, action_name: str, action_args: dict) -> dict:
+        """Masks browser secrets/URL tokens before history, UI and logs see them."""
+        args = dict(action_args or {})
+        if not str(action_name or "").startswith("browser_"):
+            return args
+        element = self._element_for_args(args)
+        if "url" in args and isinstance(args.get("url"), str):
+            args["url"] = redact_url(args["url"])
+        if action_name == "browser_fill":
+            text = args.get("text")
+            if text is not None and is_sensitive_text(
+                    args.get("description"), element.get("name"),
+                    element.get("role"), element.get("type")):
+                args["text"] = f"<redacted: {len(str(text))} chars>"
+        if action_name == "browser_handle_dialog" and args.get("prompt_text"):
+            if is_sensitive_text(args.get("description")):
+                args["prompt_text"] = "<redacted>"
+        return args
+
+    def _history_action(self, action: dict) -> dict:
+        args = self._redact_action_args(
+            action.get("name"), action.get("arguments") or {})
+        return {**action, "arguments": args}
 
     def _replay_step_detail(self, action_name: str, action_args: dict):
         """Written file bodies and edit diffs render as they did live."""
@@ -557,6 +712,10 @@ class TerminalHandler(BaseAgentHandler):
         action_args = action.get('arguments', {})
         if not isinstance(action_args, dict):
             action_args = {}
+
+        # Browser presentation budgets one task the way Browser mode did.
+        if self.presentation == "browser":
+            self._step_count += 1
 
         # A session can grant the browser capability next to terminal tools;
         # those calls run on the shared browser thread (Playwright affinity),
@@ -1728,7 +1887,7 @@ class TerminalHandler(BaseAgentHandler):
             self._awaiting_job_id = None
 
     def _cleanup_task(self):
-        if self._tool_in_flight:
+        if self._tool_in_flight or self.presentation == "browser":
             # A browser step does not run on the terminal exec thread; drop it
             # through the shared service so its queued work never lands later.
             try:
@@ -1737,6 +1896,9 @@ class TerminalHandler(BaseAgentHandler):
                     service.cancel()
             except Exception as e:
                 logging.warning(f"Browser cancel failed: {e}")
+        if self.presentation == "browser":
+            # A cancelled browser task must not feed its history to the next one.
+            self._history_dirty = True
         self._exec_ticket += 1
         self._tool_in_flight = False
         self.cancel_job_wait()

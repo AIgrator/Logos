@@ -18,7 +18,7 @@ The application is a PySide6 desktop assistant with four modes — Chat, Termina
 
 5. **Tool cache — `ToolRegistry.generate_all()`** (`src/computer/tool_registry.py`). Reads each mode manifest, writes `cache/<mode>/tools.txt` and `cache/<mode>/response_formats.json`, and records a manifest fingerprint (names, descriptions and arguments) plus `SCHEMA_GEN_VERSION`. Any manifest change or schema-generation version bump forces regeneration; the model never sees a stale tool contract.
 
-6. **Controller and UI — `AppController`** (`src/controller.py`). Creates `UIManager`, the chat `Computer`, the four handlers (`ChatHandler`, `TerminalHandler`, `BrowserHandler`, `VisionHandler`), the project session state and `LLMWorker`. Each agent handler creates its own `Computer` with its own mode toolset. `LLMWorker` is moved to a `QThread`; `prepare_provider` runs there and imports **only the active provider**. `run()` then restores the newest session, replays it and silently applies the model its journal last recorded (see Model and provider management).
+6. **Controller and UI — `AppController`** (`src/controller.py`). Creates `UIManager`, the chat `Computer`, the agent loop (`TerminalHandler`, which also presents as Browser through `browser_handler`), `ChatHandler`, `VisionHandler` and `BrowserService`, the project session state and `LLMWorker`. Each agent handler creates its own `Computer` with its own mode toolset; the browser itself lives in the shared `BrowserService`. `LLMWorker` is moved to a `QThread`; `prepare_provider` runs there and imports **only the active provider**. `run()` then restores the newest session, replays it and silently applies the model its journal last recorded (see Model and provider management).
 
 7. **Vision readiness.** There is no background model loading and no local CV initialization: `_start_vision_initialization()` marks Vision ready immediately. Vision grounding is created per task through the active provider.
 
@@ -30,8 +30,8 @@ The application is a PySide6 desktop assistant with four modes — Chat, Termina
 | `UIManager` (`src/ui/manager.py`) | Full/compact window, home page and project sidebar, chat transcript, input, attachments, file-search popup, full-window settings page. |
 | `ChatHandler` (`src/handlers/chat_handler.py`) | Streaming chat: chunks, final message, context warning. No tool loop. |
 | `BaseAgentHandler` (`src/handlers/base_agent.py`) | Shared terminal/browser/vision loop: states, plan→act→observe, pause/resume/stop, escalation, repetition guards, journal events. |
-| `TerminalHandler` (`src/handlers/terminal_handler.py`) | `terminal_tool_code`, local/remote web requests, shell jobs, file tools, diff rendering. |
-| `BrowserHandler` (`src/handlers/browser_handler.py`) | `browser_tool_code`, Playwright execution thread, approvals, screenshots, budgets. |
+| `TerminalHandler` (`src/handlers/terminal_handler.py`) | The app's single agent loop; presents as Terminal (`terminal_tool_code`) or Browser (`browser_tool_code`), runs shell jobs, file tools, browser tools (via `BrowserService`), approvals, screenshots and budgets. |
+| `BrowserService` (`src/handlers/browser_service.py`) | The one Chromium of the app: Playwright execution thread, approval relay, screenshot folder, shutdown. |
 | `VisionHandler` (`src/handlers/vision_handler.py`) | Native Computer Use turns, action performers, safety/ask dialogs, compact overlay, budgets. |
 | `LLMWorker` (`src/llm/llm_worker.py`) | Provider lifecycle, calls/streams on a worker thread, schema validation and one self-correction pass, usage signals, cancellation. |
 | `Computer` (`src/computer/computer.py`) | Mode-scoped tool namespace; lazily binds tool functions from the mode manifest; owns `ShellJobManager`. |

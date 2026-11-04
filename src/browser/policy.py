@@ -7,7 +7,7 @@ a page. Every navigation (including redirects) therefore passes
 
 This is a policy layer, not a sandbox: it blocks obvious local/private
 targets and masks secrets in logs/prompts. User-facing approvals for risky
-actions live in ``browser_handler`` / ``src/handlers/tool_exec_worker.py``.
+actions live in ``browser_service`` / ``src/handlers/tool_exec_worker.py``.
 """
 import ipaddress
 import socket

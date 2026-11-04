@@ -261,6 +261,27 @@ class BaseAgentHandler:
     # Hard ceiling on one response's batch; the prompt asks for fewer.
     MAX_BATCH_ACTIONS = 8
 
+    @property
+    def presentation(self) -> str:
+        """How the session is being driven right now (prompt and envelope).
+
+        Terminal and Browser are one loop (``TerminalHandler``); this is the
+        panel the turn belongs to, and it decides which system prompt, which
+        response envelope and which session tool view are used. A capability
+        attached beside the presentation does not change it.
+        """
+        return self.MODE_NAME
+
+    @property
+    def schema_name(self) -> str | None:
+        """Response format this turn answers with."""
+        return self.SCHEMA_NAME
+
+    @property
+    def tool_view(self) -> str:
+        """``cache/session/<tool_view>`` directory the prompt reads."""
+        return self.presentation
+
     def __init__(self, controller):
         self.controller = controller
         self.ui = controller.ui
@@ -652,7 +673,7 @@ class BaseAgentHandler:
             self._request_attachments(),
             system_prompt,
             [],
-            self.SCHEMA_NAME,
+            self.schema_name,
             self._task_tag,
             self._turn_seq,
         )
@@ -675,7 +696,7 @@ class BaseAgentHandler:
         if model_context.has_compaction_marker(source):
             build_block = getattr(self.controller, "compaction_block", None)
             if callable(build_block):
-                replacement = build_block(self.MODE_NAME) or ""
+                replacement = build_block(self.presentation) or ""
             if replacement:
                 protected = [
                     entry for entry in before
@@ -689,7 +710,7 @@ class BaseAgentHandler:
         else:
             entries = tail
         compacted, stats = model_context.microcompact_agent_history(
-            entries, context_cfg, mode=self.MODE_NAME)
+            entries, context_cfg, mode=self.presentation)
         stats["compacted_entries"] = max(0, len(source) - len(entries))
         stats["compaction_active"] = bool(replacement)
         return compacted, stats
@@ -722,7 +743,7 @@ class BaseAgentHandler:
         Terminal and Browser embed the history in the user prompt. Vision's
         CUA request is assembled elsewhere, so it reports no payload.
         """
-        if self.MODE_NAME not in ("terminal", "browser"):
+        if self.presentation not in ("terminal", "browser"):
             return {}
         system_prompt, user_prompt = self.build_prompts()
         skills_text = self.skills_block()
@@ -734,7 +755,7 @@ class BaseAgentHandler:
             "history_text": "",
             "user_text": user_prompt or "",
             "tool_schema_text": model_context.tool_schema_text(
-                self.MODE_NAME, self.SCHEMA_NAME),
+                self.tool_view, self.schema_name),
             "image_count": self._payload_image_count(),
             "compact": stats,
         }
@@ -929,6 +950,10 @@ class BaseAgentHandler:
                 "steps start and finish.")
             return
 
+        if name == 'open_terminal':
+            self._attach_terminal_capability()
+            return
+
         if name == 'finish':
             self._batch_queue = []
             arguments = action.get('arguments') or {}
@@ -964,6 +989,38 @@ class BaseAgentHandler:
             return
 
         self._run_action(action)
+
+    def _attach_terminal_capability(self):
+        """`open_terminal`: grants shell/file tools to the open session.
+
+        One loop runs both capabilities, so this is all that is needed: the
+        next prompt carries the terminal tools and the envelope accepts them.
+        """
+        grants = getattr(self.controller, "session_capabilities", ()) or ()
+        already = "terminal" in grants
+        attach = getattr(self.controller, "attach_capability", None)
+        if callable(attach):
+            grants = attach("terminal") or grants
+        if "terminal" in (grants or ()):
+            ensure = getattr(self.controller, "ensure_mcp_manager", None)
+            if callable(ensure):
+                try:
+                    ensure()
+                except Exception as e:
+                    logging.warning(f"Could not start the MCP manager: {e}")
+        if already:
+            self.ui.add_message(
+                "<i>The terminal capability is already attached to this session.</i>")
+            note = ("The terminal capability was already attached. Shell, file "
+                    "and MCP tools are available; call them directly.")
+        else:
+            self.ui.add_message(
+                "<i>Terminal capability attached: shell, file and MCP tools are "
+                "available from the next step on.</i>")
+            note = ("The terminal capability is attached now. Shell, file, "
+                    "network and MCP tools are available from the next step; "
+                    "call them directly.")
+        self._after_action_result(f"**Tool Result:** {note}")
 
     def _after_action_result(self, output=None, from_job_wait=False, abort=False):
         """Continues the queued batch or asks the model to plan the next step.
@@ -1009,7 +1066,7 @@ class BaseAgentHandler:
                 text=commentary,
             )
 
-        if schema_name != self.SCHEMA_NAME or not payload:
+        if schema_name != self.schema_name or not payload:
             self._activity_finalize("Unexpected response", "error")
             self.ui.add_message("<i>Received an unexpected response from the model. Cannot proceed.</i>")
             self.stop()
@@ -1452,7 +1509,7 @@ class BaseAgentHandler:
             from src.computer.session_tools import session_tools_text
             settings = getattr(self.controller, "settings", None) or self.settings
             grants = getattr(self.controller, "session_capabilities", ()) or ()
-            return session_tools_text(settings, grants, self.MODE_NAME)
+            return session_tools_text(settings, grants, self.tool_view)
         except Exception as e:
             logging.warning(f"{type(self).__name__} session tool block failed: {e}")
             return ""

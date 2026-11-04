@@ -30,7 +30,7 @@ from ui.theme_manager import ThemeManager
 from handlers.chat_handler import ChatHandler
 from handlers.vision_handler import VisionHandler
 from handlers.terminal_handler import TerminalHandler
-from handlers.browser_handler import BrowserHandler, BrowserService
+from handlers.browser_service import BrowserService
 from states import ControllerState, VisionState
 from hotkey_manager import HotkeyManager
 from src.computer.computer import Computer
@@ -193,7 +193,9 @@ class AppController(QObject):
             settings_manager=self.settings_manager)
         self.vision_handler = VisionHandler(self)
         self.terminal_handler = TerminalHandler(self, self.theme_manager, working_directory=self.working_directory)
-        self.browser_handler = BrowserHandler(self)
+        # One agent loop: Terminal and Browser are two presentations of the same
+        # handler, so a capability attached in either panel is executable at once.
+        self.browser_handler = self.terminal_handler
         comp_duration = time.perf_counter() - comp_start
         logging.info(f"LocalDesktopComputer initialized in {comp_duration:.3f}s")
 
@@ -579,7 +581,7 @@ class AppController(QObject):
         }[mode]
         self.current_handler = handler
         self._set_state(state)
-        if mode == "terminal":
+        if "terminal" in self.session_capabilities:
             self.ensure_mcp_manager()
         try:
             self.ui.set_active_mode(mode)
@@ -703,6 +705,10 @@ class AppController(QObject):
                 logging.warning(
                     f"Could not record capability '{name}' in the session header.")
         logging.info(f"Attached capability '{name}'; session grants are now {list(grants)}.")
+        if "terminal" in grants:
+            # The terminal capability owns MCP servers; a session that gained it
+            # mid-turn must see them on the very next step.
+            self.ensure_mcp_manager()
         return grants
 
     def _load_project_session(self):
@@ -2688,7 +2694,7 @@ class AppController(QObject):
             # explicit model question still auto-continues the task.
             recent = paused_agent.command_history[-8:] if paused_agent.command_history else []
             context = "\n".join(str(x) for x in recent)
-            question = (f"[Paused {paused_agent.MODE_NAME} task — actions frozen, "
+            question = (f"[Paused {paused_agent.presentation} task — actions frozen, "
                         f"answering as chat]\n"
                         + (f"Recent task history:\n{context}\n\n" if context else "")
                         + f"User question while paused: {user_text}")
@@ -3019,7 +3025,9 @@ class AppController(QObject):
         task on eternal Thinking. Safe no-op when already routed.
         """
         target = {"terminal": ControllerState.TERMINAL,
-                  "browser": ControllerState.BROWSER}.get(getattr(handler, "MODE_NAME", ""))
+                  "browser": ControllerState.BROWSER}.get(
+            str(getattr(handler, "presentation", "") or
+                getattr(handler, "MODE_NAME", "")))
         if target is None:
             return
         if self.state == target and self.current_handler is handler:
@@ -3588,7 +3596,7 @@ class AppController(QObject):
         except Exception as e:
             logging.warning(f"Could not apply per-mode default model for '{subsection}': {e}", exc_info=True)
 
-    def _cleanup_and_switch_handler(self, new_handler, new_state):
+    def _cleanup_and_switch_handler(self, new_handler, new_state, mode: str | None = None):
         # Leaving chat abandons any queued (not yet answered) chat messages.
         self._clear_chat_queue()
 
@@ -3604,19 +3612,16 @@ class AppController(QObject):
         if self.current_handler == self.vision_handler:
             self.vision_handler.stop()
 
-        # Same for the browser handler (closes the controlled browser).
-        if self.current_handler == getattr(self, 'browser_handler', None):
-            self.browser_handler.stop()
-
-        mode = "chat"
-        for name, handler in (
-            ("terminal", getattr(self, "terminal_handler", None)),
-            ("browser", getattr(self, "browser_handler", None)),
-            ("vision", getattr(self, "vision_handler", None)),
-        ):
-            if new_handler is handler:
-                mode = name
-                break
+        # Terminal and Browser share one handler, so the mode cannot be derived
+        # from the handler identity anymore; the target state names it, and a
+        # caller may still pass it explicitly.
+        if mode is None:
+            mode = {
+                ControllerState.CHATTING: "chat",
+                ControllerState.TERMINAL: "terminal",
+                ControllerState.BROWSER: "browser",
+                ControllerState.VISION: "vision",
+            }.get(new_state, "chat")
         self._prepare_session_for_mode(mode)
         self._restore_agent_history()
 
@@ -3635,12 +3640,12 @@ class AppController(QObject):
         self._last_llm_error = False
 
     def _activate_chat_mode(self):
-        self._cleanup_and_switch_handler(self.chat_handler, ControllerState.CHATTING)
+        self._cleanup_and_switch_handler(self.chat_handler, ControllerState.CHATTING, mode="chat")
         self.ui.set_active_mode('chat')
         self.ui.add_message("<i>Chat mode enabled.</i>", force_scroll=True)
 
     def _activate_terminal_mode(self):
-        self._cleanup_and_switch_handler(self.terminal_handler, ControllerState.TERMINAL)
+        self._cleanup_and_switch_handler(self.terminal_handler, ControllerState.TERMINAL, mode="terminal")
         self.ensure_mcp_manager()
         self.ui.set_active_mode('terminal')
         self.ui.add_message("<i>Terminal mode enabled. I will now use terminal commands to accomplish tasks.</i>", force_scroll=True)
@@ -3676,7 +3681,7 @@ class AppController(QObject):
         if not self._ensure_browser_engine():
             self.ui.set_active_mode(self._current_mode())
             return
-        self._cleanup_and_switch_handler(self.browser_handler, ControllerState.BROWSER)
+        self._cleanup_and_switch_handler(self.browser_handler, ControllerState.BROWSER, mode="browser")
         self.ui.set_active_mode('browser')
         self.ui.add_message("<i>Browser mode enabled. Describe the web task you want me to perform.</i>", force_scroll=True)
 
@@ -3717,7 +3722,7 @@ class AppController(QObject):
             self.ui.set_active_mode(self._current_mode())
             self.ui.add_message(f"<i>{error}</i>", force_scroll=True)
             return
-        self._cleanup_and_switch_handler(self.vision_handler, ControllerState.VISION)
+        self._cleanup_and_switch_handler(self.vision_handler, ControllerState.VISION, mode="vision")
         self.ui.set_active_mode('vision')
         self.ui.add_message("<i>Vision mode enabled. Describe the task you want me to perform.</i>", force_scroll=True)
         self._apply_mode_default_model("vision")
@@ -3769,7 +3774,7 @@ class AppController(QObject):
         elif self.state == ControllerState.TERMINAL:
             handlers.append(self.terminal_handler)
         for handler in (self.browser_handler, self.terminal_handler):
-            if handler not in handlers:
+            if handler is not None and handler not in handlers:
                 handlers.append(handler)
         for handler in handlers:
             try:

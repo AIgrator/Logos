@@ -32,13 +32,15 @@ CHAT = "chat"
 CAPABILITIES = (BASE, TERMINAL, BROWSER, VISION, CHAT)
 
 #: Tools every agent session may use: read-only filesystem, control, skills.
-#: ``open_browser`` is a control tool: it asks for the browser capability rather
-#: than doing browser work itself, so it belongs to every agent session.
+#: ``open_browser`` and ``open_terminal`` are control tools: they ask for a
+#: capability rather than doing its work themselves, so they belong to every
+#: agent session.
 BASE_TOOLS = (
     "read_files",
     "list_directory",
     "search_file_content",
     "open_browser",
+    "open_terminal",
     "finish",
     "communicate_to_user",
     "update_plan",
@@ -150,15 +152,14 @@ HANDLER_SCHEMAS: dict[str, str] = {
 
 #: Capabilities each agent handler can *execute* today.
 #:
-#: The terminal handler dispatches ``browser_*`` calls into the shared browser
-#: service (see ``BrowserService``), so it can run every granted agent tool. The
-#: browser handler still owns only ``base`` + ``browser``: a terminal capability
-#: attached next to it is used by switching the panel to Terminal, which keeps
-#: the same session and journal. This asymmetry disappears when the two loops
-#: become one handler (Phase 1 of [the vision plan](../../docs/future_vision.md)).
+#: Terminal and Browser are one loop (``TerminalHandler`` presents as either),
+#: and that loop dispatches ``browser_*`` calls into the shared browser service
+#: and every other tool onto its exec thread, so one handler runs every granted
+#: agent tool. The two entries stay separate because the prompt and the
+#: response envelope are still chosen per presentation.
 HANDLER_CAPABILITIES: dict[str, tuple[str, ...]] = {
     TERMINAL: (BASE, TERMINAL, BROWSER),
-    BROWSER: (BASE, BROWSER),
+    BROWSER: (BASE, TERMINAL, BROWSER),
 }
 
 #: A fresh session without a mode yet starts here.

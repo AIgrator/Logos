@@ -288,9 +288,9 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   chrome while the call itself can be selected, and
   it is not rendered at all when the call is already its title or its detail -
   `BaseAgentHandler._step_args_text` drops null/empty leaves and hands the
-  trimming to the mode (`TerminalHandler` replaces file bodies with
-  `<N chars>` and removes the `execute_shell` command, `BrowserHandler` removes
-  the `description` that became the title), so a live step and its replay show
+  trimming to the handler (`TerminalHandler` replaces file bodies with
+  `<N chars>`, removes the `execute_shell` command and the browser
+  `description` that became the title), so a live step and its replay show
   the same call; `_format_args` also skips a step whose `detail_html` already
   renders the body. A long result is a preview of 25 lines / 3 500 characters
   plus a `Show all · N more lines` link (`row['output_expanded']`, anchor
@@ -464,6 +464,23 @@ drift apart silently; `cache/capabilities/tools.json` is the generated
 catalogue. `AppController.session_capabilities` mirrors the open session's
 grants.
 
+`TerminalHandler` is the app's only agent loop: `AppController.browser_handler`
+is the same object, so Terminal and Browser are two *presentations* of one
+handler (`presentation`, `schema_name`, `tool_view`; `BaseAgentHandler` defaults
+them to `MODE_NAME`/`SCHEMA_NAME`). The presentation comes from
+`controller.session_mode` and decides the system prompt (`prompts/terminal` or
+`prompts/browser`), the response envelope (`terminal_tool_code` /
+`browser_tool_code`) and the `cache/session` view, never which tools are
+allowed — that is the grants' job. Shell/file calls go to the exec thread and
+`browser_*` calls to the shared browser service, so a browser turn can run shell
+tools and a terminal turn can run browser ones. Browser-only habits follow the
+presentation: the step/time budgets (`browser.max_steps`,
+`browser.max_task_seconds`), the persistent (peeked) screenshot, dropping a
+cancelled task's history, and secret/URL redaction of browser arguments. A mode
+switch passes its mode explicitly to `_cleanup_and_switch_handler`, or relies on
+the target state naming it (`CHATTING`/`TERMINAL`/`BROWSER`/`VISION`), because
+handler identity no longer tells Terminal from Browser.
+
 The tool block and the response format follow the session's grants, not its
 mode (`src/computer/session_tools.py`, `src/llm/tool_catalog.py`).
 `ToolRegistry.generate_session_profile(grants, handlers)` writes
@@ -472,9 +489,10 @@ signature in `profile.json` (grants + tool names + schema generation) is checked
 while the prompt is built, so attaching a capability regenerates the view on the
 next turn and a pure `base+terminal` / `base+browser` grant set produces exactly
 the per-mode block and envelope, byte for byte. `HANDLER_CAPABILITIES` narrows
-that to what one handler can execute: terminal sees `base+terminal+browser`
-(it routes `browser_*` into the shared browser service), browser still sees only
-`base+browser` until the two loops merge. The provider layer (`tool_catalog`)
+that to what one handler can execute: Terminal and Browser are one loop
+(`TerminalHandler` presents as either), and that loop routes `browser_*` calls
+into the shared browser service and everything else onto its exec thread, so
+both entries list `base+terminal+browser`. The provider layer (`tool_catalog`)
 merges `cache/session/*` over `cache/<mode>/*`, so the granted envelope wins
 under the same name (`terminal_tool_code` / `browser_tool_code`), and each
 provider keys its formatted-tool cache on `catalogue_stamp()` (file mtimes) so a
@@ -490,22 +508,22 @@ directory) is the terminal/browser `working_directory` and the root passed to
 `Indexer`; `.logos` is ignored by the indexer. Do not hardcode `Indexer('.')` or
 `os.getcwd()` for project-scoped paths.
 
-`BrowserService` (`src/handlers/browser_handler.py`) owns the app's single
+`BrowserService` (`src/handlers/browser_service.py`) owns the app's single
 `BrowserManager` and the plain thread it runs on (`BrowserExecWorker`, name
 `browser-exec`), so a panel switch or a hard Terminal Stop never starts a second
-Chromium. Both handlers dispatch through it and pass their own GUI-thread
+Chromium. One loop dispatches through it and passes its own GUI-thread
 `ToolExecRelay`, so a browser step renders in the turn that asked for it:
 `TerminalHandler.execute_action` routes every `browser_*` call there (before the
-terminal access policy, since the browser policy classifies it), and
-`BrowserHandler.computer` is just a property over the service's Computer.
+terminal access policy, since the browser policy classifies it).
 `AppController.browser_service` is created before the handlers and shut down in
-`cleanup()`; `BrowserHandler.shutdown()` only delegates. Do not build a
+`cleanup()`. Do not build a
 `Computer(mode='browser')` or a `BrowserManager` anywhere else — one profile and
 one login state are the point. `browser_screenshot` saves into
 `<project>/.logos/screenshots` (newest 200 kept; the configured app folder when
 no project is open) through `BrowserManager.screenshot_dir`, and the PNG is
-attached to the next request: persistently in Browser mode, and in a terminal
-turn while its last step was a browser one (`TerminalHandler._request_attachments`).
+attached to the next request: persistently in the browser presentation, and in a
+terminal turn while its last step was a browser one
+(`TerminalHandler._request_attachments`).
 
 `open_browser(url)` is the control tool a session uses to attach the browser
 capability from inside an agent turn (Phase 2 of
@@ -518,10 +536,17 @@ shared service, so the step card and the journal record `open_browser` while the
 browser runs the navigation. `AppController.attach_capability` updates
 `session_capabilities` and the header's `capabilities`, so the next prompt's
 session profile already lists the browser tools and the envelope accepts them.
-In Browser mode the capability is already attached, so `BrowserHandler` treats
-the same action as a plain `browser_goto`. `open_terminal()` is deliberately not
-there yet: the browser handler cannot execute terminal tools until the two agent
-loops merge.
+When the browser capability is already attached the same action is just a
+`browser_goto`.
+
+`open_terminal()` is its mirror and the other half of Phase 2: also a `base`
+tool and a control tool, handled in `BaseAgentHandler._attach_terminal_capability`
+before any action runs (`_dispatch_action`), because it executes nothing itself.
+It attaches the terminal capability, starts the MCP manager (a session that
+gained terminal tools mid-turn must see its servers on the next step) and hands
+the model a tool result saying the shell/file/MCP tools are available from the
+next step, plus a chat notice for the user. Since both panels are one loop,
+either call grants tools the running handler can execute immediately.
 
 ## Settings
 
@@ -679,8 +704,9 @@ the default `hide_app` is rejected with a hint to pass `false`.
 The image itself reaches the model once: `screenshot` calls
 `Computer.set_pending_screenshot`, and `TerminalHandler._request_attachments`
 (consumed by `BaseAgentHandler._plan_next_action`) reads up to the last four
-pending files into the next request and forgets them, unlike Browser mode where
-a screenshot lives until the next navigation. A fresh task drops leftovers
+pending files into the next request and forgets them, unlike the browser
+presentation's own shot, which lives until the next navigation. A fresh task
+drops leftovers
 (`TerminalHandler.start_task`). Attachment is gated only by a catalogue entry
 that explicitly lists modalities without `image`; an uncatalogued model (older
 or newer than `models.json`, or a hand-typed custom one) still gets the image,
