@@ -224,6 +224,7 @@ Vision mode does not use a local tool manifest. Actions come from the provider's
 #### Browser Mode Tools
 *   **Navigation**: `browser_goto`, `browser_navigate_back`, `browser_tabs`, `browser_close`.
 *   **Observation**: `browser_snapshot` (numbered element refs; controls inside iframes are included and marked `(frame N: host)`), `browser_screenshot` (with ref badges), `browser_read` (page text plus `Frame N` lines for iframes), `browser_find`, `browser_frames` (frame indexes).
+*   **Diagnostics**: `browser_console` (newest console messages and uncaught page errors, filterable by `level`) and `browser_network` (requests with method, URL, status and duration; `only_problems` keeps 4xx/5xx and failed ones). Both print a short tail and point at the full log of the browser session, which is kept in `<project>/.logos/browser_logs/` and read with `read_files` / `search_file_content`.
 *   **Interaction**: `browser_click` (by `ref`, or by `x`/`y` coordinates for canvas, image maps and widgets that have no element), `browser_fill`, `browser_select_option`, `browser_hover`, `browser_press`, `browser_handle_dialog`, `browser_wait_for`, `browser_eval` (one JavaScript expression in the page or a frame; each call asks the user for approval).
 *   **Attachments**: `read_files`, `list_directory`, `search_file_content` (read-only filesystem access for files attached by reference).
 *   **Skills**: `use_skill` loads an installed Agent Skill on demand (see the [skills guide](./docs/skills.md)).

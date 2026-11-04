@@ -33,6 +33,7 @@ _STOP_SENTINEL = object()
 # Tool results that contain page-authored text (untrusted data, not orders).
 _UNTRUSTED_RESULT_TOOLS = frozenset({
     "browser_read", "browser_snapshot", "browser_find", "browser_eval",
+    "browser_console", "browser_network",
 })
 
 
@@ -305,6 +306,7 @@ class BrowserHandler(BaseAgentHandler):
         objects must be created where they are used.
         """
         from src.browser.manager import BrowserManager
+        from src.browser.logs import resolve_log_dir
         mgr = getattr(self.computer, "browser_manager", None)
         if mgr is not None:
             return mgr
@@ -317,6 +319,8 @@ class BrowserHandler(BaseAgentHandler):
             block_ads=_setting_bool(browser_settings, "block_ads", True),
             allowed_domains=browser_settings.get("allowed_domains") or [],
             network_access=resolve_network_access(browser_settings),
+            log_dir=resolve_log_dir(
+                str(getattr(self.computer, "working_directory", "") or "")),
         )
         self.computer.browser_manager = mgr
         # The browser_* tools also look for a factory on the Computer.

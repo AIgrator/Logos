@@ -685,6 +685,27 @@ Browser", comes from the `navigator.userAgentData` brand list of a plain
 Chromium build, not from automation signals, and closing it is stealth work
 (`patchright`/`rebrowser-patches`), deliberately not done yet.
 
+Console and network traffic are captured passively (`src/browser/logs.py`), so
+the model can see why a page broke instead of guessing. `BrowserManager` hooks
+`console`, `pageerror`, `response`, `requestfailed` and `framenavigated` on
+every page it attaches (popups included, through `_attach_page`); listeners
+never drive the page and only append to two bounded rings (1 000 console
+entries, 3 000 responses) and to one file per browser launch under
+`<project>/.logos/browser_logs/browser_<YYYYmmdd_HHMMSS>.log` (8 MB cap, newest
+50 files kept, `resolve_log_dir` returns nothing when no project is open, so
+the rings still work in the standalone harness). `browser_console` (arguments
+`limit`, `level` = all/error/warning) and `browser_network` (`limit`,
+`only_problems`) return the newest entries — newest last, clipped to 7 000
+characters with the tail kept — plus the log path, and the model reads the rest
+with `read_files` / `search_file_content`, which is why a noisy SPA never floods
+the transcript. Both are read-only for `classify_action` and both results are
+wrapped as untrusted page content, because console text and URLs are authored by
+the page. Network entries are recorded on the response (method, redacted URL,
+status, resource type, `request.timing` duration) and on `requestfailed`, so a
+blocked ad request shows up as `FAILED` rather than silently disappearing.
+Console text is stored as the page wrote it, so a page that prints a token puts
+it in that local log; URLs are always redacted with `redact_url`.
+
 ## MCP servers
 
 Terminal mode reaches user-configured MCP servers through three meta-tools

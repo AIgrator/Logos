@@ -20,6 +20,22 @@ def _with_dialog_note(mgr, text: str) -> str:
     return text
 
 
+def _int_arg(value, default: int, low: int, high: int) -> int:
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(low, min(high, number))
+
+
+def _bool_arg(value, default: bool = False) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
 @tool_meta(
     tool={
         "name": "browser_goto",
@@ -395,6 +411,88 @@ def browser_screenshot(self, **kwargs):
 )
 def browser_read(self, **kwargs):
     return _manager(self).read()
+
+
+@tool_meta(
+    tool={
+        "name": "browser_console",
+        "strategic": "Shows console messages and uncaught page errors.",
+        "description": (
+            "Returns the newest browser console messages and uncaught JavaScript errors "
+            "with their source location, oldest first. Use it when the page looks broken "
+            "or a click had no visible effect: a failed fetch, a CORS error and an "
+            "uncaught exception all show up here instead of being guessed. level: all "
+            "(default), error or warning. The full log of this browser session is a file "
+            "on disk; read more of it with read_files or search it with "
+            "search_file_content."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "What is being diagnosed.", "required": True},
+            "limit": {"type": "INTEGER", "description": "How many newest entries to return (default 40, max 200).", "required": False},
+            "level": {"type": "STRING", "description": "all (default), error or warning.", "required": False},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_console(self, **kwargs):
+    mgr = _manager(self)
+    mgr.pump_events()
+    limit = _int_arg(kwargs.get("limit"), 40, 1, 200)
+    level = str(kwargs.get("level") or "all")
+    stats = mgr.logs.stats()
+    head = (f"Console: {stats['console']} message(s) in this browser session "
+            f"({stats['console_errors']} error(s), {stats['console_warnings']} "
+            f"warning(s))")
+    body = mgr.logs.render_console(limit=limit, level=level)
+    if not body:
+        return f"{head}\nNo console messages match level={level}."
+    if level.strip().lower() not in ("", "all", "any"):
+        head += f" · newest {limit}, level={level}"
+    parts = [head, body]
+    hint = mgr.logs.read_hint()
+    if hint:
+        parts.append(hint)
+    return "\n".join(parts)
+
+
+@tool_meta(
+    tool={
+        "name": "browser_network",
+        "strategic": "Shows recent requests with status and timing.",
+        "description": (
+            "Returns the newest network requests of the current page with method, URL, "
+            "HTTP status, resource type and duration, oldest first. Use it after a form "
+            "submit, a login or a fetch to see what the server actually answered: a 404, "
+            "a 500 or a connection failure explains a broken flow without guessing. "
+            "only_problems=true keeps only failed requests and statuses >= 400. The full "
+            "log of this browser session is a file on disk; read more of it with "
+            "read_files or search it with search_file_content."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "What is being diagnosed.", "required": True},
+            "limit": {"type": "INTEGER", "description": "How many newest entries to return (default 40, max 200).", "required": False},
+            "only_problems": {"type": "BOOLEAN", "description": "Keep only failed requests and 4xx/5xx statuses.", "required": False},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_network(self, **kwargs):
+    mgr = _manager(self)
+    mgr.pump_events()
+    limit = _int_arg(kwargs.get("limit"), 40, 1, 200)
+    only_problems = _bool_arg(kwargs.get("only_problems"), False)
+    stats = mgr.logs.stats()
+    head = (f"Network: {stats['network']} response(s) in this browser session "
+            f"({stats['network_problems']} failed or status >= 400)")
+    body = mgr.logs.render_network(limit=limit, only_problems=only_problems)
+    if not body:
+        return (f"{head}\nNo requests to show"
+                + (" that failed or returned >= 400." if only_problems else "."))
+    if only_problems:
+        head += f" · newest {limit}, problems only"
+    parts = [head, body]
+    hint = mgr.logs.read_hint()
+    if hint:
+        parts.append(hint)
+    return "\n".join(parts)
 
 
 @tool_meta(

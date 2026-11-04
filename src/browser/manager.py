@@ -11,6 +11,7 @@ import logging
 import time
 from urllib.parse import urlsplit
 
+from .logs import BrowserEventLog
 from .policy import (BrowserCancelledError, DEFAULT_NETWORK_ACCESS,
                      is_sensitive_text, normalize_network_access,
                      redact_url, validate_url)
@@ -63,12 +64,18 @@ class BrowserManager:
     def __init__(self, headless: bool = False, profile_dir: str = "cache/browser_profile",
                  timeout_ms: int = 30000, block_ads: bool = True,
                  easylist_path: str | None = None, allowed_domains=None,
-                 network_access: str = DEFAULT_NETWORK_ACCESS):
+                 network_access: str = DEFAULT_NETWORK_ACCESS,
+                 log_dir: str | None = None):
         self.headless = headless
         self.profile_dir = profile_dir
         self.timeout_ms = timeout_ms
         self.block_ads = block_ads
         self._easylist_path = easylist_path
+        # Console/network capture: memory rings always, a file when log_dir is
+        # set (<project>/.logos/browser_logs). See browser/logs.py.
+        self._log_dir = log_dir or ""
+        self.logs = BrowserEventLog()
+        self._diag_pages = set()  # id(page) with console/network listeners
         self.allowed_domains = list(allowed_domains or [])
         self.network_access = normalize_network_access(network_access)
         self._cancel_check = None
@@ -156,6 +163,7 @@ class BrowserManager:
         from playwright.sync_api import sync_playwright
         import os
         os.makedirs(self.profile_dir, exist_ok=True)
+        self.logs.start(self._log_dir)
         self._pw = sync_playwright().start()
         self._browser = self._pw.chromium.launch_persistent_context(
             user_data_dir=os.path.abspath(self.profile_dir),
@@ -163,9 +171,10 @@ class BrowserManager:
             args=["--disable-blink-features=AutomationControlled"],
         )
         pages = self._browser.pages
-        # Popups/new tabs get the CDP guard too, not only the active page.
+        # Popups/new tabs get the CDP guard and diagnostics too, not only the
+        # active page.
         try:
-            self._browser.on("page", self._install_navigation_guard)
+            self._browser.on("page", self._attach_page)
         except Exception as e:
             logger.warning(f"Could not hook browser page events for URL guard: {e}")
         self._use_page(pages[0] if pages else self._browser.new_page())
@@ -333,6 +342,8 @@ class BrowserManager:
         self._dialog_pages = set()
         self._guard_pages = set()
         self._guard_sessions = {}
+        self._diag_pages = set()
+        self.logs.close()
         self.last_known_url = ""
 
     def _require_page(self):
@@ -371,9 +382,124 @@ class BrowserManager:
         self._page.set_default_timeout(self.timeout_ms)
         self._install_dialog_router(page)
         self._install_navigation_guard(page)
+        self._attach_diagnostics(page)
         self._refs = {}
         self._last_snapshot = []
         self._last_screenshot_path = None  # stale image is worse than none
+
+    def _attach_page(self, page) -> None:
+        """Applies the per-page hooks a popup needs as well as the main page."""
+        self._install_navigation_guard(page)
+        self._attach_diagnostics(page)
+
+    def _attach_diagnostics(self, page) -> None:
+        """Records console messages and network results (see browser/logs.py).
+
+        Listeners are passive: they never drive the page, never raise into
+        Playwright's event loop and only append to bounded buffers.
+        """
+        if page is None or id(page) in self._diag_pages:
+            return
+        self._diag_pages.add(id(page))
+        logs = self.logs
+
+        def _console(message):
+            try:
+                location = message.location or {}
+            except Exception:
+                location = {}
+            where = ""
+            try:
+                url = redact_url(str((location or {}).get("url") or ""))
+                line = (location or {}).get("lineNumber")
+                if url:
+                    where = (f" ({url}:{int(line) + 1})"
+                             if isinstance(line, int) and line >= 0
+                             else f" ({url})")
+            except Exception:
+                where = ""
+            try:
+                logs.console(message.type, message.text, where)
+            except Exception:
+                pass
+
+        def _page_error(error):
+            try:
+                logs.console("error", str(error), kind="pageerror")
+            except Exception:
+                pass
+
+        def _response(response):
+            try:
+                request = response.request
+                duration = None
+                try:
+                    timing = request.timing or {}
+                    start = timing.get("startTime")
+                    end = timing.get("responseEnd")
+                    if start is not None and end is not None and end >= start:
+                        duration = end - start
+                except Exception:
+                    duration = None
+                logs.network(request.method, redact_url(request.url or ""),
+                             response.status, request.resource_type or "",
+                             duration)
+            except Exception:
+                pass
+
+        def _request_failed(request):
+            try:
+                try:
+                    failure = request.failure or ""
+                except Exception:
+                    failure = ""
+                logs.network(request.method, redact_url(request.url or ""),
+                             None, request.resource_type or "", None,
+                             error=str(failure))
+            except Exception:
+                pass
+
+        def _navigated(frame):
+            try:
+                if frame is not page.main_frame:
+                    return
+                logs.navigation(redact_url(frame.url or ""))
+            except Exception:
+                pass
+
+        for event, handler in (
+                ("console", _console), ("pageerror", _page_error),
+                ("response", _response), ("requestfailed", _request_failed),
+                ("framenavigated", _navigated)):
+            try:
+                page.on(event, handler)
+            except Exception as e:
+                logger.warning(f"Could not hook page {event} events: {e}")
+
+        def _forget():
+            self._diag_pages.discard(id(page))
+
+        try:
+            page.on("close", _forget)
+        except Exception:
+            pass
+        logger.info("Browser console/network capture installed.")
+
+    def pump_events(self, milliseconds: int = 50) -> None:
+        """Flushes queued page events into the log rings.
+
+        Playwright's sync API dispatches page events only while a protocol call
+        is in flight, so ``browser_console``/``browser_network`` would otherwise
+        report the state of the previous call. A tiny wait is enough: the queue
+        already holds everything that happened in between.
+        """
+        page = self._page
+        if page is None:
+            return
+        try:
+            page.wait_for_timeout(max(1, int(milliseconds)))
+        except Exception as e:
+            logger.debug(f"Event pump skipped: {e}")
 
     def _install_dialog_router(self, page) -> None:
         """Records JS dialogs; auto-dismiss preserves default Playwright behavior."""
