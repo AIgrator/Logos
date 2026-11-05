@@ -203,6 +203,7 @@ class ChatWidget(QAbstractScrollArea):
     retry_requested = Signal()
     continue_requested = Signal()
     job_stop_requested = Signal(int)
+    job_detach_requested = Signal()
     attachment_preview_requested = Signal(str, str)
     suggestion_selected = Signal(str)
 
@@ -1610,6 +1611,9 @@ class ChatWidget(QAbstractScrollArea):
                 self.job_stop_requested.emit(int(rest))
             except (TypeError, ValueError):
                 return False
+            return True
+        if kind == 'detach':
+            self.job_detach_requested.emit()
             return True
         if kind == 'log':
             path = unquote(rest)

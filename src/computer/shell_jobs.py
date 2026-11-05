@@ -808,6 +808,11 @@ class ShellJob:
         self.proc = None
         self.cancel_event = threading.Event()
         self.done = threading.Event()
+        # A foreground command waits on the job inside launch_and_wait; the user
+        # can move it into the background (link in the step row / Ctrl+B), so
+        # the wait loop watches this flag as well as its own detach budget.
+        self.detach_event = threading.Event()
+        self.foreground = False
         self.result = None
         self.started = time.monotonic()
         self.ready = False
@@ -1011,32 +1016,73 @@ class ShellJobManager:
         seconds, otherwise a live job handle (same shape as launch) while
         the process keeps running under the original timeout. Either way
         the caller never blocks longer than detach_after. Live progress
-        flows through progress_cb during the wait phase.
+        flows through progress_cb during the wait phase. `request_detach`
+        ends the wait early — that is the manual "move to background" path.
         """
         job = self._register(command, timeout, cancel_event,
                              output_limit=output_limit,
                              inactivity_timeout=inactivity_timeout)
+        job.foreground = True
         self._start_job_thread(job, working_directory)
         start = time.monotonic()
-        while not job.done.is_set():
-            elapsed = time.monotonic() - start
-            if elapsed >= detach_after:
-                logging.info(f"Foreground command detached into background job "
-                             f"#{job.job_id} after {elapsed:.1f}s.")
-                return {"job_id": job.job_id, "status": "running", "detached": True,
-                        "state": "starting",
-                        "output_file": job.log_path,
-                        "hint": "Still running in background. Use poll_shell_job to check, "
-                                "stop_shell_job to abort. Full output streams to output_file."}
-            if progress_cb is not None:
-                with job.lock:
-                    snapshot = list(job.stdout_parts)
-                try:
-                    progress_cb(elapsed, _last_useful_line(snapshot))
-                except Exception:
-                    pass
-            time.sleep(0.2)
-        return self._take_finished(job.job_id)
+        try:
+            while not job.done.is_set():
+                elapsed = time.monotonic() - start
+                if job.detach_event.is_set():
+                    logging.info(f"Foreground command moved to background job "
+                                 f"#{job.job_id} by the user after {elapsed:.1f}s.")
+                    return {"job_id": job.job_id, "status": "running",
+                            "detached": True, "detached_by_user": True,
+                            "state": "starting",
+                            "output_file": job.log_path,
+                            "hint": ("The user moved this command to the "
+                                     "background. It keeps running; continue with "
+                                     "the rest of the task and use poll_shell_job "
+                                     "to check it, stop_shell_job to abort.")}
+                if elapsed >= detach_after:
+                    logging.info(f"Foreground command detached into background job "
+                                 f"#{job.job_id} after {elapsed:.1f}s.")
+                    return {"job_id": job.job_id, "status": "running", "detached": True,
+                            "state": "starting",
+                            "output_file": job.log_path,
+                            "hint": "Still running in background. Use poll_shell_job to check, "
+                                    "stop_shell_job to abort. Full output streams to output_file."}
+                if progress_cb is not None:
+                    with job.lock:
+                        snapshot = list(job.stdout_parts)
+                    try:
+                        progress_cb(elapsed, _last_useful_line(snapshot))
+                    except Exception:
+                        pass
+                time.sleep(0.2)
+            return self._take_finished(job.job_id)
+        finally:
+            job.foreground = False
+
+    def foreground_job_id(self) -> int | None:
+        """The job a foreground command is still waiting on, if any.
+
+        Only one foreground command runs at a time (one exec thread), so the
+        newest waiting job is the one a "move to background" click means.
+        """
+        with self._lock:
+            waiting = [job for job in self._jobs.values()
+                       if job.foreground and not job.done.is_set()]
+        if not waiting:
+            return None
+        return max(waiting, key=lambda job: job.job_id).job_id
+
+    def request_detach(self, job_id: int) -> dict:
+        """Ends a foreground command's wait; the process becomes a live job."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return {"job_id": job_id, "status": "not_found"}
+        if job.done.is_set():
+            return {"job_id": job_id, "status": "done"}
+        job.detach_event.set()
+        return {"job_id": job_id, "status": "running", "state": "starting"}
+
 
     def _take_finished(self, job_id: int) -> dict:
         """Removes a finished job and returns its FULL result dict."""

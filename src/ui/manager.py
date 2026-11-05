@@ -13,8 +13,9 @@ from PIL import Image, ImageChops, ImageDraw, ImageOps
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QEasingCurve, QMimeData, QPoint,
                             QPropertyAnimation, QRect, QSize, Qt, Signal, QTimer, Slot)
-from PySide6.QtGui import (QColor, QCursor, QIcon, QImage, QPainter, QPen, QPixmap,
-                           QTextCursor, QTextDocument, QTextOption)
+from PySide6.QtGui import (QColor, QCursor, QIcon, QImage, QKeySequence, QPainter,
+                           QPen, QPixmap, QShortcut, QTextCursor, QTextDocument,
+                           QTextOption)
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QMenu, QPushButton, QSizeGrip,
                                QTextEdit, QVBoxLayout, QWidget)
@@ -291,6 +292,7 @@ class UIManager(QWidget):
     continue_requested = Signal()
     retry_requested = Signal()
     job_stop_requested = Signal(int)
+    job_detach_requested = Signal()
     attachment_removed = Signal(int)
     cancel_requested = Signal()
     toggle_fullscreen_button_clicked = Signal()
@@ -427,6 +429,16 @@ class UIManager(QWidget):
         self.chat_widget.retry_requested.connect(self.retry_requested.emit)
         self.chat_widget.continue_requested.connect(self.continue_requested.emit)
         self.chat_widget.job_stop_requested.connect(self.job_stop_requested.emit)
+        self.chat_widget.job_detach_requested.connect(
+            self.job_detach_requested.emit)
+        # Ctrl+B moves a running foreground command to the background, the same
+        # action as the "Move to background" link on its step row. Window-scoped
+        # so it works while the composer has focus.
+        self.job_detach_shortcut = QShortcut(QKeySequence("Ctrl+B"),
+                                            self.main_window)
+        self.job_detach_shortcut.setContext(Qt.WindowShortcut)
+        self.job_detach_shortcut.activated.connect(
+            self.job_detach_requested.emit)
         self.chat_widget.attachment_preview_requested.connect(
             self._open_attachment_path)
         self.chat_widget.suggestion_selected.connect(

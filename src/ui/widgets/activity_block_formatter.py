@@ -562,9 +562,17 @@ class ActivityBlockFormatter:
     def _job_actions(self, msg: dict, row: dict) -> str:
         job_id = row.get("job_id")
         log_path = row.get("log_path")
-        if job_id is None and not log_path:
-            return ""
         links = []
+        # A command still waiting in the foreground can be handed to the
+        # background by the user (Ctrl+B does the same): the shell returns a
+        # job handle at once, so the agent stops waiting for it.
+        if (job_id is None and row.get("status") == "running"
+                and row.get("name") == "execute_shell"):
+            links.append(
+                f'<a href="activity:{msg.get("id")}:detach:{row.get("id")}" '
+                f'style="color: {self._get_style("COLLAPSIBLE_TITLE")}; '
+                'text-decoration: none; font-weight: 600;">'
+                "Move to background</a>")
         # Stop is offered only while the launch step is still live; once the
         # job ends the row is marked ok/error and the link disappears.
         if job_id is not None and row.get("status") == "running":

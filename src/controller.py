@@ -264,6 +264,7 @@ class AppController(QObject):
         self.ui.retry_requested.connect(self._handle_retry_request)
         self.ui.continue_requested.connect(self._handle_continue_request)
         self.ui.job_stop_requested.connect(self._handle_job_stop)
+        self.ui.job_detach_requested.connect(self._handle_job_detach)
         self.ui.model_selected.connect(self.switch_model)
         self.ui.reasoning_effort_changed.connect(self.set_reasoning_effort)
         self.ui.cancel_requested.connect(self.handle_cancel_request)
@@ -3819,6 +3820,17 @@ class AppController(QObject):
             handler.request_stop_job(job_id)
         except Exception as e:
             logging.warning(f"Could not stop shell job #{job_id} from UI: {e}")
+
+    def _handle_job_detach(self):
+        """User moved the running command to the background (link or Ctrl+B)."""
+        handler = getattr(self, "terminal_handler", None)
+        detach = getattr(handler, "request_detach_job", None)
+        if not callable(detach):
+            return
+        try:
+            detach()
+        except Exception as e:
+            logging.warning(f"Could not move the running command to the background: {e}")
 
     def _handle_stop(self):
         """Stops the running work but keeps the mode the user has selected.

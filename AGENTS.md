@@ -256,6 +256,21 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   (`_has_live_job`), and a replayed row (no `job_started_at`) never ticks.
   A Stop click on a job that already ended drops its pinned row instead of
   leaving it in `stopping` (`TerminalHandler.request_stop_job`).
+  A command still waiting in the foreground can be handed to the background by
+  the user instead of the tail of the turn: a running `execute_shell` step row
+  offers `Move to background` (anchor
+  `activity:<msg id>:detach:<row id>` → `ChatWidget.job_detach_requested` →
+  `AppController._handle_job_detach`), and Ctrl+B does the same through a
+  window-scoped `QShortcut` in `UIManager` (so it also works while the composer
+  has focus). `TerminalHandler.request_detach_job` takes
+  `ShellJobManager.foreground_job_id()` - the one job a `launch_and_wait` is
+  still waiting on - and `request_detach` sets that job's `detach_event`; the
+  wait loop then returns the live handle at once with `detached_by_user`, so
+  the row becomes a job row, the strip pins it, and `_on_tool_finished`
+  continues the loop instead of `_arm_job_wait`. The model is told the user
+  moved it and to keep working; it polls or stops the job as usual. The
+  auto-detach after `terminal.shell_detach_seconds` (default 25 s, capped at
+  the shell timeout) still covers the case where nobody clicks.
   A session reset (`UIManager.clear_chat`) clears the strip; compact mode
   hides it (`set_suppressed`) without forgetting the jobs.
   Every message carries a footer strip under it: a user bubble the local send

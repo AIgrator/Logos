@@ -1048,15 +1048,29 @@ class TerminalHandler(BaseAgentHandler):
                 title = f"Shell · job #{job_id} · {job_state} · {ready_url}"
                 title_color = self._theme("WARNING_COLOR")
             else:
-                note = (f"Started in background as job #{job_id}. "
-                        f"State: {job_state}. Use poll_shell_job to check "
-                        "progress, stop_shell_job to abort.")
-                output_for_llm = (
-                    f"**Tool Result:** Background shell job #{job_id} started; "
-                    f"state: {job_state}.\n"
-                    f"Poll it with poll_shell_job, pacing polls with wait_seconds.\n"
-                    f"```\n{result}\n```"
-                )
+                if isinstance(result, dict) and result.get('detached_by_user'):
+                    note = (f"Moved to the background by the user as job #{job_id}. "
+                            f"State: {job_state}. Do not wait for it: keep going "
+                            "and use poll_shell_job to check progress, "
+                            "stop_shell_job to abort.")
+                    output_for_llm = (
+                        f"**Tool Result:** The user moved this command to the "
+                        f"background as job #{job_id}; state: {job_state}. It keeps "
+                        "running. Continue with the rest of the task; check it with "
+                        "poll_shell_job (pace polls with wait_seconds) and stop it "
+                        "with stop_shell_job when it is no longer needed.\n"
+                        f"```\n{result}\n```"
+                    )
+                else:
+                    note = (f"Started in background as job #{job_id}. "
+                            f"State: {job_state}. Use poll_shell_job to check "
+                            "progress, stop_shell_job to abort.")
+                    output_for_llm = (
+                        f"**Tool Result:** Background shell job #{job_id} started; "
+                        f"state: {job_state}.\n"
+                        f"Poll it with poll_shell_job, pacing polls with wait_seconds.\n"
+                        f"```\n{result}\n```"
+                    )
                 title = f"Shell · job #{job_id} · {job_state}"
                 title_color = self._theme("WARNING_COLOR")
             output_file = result.get('output_file')
@@ -1666,7 +1680,11 @@ class TerminalHandler(BaseAgentHandler):
             # An explicit poll is different: its result is already current,
             # so waiting again here only stalls the model by 10 seconds.
             self.command_history.append(output_for_llm)
-            if isinstance(result, dict) and result.get('readiness_checked'):
+            if isinstance(result, dict) and (
+                    result.get('readiness_checked')
+                    or result.get('detached_by_user')):
+                # A user detach asks for the opposite of waiting: the command
+                # now lives in the background, so the model gets control back.
                 self._after_action_result(output_for_llm)
                 return
             self._arm_job_wait(live_job_id)
@@ -1906,6 +1924,39 @@ class TerminalHandler(BaseAgentHandler):
                 update(job_id, 'stopping', 'stopping')
             except Exception:
                 pass
+
+    def request_detach_job(self) -> bool:
+        """Moves the running foreground command into the background.
+
+        Offered as "Move to background" on a live shell step row and on Ctrl+B.
+        The exec thread stops waiting and returns a job handle at once, so the
+        row becomes a live job row, the strip pins it, and the model keeps
+        working instead of waiting for the command to finish.
+        """
+        manager = getattr(self.computer, 'shell_jobs', None)
+        waiting = getattr(manager, 'foreground_job_id', None)
+        if manager is None or not callable(waiting):
+            return False
+        try:
+            job_id = waiting()
+        except Exception as e:
+            logging.warning(f"Could not find a foreground job to detach: {e}")
+            return False
+        if job_id is None:
+            self.ui.add_message(
+                "<i>No running command to move to the background.</i>")
+            return False
+        try:
+            result = manager.request_detach(job_id)
+        except Exception as e:
+            logging.warning(f"Could not move shell job #{job_id} to the background: {e}")
+            return False
+        if result.get('status') != 'running':
+            return False
+        logging.info(f"TerminalHandler: moving foreground job #{job_id} to the background.")
+        self.ui.add_message(
+            f"<i>Moving the running command to the background (job #{job_id})…</i>")
+        return True
 
     def _arm_job_wait(self, job_id: int):
         self.cancel_job_wait()
