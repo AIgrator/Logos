@@ -68,7 +68,7 @@ class BrowserEngineDialog(QDialog):
         layout = QVBoxLayout(self)
         layout.setSpacing(12)
 
-        title = QLabel("Browser mode needs Chromium")
+        title = QLabel("The browser panel needs Chromium")
         title.setStyleSheet("font-weight: 600; font-size: 14pt;")
         layout.addWidget(title)
 
@@ -76,15 +76,15 @@ class BrowserEngineDialog(QDialog):
         self._body.setWordWrap(True)
         self._body.setTextFormat(Qt.PlainText)
         self._body.setText(
-            "Browser mode drives a real Chromium browser — the engine inside Google "
+            "The browser panel drives a real Chromium browser — the engine inside Google "
             "Chrome — which is not part of Windows. It is not shipped inside Logos, "
             "because that would make every Logos download hundreds of megabytes "
-            "bigger, so it is fetched once, the first time you use Browser mode.\n\n"
+            "bigger, so it is fetched once, the first time you open the browser panel.\n\n"
             f"Download: {runtime.DOWNLOAD_SIZE}\n"
             f"On disk after unpacking: {runtime.DISK_SIZE}\n"
             f"Saved to: {runtime.browsers_dir()}\n\n"
             "It needs an internet connection and usually takes one to five minutes. "
-            "Later Browser-mode sessions reuse the same copy, and updating or "
+            "Later browser sessions reuse the same copy, and updating or "
             "reinstalling Logos keeps it, so this happens once per computer. "
             "Nothing else on your computer is changed."
         )
@@ -162,7 +162,7 @@ class BrowserEngineDialog(QDialog):
             self.accept()
             return
         if message == "cancelled":
-            self._status.setText("Download cancelled. Browser mode stays unavailable until Chromium is installed.")
+            self._status.setText("Download cancelled. The browser panel stays unavailable until Chromium is installed.")
         else:
             self._status.setText(message)
         self._download_button.setEnabled(True)

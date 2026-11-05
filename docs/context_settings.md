@@ -24,7 +24,7 @@ On top of the journal, each session can have:
 
 ### Baseline behavior (always on)
 
-Terminal and Browser mode already trim their model-facing history before any setting on this page is considered:
+The Terminal and Browser panels already trim their model-facing history before any setting on this page is considered:
 
 - the most recent ~20,000 characters of history are sent verbatim;
 - older **tool results** are shortened to 2,000 characters (head and tail, with a marker in the middle). If the output was saved to a file, its path is kept so the model can read it again;
@@ -46,7 +46,7 @@ Chat has no local tool loop, so there is no tool history to trim. Vision uses th
 
 ## History trimming
 
-These four options shape the model-facing history in **Terminal** and **Browser** mode. They are applied before the request is sent and do not modify the journal, the chat window or the saved session.
+These four options shape the model-facing history in the **Terminal** and **Browser** panels. They are applied before the request is sent and do not modify the journal, the chat window or the saved session.
 
 The order of application is: trim tracebacks → cut long entries → deduplicate snapshots → condense old steps → baseline pruning.
 
@@ -79,7 +79,7 @@ Any single history entry longer than this value is cut to its head and tail (rou
 
 *Settings.json key: `history_dedup_snapshots` · Default: off*
 
-Browser mode observes pages through accessibility snapshots, and the same page is often captured several steps in a row. When this option is on, **consecutive identical snapshots** are replaced with `**Tool Result:** (snapshot unchanged since previous step)`.
+The Browser panel observes pages through accessibility snapshots, and the same page is often captured several steps in a row. When this option is on, **consecutive identical snapshots** are replaced with `**Tool Result:** (snapshot unchanged since previous step)`.
 
 - Only page snapshots (tool results containing `Interactive elements:`) are affected.
 - The comparison is exact: if anything on the page changed, the new snapshot is kept in full.
@@ -93,16 +93,16 @@ Browser mode observes pages through accessibility snapshots, and the same page i
 
 Python tracebacks longer than 10 lines are cut to their first 3 and last 5 lines, with a `[... N traceback lines trimmed ...]` marker. The exception type and the final stack frames — the part that tells you (and the model) where the error happened — are kept.
 
-- The rule applies to history entries that contain `Traceback (most recent call last):`, in Terminal and Browser mode.
+- The rule applies to history entries that contain `Traceback (most recent call last):`, in the Terminal and Browser panels.
 - Short tracebacks (10 lines or fewer) are left untouched.
 
 **When to change it:** repeated failing commands produce long framework stacks (pandas, web frameworks, ORM layers) that overflow the interesting part. The default is off because, for some bugs, the middle of the stack is exactly what matters.
 
 ## Rolling summary
 
-The rolling summary is what lets a session continue without replaying its entire journal: when switching mode, after compaction, and when resuming a Browser or Vision session.
+The rolling summary is what lets a session continue without replaying its entire journal: after compaction, when resuming a Browser or Vision session, and when a fresh Computer Use chain continues earlier work.
 
-- Before a session is left behind (mode or project switch), Logos writes a deterministic fallback summary immediately, so the handoff does not depend on an LLM call.
+- Before a session is left behind (project switch or closing the app), Logos writes a deterministic fallback summary immediately, so the handoff does not depend on an LLM call.
 - The LLM refresh runs in the background and updates the same file. Failures keep the previous version (or the fallback) and are retried with a growing delay (15, 30, 60, 120, then 240 seconds).
 - Summaries never mix between sessions: each session reads and updates only its own pair of files.
 - A summary is not a chat message and is not sent on every request. The model sees it only through a handoff seed or a compaction block.
@@ -114,33 +114,20 @@ The rolling summary is what lets a session continue without replaying its entire
 This is the master switch for the rolling summary. It enables:
 
 - background summary refreshes;
-- the one-time summary seed when switching mode;
+- the one-time summary seed when a fresh Vision Computer Use chain continues another session's work;
 - freezing the summary before switching project or starting a new session;
 - automatic compaction (which stands on the summary).
 
 Turning it off stops all of the above. Specifically:
 
 - summary files are no longer refreshed in the background;
-- a mode switch no longer copies the summary into the new session;
 - auto-compact is disabled even if its own switch is on;
 - existing `.summary.md` / `.summary.json` files are not deleted and remain readable;
 - **Compact now** still works: it generates or refreshes the summary on demand and moves the compaction boundary.
 
-**When to change it:** rarely. Turn it off if you want to prevent any background summarizer calls for a project, or if you want mode switches to always start from a clean session. With it off, switching modes or projects loses the compact state that would otherwise carry work forward.
+**When to change it:** rarely. Turn it off if you want to prevent any background summarizer calls for a project, at the cost of compaction and handoffs relying on the deterministic fallback.
 
-### 6. On mode switch
-
-*Settings.json key: `handoff_on_mode_switch` · Default: on · Requires: Rolling handoff summary*
-
-Sessions are mode-locked: changing mode in a non-empty session starts a new session in the new mode. With this option on, Logos copies the previous session's summary once into the new session and shows it to the model as a `Handoff context from earlier work` block. It is delivered once; after that, the new session's own summary takes over.
-
-- Applies to Chat, Terminal, Browser and Vision. Vision receives the block as the first message of its fresh Computer Use chain, which otherwise cannot see the local journal at all.
-- With the option off, the new session starts empty. The previous session is still saved and can be reopened from the sidebar.
-- This option does nothing if the master switch is off.
-
-**When to change it:** turn it off when a mode change is also a deliberate context reset — for example, when you want a fresh Browser session that is not biased by what Chat was doing. Leave it on for work that continues across modes (investigate in Terminal, then write up in Chat).
-
-### 7. On model switch
+### 6. On model switch
 
 *Settings.json key: `handoff_on_model_switch` · Default: on · Requires: Rolling handoff summary*
 
@@ -152,7 +139,7 @@ Switching the active model inside a session keeps the session history — the ne
 
 **When to change it:** turn it off to avoid the extra summarizer call when you frequently toggle models. The next threshold-driven refresh will still update the summary; manual compaction forces a refresh anyway.
 
-### 8. Summary max tokens
+### 7. Summary max tokens
 
 *Settings.json key: `summary_max_tokens` · Default: `1200` · Range: 200–8,000, step 100*
 
@@ -164,7 +151,7 @@ A soft token budget for the LLM summary, written into the summarizer prompt as a
 
 **When to change it:** raise it (2,000–3,000) for long, decision-heavy projects where the handoff must carry a lot of state; lower it (600–800) for short sessions where a compact reminder is enough.
 
-### 9. Refresh threshold
+### 8. Refresh threshold
 
 *Settings.json key: `summary_threshold_ratio` · Default: `0.90` · Range: 0.10–1.00, step 0.05*
 
@@ -185,7 +172,7 @@ The budget is a cost dial: a lower value keeps the handoff closer to the journal
 
 **When to change it:** lower it (10,000–15,000) when the summary must follow a long, detail-heavy task closely; raise it (60,000–100,000) when summarizer calls are expensive and the summary is mostly needed at handoff points.
 
-### 10. Summarizer model
+### 9. Summarizer model
 
 *Settings.json key: `summary_model` · Default: empty (use the active session model)*
 
@@ -195,13 +182,13 @@ An optional model for summary generation, so the expensive working model is not 
 - A bare model id keeps the active provider: `gpt-5-mini` means "the current provider, this model".
 - If the model id itself contains a slash (Hugging Face IDs such as `Org/Model`), always use the full `provider:Org/Model` form; otherwise the first slash is read as the provider separator.
 - If the summarizer call fails, the previous summary (or the deterministic fallback) stays in place and Logos backs off before retrying.
-- The setting is used for every summary refresh: background, model switch, mode-switch capture, and manual or automatic compaction.
+- The setting is used for every summary refresh: background, model switch, the capture before leaving a session, and manual or automatic compaction.
 
 **When to change it:** point it at a fast, inexpensive model with decent writing quality. A weak summarizer produces a less useful handoff; check the summary file after a few sessions if you are unsure.
 
 ## Automatic compaction
 
-### 11. Auto-compact on low headroom
+### 10. Auto-compact on low headroom
 
 *Settings.json key: `auto_compact` · Default: on · Requires: Rolling handoff summary*
 
@@ -213,7 +200,7 @@ The trigger requires all of the following:
 - the session is at rest: no streaming answer, no running tool call, no waiting background job;
 - at least 4 new events have accumulated since the last compaction boundary;
 - at least 120 seconds have passed since the last compaction;
-- the mode is Chat, Terminal or Browser (Vision is excluded — its chain is managed by the provider).
+- the active panel is Chat, Terminal or Browser (Vision is excluded — its chain is managed by the provider).
 
 What happens then:
 
@@ -233,9 +220,9 @@ Automatic compaction also fires when the context reaches this size, even though 
 
 ## How the options interact
 
-- **Rolling handoff summary** is the master switch for options 5–7 and 11. The four history-trimming options are independent of it, and *Compact now* is not gated by it.
+- **Rolling handoff summary** is the master switch for options 5, 6 and 10. The four history-trimming options are independent of it, and *Compact now* is not gated by it.
 - **Auto-compact** needs both its own switch and the master switch. It uses the summary, so it also depends on the summarizer settings.
-- The **refresh threshold and budget** only schedule background updates. Mode switches, model switches, leaving a session, manual compaction and auto-compaction force a refresh when they need a current summary.
+- The **refresh threshold and budget** only schedule background updates. Model switches, leaving a session, manual compaction and auto-compaction force a refresh when they need a current summary.
 - History trimming reduces what is sent but never touches the journal, the summary or the UI. Summary settings never change the history itself; they only change the compact replacement for it.
 - `AGENTS.md` rules, handoff seeds, session context and compaction summaries are protected: none of the trimming options shorten them.
 
@@ -247,7 +234,6 @@ Automatic compaction also fires when the context reaches this size, even though 
 | Long Terminal sessions with hundreds of steps | Keep last N steps full: `20`–`50`; Max chars per entry: `6,000`–`8,000`; Trim long tracebacks: on. |
 | Long Browser sessions on the same page | Dedup repeated snapshots: on; optionally Keep last N steps full: `20`–`40`. |
 | Cost-sensitive setups | Summarizer model: a cheap model; Auto-compact at: `100,000`–`150,000`; Summary refresh at: `60,000`; auto-compact stays on. |
-| Need a clean start on every mode switch | On mode switch: off (and expect no cross-mode context). |
 | Prefer manual control of history | Auto-compact: off; use **Compact now** in the Session context dialog. |
 
 ## Where to see what happened

@@ -513,7 +513,7 @@ class BaseAgentHandler:
         self._activity_finalize("Request failed", "error")
 
     def _cleanup_task(self):
-        """Heir hook: release mode resources (browsers, threads, UI containers)."""
+        """Heir hook: release capability resources (browsers, threads, UI)."""
 
     def _history_action(self, action: dict) -> dict:
         """Heir hook: redact secrets before writing an action to history."""
@@ -1609,5 +1609,5 @@ class BaseAgentHandler:
         raise NotImplementedError
 
     def execute_action(self, action: dict):
-        """Runs the tool(s); shows mode UI; returns history text (None if async)."""
+        """Runs the tool(s); shows capability UI; returns history text (None if async)."""
         raise NotImplementedError

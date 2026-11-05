@@ -1,4 +1,4 @@
-"""Chromium runtime for Browser mode: where it lives and how it is installed.
+"""Chromium runtime for the Browser panel: where it lives and how it is installed.
 
 Python Playwright starts its driver with ``PLAYWRIGHT_BROWSERS_PATH=0``
 (``playwright/_impl/_transport.py``), which means "the ``.local-browsers``
@@ -137,7 +137,7 @@ def chromium_executable() -> Path | None:
 
 
 def is_chromium_installed() -> bool:
-    """True when Browser mode can start without downloading anything."""
+    """True when the Browser panel can start without downloading anything."""
     try:
         return chromium_executable() is not None
     except OSError as exc:

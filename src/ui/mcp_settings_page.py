@@ -523,7 +523,7 @@ class MCPSettingsPage(QWidget):
         self.trust_button.setEnabled(is_project)
         self.trust_button.setText("Revoke Trust" if info.get("trusted") else "Trust Server")
         self.trust_button.setToolTip(
-            "Trusted project servers start automatically with Terminal mode. "
+            "Trusted project servers start automatically with the Terminal panel. "
             "Only trust projects you trust.")
         path = self._mcp_file()
         self.open_file_button.setEnabled(bool(path) and os.path.isfile(path))
@@ -736,7 +736,7 @@ class MCPSettingsPage(QWidget):
         answer = QMessageBox.question(
             self, "Trust project MCP server",
             f"Trust \"{name}\" from this project's .mcp.json?\n\n{summary}\n\n"
-            "Trusted project servers start automatically with Terminal mode and "
+            "Trusted project servers start automatically with the Terminal panel and "
             "can run code on this computer. Only trust projects you trust.",
             QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
         if answer != QMessageBox.Yes:

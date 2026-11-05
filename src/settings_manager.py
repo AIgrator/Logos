@@ -224,9 +224,10 @@ class SettingsManager(QObject):
             "history_dedup_snapshots": False,
             "history_trim_tracebacks": False,
             # Rolling session handoff summary (context/handoff.py).
+            # ``handoff_on_mode_switch`` was removed: capabilities no longer
+            # start a new session, so there is no mode-switch seed to control.
             "handoff_enabled": True,
             "handoff_on_model_switch": True,
-            "handoff_on_mode_switch": True,
             "auto_compact": True,
             "summary_model": "",
             "summary_max_tokens": 1200,
@@ -402,6 +403,13 @@ class SettingsManager(QObject):
                     merge_defaults(current_data[key], default_value)
 
         merge_defaults(data, self.DEFAULTS)
+
+        # Retired settings are dropped instead of being carried forever: a
+        # capability change no longer starts a session, so there is no
+        # mode-switch handoff left to configure.
+        context_data = data.get("context")
+        if isinstance(context_data, dict):
+            context_data.pop("handoff_on_mode_switch", None)
 
         # --- Securely load API keys from keyring ---
         if "llm_providers" in data:

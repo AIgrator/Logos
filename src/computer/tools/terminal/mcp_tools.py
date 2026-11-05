@@ -26,8 +26,8 @@ def _manager(self):
     if manager is None or not getattr(manager, "is_running", False):
         raise RuntimeError(
             "MCP is not available: no MCP manager is running for this Terminal "
-            "session. Servers connect when Terminal mode starts; ask the user to "
-            "check Settings -> MCP Servers.")
+            "session. Servers connect when the terminal capability is attached; "
+            "ask the user to check Settings -> MCP Servers.")
     return manager
 
 

@@ -254,7 +254,7 @@ class ContextPopover(QFrame):
         layout.addLayout(self.rows_box)
 
         self.empty_label = QLabel(
-            "Composition is not available for this mode; the total is "
+            "Composition is not available for this panel; the total is "
             "reported by the provider.")
         self.empty_label.setObjectName("ContextPopoverHint")
         self.empty_label.setWordWrap(True)

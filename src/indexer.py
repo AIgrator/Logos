@@ -91,7 +91,7 @@ class Indexer(QObject):
         if not force and self.is_active_cb is not None:
             try:
                 if not self.is_active_cb():
-                    logging.debug("Indexer: reindex skipped (not in Terminal mode).")
+                    logging.debug("Indexer: reindex skipped (not in a terminal session).")
                     return
             except Exception:
                 pass

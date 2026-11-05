@@ -418,7 +418,6 @@ class SettingsPage(QWidget):
             self.history_dedup_checkbox.toggled,
             self.history_trim_tracebacks_checkbox.toggled,
             self.handoff_enabled_checkbox.toggled,
-            self.handoff_mode_switch_checkbox.toggled,
             self.handoff_model_switch_checkbox.toggled,
             self.summary_max_tokens_spinbox.valueChanged,
             self.summary_threshold_spinbox.valueChanged,
@@ -533,7 +532,6 @@ class SettingsPage(QWidget):
         self.history_dedup_checkbox.setChecked(bool(context_settings.get("history_dedup_snapshots", False)))
         self.history_trim_tracebacks_checkbox.setChecked(bool(context_settings.get("history_trim_tracebacks", False)))
         self.handoff_enabled_checkbox.setChecked(bool(context_settings.get("handoff_enabled", True)))
-        self.handoff_mode_switch_checkbox.setChecked(bool(context_settings.get("handoff_on_mode_switch", True)))
         self.handoff_model_switch_checkbox.setChecked(bool(context_settings.get("handoff_on_model_switch", True)))
         self.auto_compact_checkbox.setChecked(bool(context_settings.get("auto_compact", True)))
         self.summary_max_tokens_spinbox.setValue(int(context_settings.get("summary_max_tokens", 1200)))
@@ -648,7 +646,6 @@ class SettingsPage(QWidget):
             "history_dedup_snapshots": self.history_dedup_checkbox.isChecked(),
             "history_trim_tracebacks": self.history_trim_tracebacks_checkbox.isChecked(),
             "handoff_enabled": self.handoff_enabled_checkbox.isChecked(),
-            "handoff_on_mode_switch": self.handoff_mode_switch_checkbox.isChecked(),
             "handoff_on_model_switch": self.handoff_model_switch_checkbox.isChecked(),
             "auto_compact": self.auto_compact_checkbox.isChecked(),
             "summary_max_tokens": self.summary_max_tokens_spinbox.value(),
@@ -735,7 +732,7 @@ class SettingsPage(QWidget):
         layout = QFormLayout(group)
 
         self.toggle_mode_hotkey = HotkeyEdit()
-        layout.addRow("Toggle Mode:", self.toggle_mode_hotkey)
+        layout.addRow("Toggle Vision:", self.toggle_mode_hotkey)
         self.pause_resume_hotkey = HotkeyEdit()
         layout.addRow("Pause/Resume Execution:", self.pause_resume_hotkey)
         self.stop_execution_hotkey = HotkeyEdit()
@@ -980,7 +977,7 @@ class SettingsPage(QWidget):
         self.max_errors_spinbox.setFixedWidth(80)
         max_errors_tooltip = (
             "Failed steps in a row before the agent stops and asks you "
-            "(after one self-assessment turn). Shared by all agent modes. "
+            "(after one self-assessment turn). Shared by all agent panels. "
             "Applies immediately."
         )
         agent_layout.addWidget(QLabel("Failures before asking:"), 0, 0)
@@ -1003,7 +1000,7 @@ class SettingsPage(QWidget):
         tab_layout = QVBoxLayout(group)
 
         description = QLabel(
-            "The compact window is used automatically during Vision mode "
+            "The compact window is used automatically during Vision "
             "tasks, so the assistant's own window does not cover the screen "
             "it is working on. These values set its size and where it appears."
         )
@@ -1050,7 +1047,7 @@ class SettingsPage(QWidget):
         page_layout.setContentsMargins(0, 0, 0, 0)
         page_layout.setSpacing(12)
         model_note = QLabel(
-            "The model used in Vision mode is chosen on the Providers page "
+            "The model used by Vision is chosen on the Providers page "
             "(Vision model).")
         model_note.setStyleSheet("color: #9E9E9E;")
         model_note.setWordWrap(True)
@@ -1062,13 +1059,13 @@ class SettingsPage(QWidget):
         return page
 
     def _create_vision_agent_loop_group(self):
-        """Creates the Vision Mode settings group (agent loop tunables)."""
-        group = QGroupBox("Vision Mode (agent loop)")
+        """Creates the Vision settings group (agent loop tunables)."""
+        group = QGroupBox("Vision (agent loop)")
         vision_layout = QGridLayout(group)
         vision_layout.setColumnStretch(2, 1)
 
         self.allow_shell_commands_checkbox = QCheckBox(
-            "Allow terminal commands in Vision mode")
+            "Allow terminal commands during Vision tasks")
         shell_tooltip = ("Lets the agent open a terminal itself (Win+R) for "
                          "quick checks (sizes, counts) or operations faster "
                          "through shell than GUI. Read-only checks are fine; "
@@ -1231,7 +1228,7 @@ class SettingsPage(QWidget):
 
         self.handoff_enabled_checkbox = QCheckBox()
         handoff_tooltip = (
-            "Keep a rolling summary next to each session journal so a new mode, "
+            "Keep a rolling summary next to each session journal so a new session, "
             "model or application run can continue with compact context instead "
             "of the full journal. Summaries never mix between sessions."
         )
@@ -1240,19 +1237,12 @@ class SettingsPage(QWidget):
         summary_layout.addWidget(self._create_help_label(handoff_tooltip), 0, 1, Qt.AlignLeft)
         summary_layout.addWidget(self.handoff_enabled_checkbox, 0, 3)
 
-        self.handoff_mode_switch_checkbox = QCheckBox()
-        mode_tooltip = "Seed the new session's summary when switching chat/terminal/browser mode."
-        summary_layout.addWidget(self._create_context_setting_label(
-            "On mode switch:", "6-on-mode-switch"), 1, 0)
-        summary_layout.addWidget(self._create_help_label(mode_tooltip), 1, 1, Qt.AlignLeft)
-        summary_layout.addWidget(self.handoff_mode_switch_checkbox, 1, 3)
-
         self.handoff_model_switch_checkbox = QCheckBox()
         model_tooltip = "Refresh and inject the summary when switching the active model."
         summary_layout.addWidget(self._create_context_setting_label(
-            "On model switch:", "7-on-model-switch"), 2, 0)
-        summary_layout.addWidget(self._create_help_label(model_tooltip), 2, 1, Qt.AlignLeft)
-        summary_layout.addWidget(self.handoff_model_switch_checkbox, 2, 3)
+            "On model switch:", "7-on-model-switch"), 1, 0)
+        summary_layout.addWidget(self._create_help_label(model_tooltip), 1, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.handoff_model_switch_checkbox, 1, 3)
 
         self.summary_max_tokens_spinbox = QSpinBox()
         self.summary_max_tokens_spinbox.setRange(200, 8000)
@@ -1260,9 +1250,9 @@ class SettingsPage(QWidget):
         self.summary_max_tokens_spinbox.setFixedWidth(80)
         max_tokens_tooltip = "Token budget requested from the summarizer model."
         summary_layout.addWidget(self._create_context_setting_label(
-            "Summary max tokens:", "8-summary-max-tokens"), 3, 0)
-        summary_layout.addWidget(self._create_help_label(max_tokens_tooltip), 3, 1, Qt.AlignLeft)
-        summary_layout.addWidget(self.summary_max_tokens_spinbox, 3, 3)
+            "Summary max tokens:", "8-summary-max-tokens"), 2, 0)
+        summary_layout.addWidget(self._create_help_label(max_tokens_tooltip), 2, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.summary_max_tokens_spinbox, 2, 3)
 
         self.summary_threshold_spinbox = QDoubleSpinBox()
         self.summary_threshold_spinbox.setRange(0.1, 1.0)
@@ -1275,9 +1265,9 @@ class SettingsPage(QWidget):
             "safety net: routine refreshes come from 'Summary refresh at'."
         )
         summary_layout.addWidget(self._create_context_setting_label(
-            "Refresh threshold:", "9-refresh-threshold"), 4, 0)
-        summary_layout.addWidget(self._create_help_label(threshold_tooltip), 4, 1, Qt.AlignLeft)
-        summary_layout.addWidget(self.summary_threshold_spinbox, 4, 3)
+            "Refresh threshold:", "9-refresh-threshold"), 3, 0)
+        summary_layout.addWidget(self._create_help_label(threshold_tooltip), 3, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.summary_threshold_spinbox, 3, 3)
 
         self.summary_model_lineedit = QLineEdit()
         self.summary_model_lineedit.setPlaceholderText(
@@ -1288,9 +1278,9 @@ class SettingsPage(QWidget):
             "model id to keep the active provider. Empty uses the session model."
         )
         summary_layout.addWidget(self._create_context_setting_label(
-            "Summarizer model:", "10-summarizer-model"), 5, 0)
-        summary_layout.addWidget(self._create_help_label(summary_model_tooltip), 5, 1, Qt.AlignLeft)
-        summary_layout.addWidget(self.summary_model_lineedit, 5, 2, 1, 2)
+            "Summarizer model:", "10-summarizer-model"), 4, 0)
+        summary_layout.addWidget(self._create_help_label(summary_model_tooltip), 4, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.summary_model_lineedit, 4, 2, 1, 2)
 
         self.summary_refresh_tokens_spinbox = QSpinBox()
         self.summary_refresh_tokens_spinbox.setRange(0, 1_000_000)
@@ -1303,9 +1293,9 @@ class SettingsPage(QWidget):
             "0 = only the refresh threshold above."
         )
         summary_layout.addWidget(self._create_context_setting_label(
-            "Summary refresh at:", "12-summary-refresh-at"), 6, 0)
-        summary_layout.addWidget(self._create_help_label(refresh_tokens_tooltip), 6, 1, Qt.AlignLeft)
-        summary_layout.addWidget(self.summary_refresh_tokens_spinbox, 6, 3)
+            "Summary refresh at:", "12-summary-refresh-at"), 5, 0)
+        summary_layout.addWidget(self._create_help_label(refresh_tokens_tooltip), 5, 1, Qt.AlignLeft)
+        summary_layout.addWidget(self.summary_refresh_tokens_spinbox, 5, 3)
 
         page_layout.addWidget(summary_group)
 
@@ -1478,11 +1468,11 @@ class SettingsPage(QWidget):
 
         from src.browser import runtime as browser_runtime
         engine_tooltip = (
-            "Chromium is the real browser that Browser mode drives. It is not "
+            "Chromium is the real browser the Browser panel drives. It is not "
             "packaged with Logos because of its size, so it is downloaded once "
             f"({browser_runtime.DOWNLOAD_SIZE}) into a per-user folder and reused "
-            "by every later Browser-mode session. Downloading needs an internet "
-            "connection; Browser mode offers the same download on first use."
+            "by every later browser session. Downloading needs an internet "
+            "connection; the Browser panel offers the same download on first use."
         )
         self.browser_engine_label = QLabel()
         self.browser_engine_label.setTextInteractionFlags(Qt.TextSelectableByMouse)
@@ -1502,7 +1492,7 @@ class SettingsPage(QWidget):
         return self._page(group)
 
     def _refresh_browser_engine_row(self):
-        """Shows whether the Chromium build Browser mode needs is installed."""
+        """Shows whether the Chromium build the Browser panel needs is installed."""
         from src.browser import runtime as browser_runtime
         revision = browser_runtime.chromium_revision() or "?"
         if browser_runtime.is_chromium_installed():

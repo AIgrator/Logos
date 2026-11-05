@@ -3500,11 +3500,11 @@ class AppController(QObject):
         default). Any in-flight request is left to finish on the model that
         started it; the new model takes over from the next turn (same
         behaviour as opencode). Histories and handler states are preserved.
-        Provider tool schemas are per-mode static files loaded fresh by the
+        Provider tool schemas are per-grant cache files loaded fresh by the
         new provider instance — no regeneration needed on switch.
 
         ``custom_notice`` overrides the default "Switched to ..." message
-        (used when the switch is triggered automatically by a mode change).
+        (used when the switch is triggered automatically by a panel change).
         """
         all_settings = self.settings_manager.all()
         user_providers = all_settings.get("llm_providers", {})
@@ -3625,14 +3625,14 @@ class AppController(QObject):
         logging.info("Restored session model: %s / %s", provider_id, model_id)
         return ""
 
-    def _apply_mode_default_model(self, subsection: str):
-        """Fallback to the per-mode default model.
+    def _apply_capability_default_model(self, subsection: str):
+        """Fallback to the capability's default model.
 
-        If the active model already meets the target modes' requirements it is
+        If the active model already meets the capability's requirements it is
         left untouched (a capable model like gpt-6-luna is never swapped out).
         Only when it does not, we switch to the model the user configured for
-        this mode (the Vision model); the switch is journaled for the session
-        like any other model change.
+        that capability (the Vision model); the switch is journaled for the
+        session like any other model change.
         """
         try:
             modes = SUBSECTIONS.get(subsection, ())
@@ -3643,7 +3643,7 @@ class AppController(QObject):
             cur_pid = all_settings.get("active_provider")
             cur_model = (user_providers.get(cur_pid) or {}).get("model")
             if cur_pid and cur_model and all(ModeCapabilities.supports(cur_pid, cur_model, m) for m in modes):
-                return  # Current model fits this mode — keep it.
+                return  # Current model fits this capability — keep it.
             entry = (all_settings.get("mode_models", {}) or {}).get(subsection) or {}
             pid = entry.get("provider")
             mid = entry.get("model")
@@ -3664,13 +3664,12 @@ class AppController(QObject):
             if pid == cur_pid and mid == cur_model:
                 return
             notice = (
-                "Так как ваша текущая модель не удовлетворяет требованиям для этого "
-                "режима работы, мы переключились на модель, выбранную вами по умолчанию "
-                "в настройках."
+                "The current model cannot drive Vision, so Logos switched to the "
+                "default model chosen in Settings → Providers."
             )
             self.switch_model(pid, mid, custom_notice=notice)
         except Exception as e:
-            logging.warning(f"Could not apply per-mode default model for '{subsection}': {e}", exc_info=True)
+            logging.warning(f"Could not apply the capability default model for '{subsection}': {e}", exc_info=True)
 
     def _cleanup_and_switch_handler(self, new_handler, new_state, mode: str | None = None):
         # Leaving chat abandons any queued (not yet answered) chat messages.
@@ -3803,7 +3802,7 @@ class AppController(QObject):
         self._cleanup_and_switch_handler(self.vision_handler, ControllerState.VISION, mode="vision")
         self.ui.set_active_mode('vision')
         self.ui.add_message("<i>Vision panel opened. Its capability is attached to this session.</i>", force_scroll=True)
-        self._apply_mode_default_model("vision")
+        self._apply_capability_default_model("vision")
         self.vision_handler._set_state(VisionState.IDLE)
 
     def _deactivate_vision_mode(self):
@@ -4463,20 +4462,24 @@ class AppController(QObject):
             events = self.session_events
             mode = self.session_mode
             objective = self.session_objective
+            grants = list(self.session_capabilities or ())
         elif self.project_manager is not None:
             data = self.project_manager.load_session_data(path)
             session_file = data.get("path") or path
             events = data.get("events") or []
             mode = data.get("mode") or ""
             objective = data.get("objective") or ""
+            header = self.project_manager.read_session_header(session_file) or {}
+            grants = list(capabilities.grants_from_header(header))
         else:
             session_file, events, mode, objective = "", [], "", ""
+            grants = []
         if not events:
             QMessageBox.information(
                 self.ui.main_window, "Session journal",
                 "This session has no recorded events yet.")
             return
-        text = self._session_journal_text(session_file, events, mode, objective)
+        text = self._session_journal_text(session_file, events, mode, objective, grants)
         dialog = QDialog(self.ui.main_window)
         dialog.setWindowTitle("Session journal")
         dialog.resize(760, 600)
@@ -4501,11 +4504,13 @@ class AppController(QObject):
 
     def _session_journal_text(
         self, session_file: str, events: list, mode: str, objective: str,
+        grants=(),
     ) -> str:
         """Plain-text journal of every recorded session event."""
         lines = [
             f"Session: {os.path.basename(session_file or '(new)')}",
-            f"Mode: {mode}",
+            f"Panel: {mode}",
+            f"Capabilities: {', '.join(grants) or '—'}",
             f"Objective: {objective or '(not set)'}",
             "",
         ]

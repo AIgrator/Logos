@@ -1,6 +1,6 @@
 # Logos AI Assistant
 
-This is a desktop assistant application that uses Large Language Models (LLMs) to perform user tasks on a computer. The application operates in four main modes: **Chat Mode**, **Vision Mode**, **Terminal Mode**, and **Browser Mode**.
+This is a desktop assistant application that uses Large Language Models (LLMs) to perform user tasks on a computer. A session starts as a chat and gains capabilities as you need them: **Terminal**, **Browser** and **Vision** are attached to the open session from the composer's capability controls, and one timeline keeps every step.
 
 For detailed technical information about the system architecture, please refer to the [**System Architecture Overview for Developers**](./docs/system_architecture.md).
 
@@ -88,7 +88,7 @@ In this step, you will select your preferred AI provider from a list and paste t
 In the final step, you can choose additional integration options, such as:
 * 1. Creating a global `logos` command.
 * 2. Creating a desktop shortcut. 
-* 3. Adding an item to the context menu to open a folder in the application's context, which is convenient for terminal mode.
+* 3. Adding an item to the context menu to open a folder in the application's context, which is convenient for terminal work.
 
 The Windows installer offers the same integrations as tasks (checked by default), so an installed build goes straight from the provider step to the application.
 
@@ -106,7 +106,7 @@ logos
 
 ### Working in a Specific Directory
 
-The program accepts a folder path as an argument and opens that folder as the active project. The project root is the working directory for **Terminal** and **Browser** modes, the root for `@`-file search and indexing, and the place where project data is stored in `.logos/`.
+The program accepts a folder path as an argument and opens that folder as the active project. The project root is the working directory for the **Terminal** and **Browser** capabilities, the root for `@`-file search and indexing, and the place where project data is stored in `.logos/`.
 
 If you have integrated the application with the Windows context menu (an option during installation or in the first setup of a source checkout), you can right-click any folder and select "Open with Logos" to launch the assistant in that directory. If Logos is already running, the folder opens in the existing window instead of starting a second copy.
 
@@ -121,20 +121,38 @@ python main.py C:\Users\User\Documents\my_project
 ```
 If no path is specified, the remembered active project is used. When there is no usable remembered project, the full-screen **Home** page opens and lets you pick or add one.
 
-### Modes of Operation
+### Capabilities and Panels
 
-The application has four main modes, each designed for different types of tasks:
+A session is not locked to one mode. It holds **capabilities** — what it is
+allowed to do — and the composer's capability controls (Chat, Terminal, Browser,
+Vision) decide both what is attached and which panel the next turn uses:
 
-*   **Chat Mode:** A simple chat with the LLM. You can converse and send files for analysis. When the selected provider supports native web search, the model can search the web on its own during the response; Chat does not run a local tool loop. This is a **streaming** mode, where responses are generated in real-time.
+*   A check marks an attached capability; the highlighted control is the panel
+    the next turn answers with.
+*   Clicking a control opens that panel and attaches its capability to the
+    **open** session. The journal, the transcript and the earlier steps stay;
+    nothing is summarized or cleared.
+*   Right-click → **Detach … from session** revokes a Terminal, Browser or
+    Vision capability. The panel then falls back to the nearest one the session
+    still holds.
 
-*   **Vision Mode:** In this mode, the assistant uses the selected provider's native **Computer Use** capability to see the screen and interact with it using the mouse and keyboard. It runs on the same observe → act → assess agent loop as Terminal and Browser mode and requires a CUA-capable provider (OpenAI, Anthropic, or Google). It is ideal for automating tasks in GUI applications.
+The four panels differ in what they show and which tools the turn is given:
 
-*   **Terminal Mode:** In this mode, the assistant acts as an AI agent in the command line. This is also a **stateful** mode; no plan is fixed in advance, but for multi-step work the assistant keeps a short checklist of its own (`update_plan`), shown as a compact `Step N / M` pill above the composer that reveals the full plan on hover and updates as it goes. The LLM autonomously determines the next step, executes the command, and analyzes the result, iteratively moving towards the goal. It does not have access to the visual interface but can execute shell commands, work with the file system, run scripts, and interact with web resources. Long-running commands can be launched as background jobs (`run_in_background`, `poll_shell_job` / `stop_shell_job` / `wait_seconds`). This mode is designed for tasks related to development, file management, and console automation.
+*   **Chat:** a plain chat with the LLM. You can converse and send files for analysis. When the selected provider supports native web search, the model can search the web on its own during the response. Responses stream in real-time.
 
-*   **Browser Mode:** In this mode, the assistant drives a real Chromium browser via accessibility snapshots: it sees numbered element references (`browser_snapshot`), clicks/fills/presses them, reads pages, manages tabs, and takes screenshots with overlaid reference badges. Like Terminal Mode, it is **stateful** and works step by step — the agent loops observe → act → assess until the goal is reached or it escalates to the user.
+*   **Vision:** the assistant uses the selected provider's native **Computer Use** capability to see the screen and interact with it using the mouse and keyboard. It runs on the same observe → act → assess agent loop as Terminal and Browser and requires a CUA-capable provider (OpenAI, Anthropic, or Google). It is ideal for automating tasks in GUI applications.
+
+*   **Terminal:** the assistant acts as an AI agent in the command line. No plan is fixed in advance, but for multi-step work the assistant keeps a short checklist of its own (`update_plan`), shown as a compact `Step N / M` pill above the composer that reveals the full plan on hover and updates as it goes. The LLM autonomously determines the next step, executes the command, and analyzes the result, iteratively moving towards the goal. It does not have access to the visual interface but can execute shell commands, work with the file system, run scripts, and interact with web resources. Long-running commands can be launched as background jobs (`run_in_background`, `poll_shell_job` / `stop_shell_job` / `wait_seconds`). This panel is designed for tasks related to development, file management, and console automation.
+
+*   **Browser:** the assistant drives a real Chromium browser via accessibility snapshots: it sees numbered element references (`browser_snapshot`), clicks/fills/presses them, reads pages, manages tabs, and takes screenshots with overlaid reference badges. Like Terminal, it is **stateful** and works step by step — the agent loops observe → act → assess until the goal is reached or it escalates to the user.
+
+A session that holds Terminal and Browser at once lets one turn use both: the
+model can start a dev server, open the page on the same shared browser and fix
+what it sees without you switching anything. It can also attach a capability by
+itself — `open_terminal` and `open_browser` are tools, not just UI.
 
 > [!NOTE]
-> **Browser mode downloads Chromium once.** The browser itself is not shipped with Logos (~320 MB download, ~700 MB on disk). The first time you switch to Browser mode, the app explains this and downloads Chromium into `%LOCALAPPDATA%\ms-playwright` (`~/.cache/ms-playwright` on Linux); every later session reuses it. Settings → Browser shows the engine status and can start or repeat the download. Point `PLAYWRIGHT_BROWSERS_PATH` at another folder before launching to keep the cache elsewhere — the path is honoured both for the download and at runtime.
+> **Browser downloads Chromium once.** The browser itself is not shipped with Logos (~320 MB download, ~700 MB on disk). The first time you open the Browser panel, the app explains this and downloads Chromium into `%LOCALAPPDATA%\ms-playwright` (`~/.cache/ms-playwright` on Linux); every later session reuses it. Settings → Browser shows the engine status and can start or repeat the download. Point `PLAYWRIGHT_BROWSERS_PATH` at another folder before launching to keep the cache elsewhere — the path is honoured both for the download and at runtime.
 
 ### Transcript
 
@@ -156,7 +174,7 @@ Logos supports a wide range of models from leading AI providers. You can easily 
 *   **Custom OpenAI- or Anthropic-compatible endpoints** (local servers or self-hosted gateways)
 
 > [!NOTE]
-> **Custom providers.** Settings → **Providers** → **Add custom provider…** lets you add any server that speaks the OpenAI Chat Completions API or the Anthropic Messages API — LM Studio, Ollama, llama.cpp, vLLM, DeepSeek, Kimi, GLM, LiteLLM, or a gateway. Pick the API format in the dialog, then enter a provider ID, display name, base URL and the model IDs to expose; the API key and extra headers are optional. Custom providers work in Chat, Terminal and Browser modes. They are not offered in Vision mode, which requires a model with native Computer Use support (OpenAI, Anthropic or Google). The same page's **Vision (Computer Use)** row chooses the model Vision mode switches to when the active model cannot drive the screen.
+> **Custom providers.** Settings → **Providers** → **Add custom provider…** lets you add any server that speaks the OpenAI Chat Completions API or the Anthropic Messages API — LM Studio, Ollama, llama.cpp, vLLM, DeepSeek, Kimi, GLM, LiteLLM, or a gateway. Pick the API format in the dialog, then enter a provider ID, display name, base URL and the model IDs to expose; the API key and extra headers are optional. Custom providers work in the Chat, Terminal and Browser panels. They are not offered in Vision, which requires a model with native Computer Use support (OpenAI, Anthropic or Google). The same page's **Vision (Computer Use)** row chooses the model Vision uses when the active model cannot drive the screen.
 
 > [!NOTE]
 > **Hugging Face billing.** The HF provider routes requests through `router.huggingface.co` to third-party inference partners. Model names use the format `Org/Model` (auto-routing) or `Org/Model:provider` (e.g. `Qwen/Qwen3.8-27B:novita`, `mistralai/Mistral-7B-Instruct-v0.2:featherless-ai`). Routed requests are billed to your Hugging Face account: free accounts receive no monthly credits, so a paid credit balance or PRO subscription is required — otherwise the router answers `402 Payment Required`. The provider is fully wired into the app (streaming, retries, error cards), but free server-side chat is not available.
@@ -169,7 +187,7 @@ Logos supports a wide range of models from leading AI providers. You can easily 
 
 ### Adding Files to Context
 
-In all modes, you can add file content to the context by simply typing `@` and starting to type the file name. The assistant suggests matching files with a fuzzy, case-sensitive search over the active project; wildcards and glob patterns are not supported. See the [**file search guide**](./docs/file_search_guide.md) for details.
+In every panel, you can add file content to the context by simply typing `@` and starting to type the file name. The assistant suggests matching files with a fuzzy, case-sensitive search over the active project; wildcards and glob patterns are not supported. See the [**file search guide**](./docs/file_search_guide.md) for details.
 
 ### Context and Memory Settings
 
@@ -185,11 +203,11 @@ Terminal can use tools from [Model Context Protocol](https://modelcontextprotoco
 
 ### Terminal access permissions
 
-Every Terminal action passes an access policy before it runs. Settings → Terminal → Access permissions selects **Ask every time** (the default: read-only commands and edits inside the project run silently, everything else asks), **Auto approve** (only risky actions ask) or **Full access** (never asks). The same choice is available in the Terminal composer: the chip next to the attachment button shows the current mode and opens the three options with a short explanation each, so it can be switched without opening Settings; **Full access** is painted red. A denied action appears as a warning card and is reported to the model, which is told not to retry it.
+Every Terminal action passes an access policy before it runs. Settings → Terminal → Access permissions selects **Ask every time** (the default: read-only commands and edits inside the project run silently, everything else asks), **Auto approve** (only risky actions ask) or **Full access** (never asks). The same choice is available in the Terminal composer: the chip next to the attachment button shows the current access mode and opens the three options with a short explanation each, so it can be switched without opening Settings; **Full access** is painted red. A denied action appears as a warning card and is reported to the model, which is told not to retry it.
 
 ### Workspace panel
 
-The collapsible right panel is available in every mode. **Session** shows context statistics and a recap of the current session; **Activity** lists loaded skills, invoked tools and attached files; **Files** is a read-only tree of the active project; **Git** appears in Terminal mode and lists uncommitted changes with line counts. Clicking a file opens it in the detected editor.
+The collapsible right panel is always available. **Session** shows context statistics (including the capabilities the session holds) and a recap of the current session; **Activity** lists loaded skills, invoked tools and attached files; **Files** is a read-only tree of the active project; **Git** appears with the Terminal panel and lists uncommitted changes with line counts. Clicking a file opens it in the detected editor.
 
 ### Suggested next actions
 
@@ -197,35 +215,45 @@ After a Terminal, Browser or Vision answer, the assistant can offer up to three 
 
 ## Features (Tools)
 
-The assistant comes with a set of built-in tools, grouped by their mode of operation:
+The assistant comes with a set of built-in tools, grouped by the capability
+that owns them. A session is granted `base` plus whatever it has attached.
 
-#### Chat Mode Tools
-Chat mode does not execute client-side tools. Web search, when available, is performed natively by the provider inside the response stream.
+Tools reach the model in two exposures. Most are declared up front, with their
+full argument schema. A smaller set — the MCP meta-tools and the browser
+inspection/edge-case actions — is only *named* in a short **Tools on demand**
+section; the model calls `search_tools` to load one, and it can be called from
+the next step on. This keeps the prompt small without hiding anything the
+session is allowed to do.
 
-#### Vision Mode Tools
-Vision mode does not use a local tool manifest. Actions come from the provider's native Computer Use interface and are executed by Logos:
+#### Base Tools (every agent session)
+*   **Files (read-only)**: `read_files`, `list_directory`, `search_file_content`.
+*   **Capabilities**: `open_terminal` and `open_browser` attach the Terminal or Browser capability to the session from inside a turn; `search_tools` loads an on-demand tool.
+*   **Control**: `update_plan`, `use_skill`, `communicate_to_user`, `finish`.
+
+#### Vision Tools
+Vision does not use a local tool manifest. Actions come from the provider's native Computer Use interface and are executed by Logos:
 
 *   **Pointer**: `click`, `double_click`, `triple_click`, `move`, `drag`, `left_mouse_down`, `left_mouse_up`, `scroll`, `cursor_position`.
 *   **Keyboard**: `type`, `keypress`, `hold_key`.
 *   **Observation**: `screenshot`, `zoom`.
 *   **Control**: `wait`, `launch_app` (starts an app from the allowed Applications list), plus the `ask_user` function tool for questions that need a human answer.
 
-#### Terminal Mode Tools
+#### Terminal Tools
 *   **File System**: `list_directory`, `read_files`, `write_file`, `search_file_content`, `find_files`, `create_directory`, `delete_files`, `move_files`, `copy_files`, `path_exists`.
 *   **File Editing**: `replace`, `replace_many`.
 *   **System**: `execute_shell` (incl. background jobs), `poll_shell_job`, `stop_shell_job`, `wait_seconds`.
 *   **Desktop Capture**: `screenshot` grabs the whole primary display, one window (by part of its title or by PID) or a rectangle given by its top-left and bottom-right corners, saves the PNG under `<project>/.logos/screenshots/` and attaches it to the next turn so the model actually sees the result. Logos hides its own window during a screen or region capture, and `hide_app: false` keeps it in the picture.
 *   **Web Tools**: `web_search`, `web_fetchs`, `download_file`.
-*   **MCP**: `mcp_list`, `mcp_get`, `mcp_call` for tools exposed by configured MCP servers (see the [MCP guide](./docs/mcp.md)).
+*   **MCP**: `mcp_list`, `mcp_get`, `mcp_call` for tools exposed by configured MCP servers (see the [MCP guide](./docs/mcp.md)). These are offered on demand.
 *   **Skills**: `use_skill` loads an installed Agent Skill on demand (see the [skills guide](./docs/skills.md)).
 *   **User Interaction**: `display_message`, `communicate_to_user`.
 *   **General**: `finish`, `get_clipboard_content`.
 
-#### Browser Mode Tools
-*   **Navigation**: `browser_goto`, `browser_navigate_back`, `browser_tabs`, `browser_close`.
-*   **Observation**: `browser_snapshot` (numbered element refs; controls inside iframes are included and marked `(frame N: host)`), `browser_screenshot` (with ref badges), `browser_read` (page text plus `Frame N` lines for iframes), `browser_find`, `browser_frames` (frame indexes).
-*   **Diagnostics**: `browser_console` (newest console messages and uncaught page errors, filterable by `level`) and `browser_network` (requests with method, URL, status and duration; `only_problems` keeps 4xx/5xx and failed ones). Both print a short tail and point at the full log of the browser session, which is kept in `<project>/.logos/browser_logs/` and read with `read_files` / `search_file_content`.
-*   **Interaction**: `browser_click` (by `ref`, or by `x`/`y` coordinates for canvas, image maps and widgets that have no element), `browser_fill`, `browser_select_option`, `browser_hover`, `browser_press`, `browser_handle_dialog`, `browser_wait_for`, `browser_eval` (one JavaScript expression in the page or a frame; each call asks the user for approval).
+#### Browser Tools
+*   **Navigation**: `browser_goto`, `browser_tabs`, `browser_close`.
+*   **Observation**: `browser_snapshot` (numbered element refs; controls inside iframes are included and marked `(frame N: host)`), `browser_screenshot` (with ref badges), `browser_read` (page text plus `Frame N` lines for iframes).
+*   **Interaction**: `browser_click` (by `ref`, or by `x`/`y` coordinates for canvas, image maps and widgets that have no element), `browser_fill`, `browser_press`, `browser_wait_for`.
+*   **On demand**: `browser_navigate_back`, `browser_find`, `browser_frames`, `browser_select_option`, `browser_hover`, `browser_handle_dialog`, and the diagnostics pair `browser_console` (newest console messages and uncaught page errors, filterable by `level`) and `browser_network` (requests with method, URL, status and duration; `only_problems` keeps 4xx/5xx and failed ones). Both print a short tail and point at the full log of the browser session, which is kept in `<project>/.logos/browser_logs/` and read with `read_files` / `search_file_content`. `browser_eval` runs one JavaScript expression in the page or a frame; each call asks the user for approval.
 *   **Attachments**: `read_files`, `list_directory`, `search_file_content` (read-only filesystem access for files attached by reference).
 *   **Skills**: `use_skill` loads an installed Agent Skill on demand (see the [skills guide](./docs/skills.md)).
 *   **User Interaction**: `communicate_to_user`, `finish`.
@@ -235,7 +263,7 @@ Vision mode does not use a local tool manifest. Actions come from the provider's
 
 ### Known Issues
 
-In the process of working with LLMs, situations may arise where the model returns an incorrectly formatted JSON response. This is most relevant for the agent modes (**Terminal** and **Browser**), which require strictly structured tool calls.
+In the process of working with LLMs, situations may arise where the model returns an incorrectly formatted JSON response. This is most relevant for the agent panels (**Terminal** and **Browser**), which require strictly structured tool calls.
 
 Our application is equipped with an intelligent mechanism for correcting errors in LLM's JSON responses, described in the section [**"Reliable Handling of Structured LLM Responses"**](./docs/system_architecture.md#reliable-handling-of-structured-llm-responses) of the system architecture documentation.
 

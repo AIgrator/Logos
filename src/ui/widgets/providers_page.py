@@ -355,7 +355,7 @@ class ProvidersPage(QWidget):
         vision_layout.setContentsMargins(14, 10, 10, 12)
         vision_layout.setSpacing(6)
 
-        vision_title = QLabel("Model for Vision mode")
+        vision_title = QLabel("Model for Vision")
         vision_title.setObjectName("providerRowName")
         vision_layout.addWidget(vision_title)
         vision_detail = QLabel(
@@ -370,7 +370,7 @@ class ProvidersPage(QWidget):
         self.vision_provider_combo = QComboBox()
         self.vision_provider_combo.setMinimumWidth(200)
         self.vision_provider_combo.setToolTip(
-            "Provider that drives Vision mode.")
+            "Provider that drives the Vision capability.")
         self.vision_provider_combo.currentIndexChanged.connect(
             self._on_vision_provider_changed)
         vision_row.addWidget(self.vision_provider_combo)
@@ -380,7 +380,7 @@ class ProvidersPage(QWidget):
         self.vision_model_combo.setPlaceholderText("Select a model")
         self.vision_model_combo.setMinimumWidth(260)
         self.vision_model_combo.setToolTip(
-            "Default model for Vision mode. It is used when the active model "
+            "Default model for Vision. It is used when the active model "
             "cannot drive the screen.")
         self.vision_model_combo.currentTextChanged.connect(
             self._on_vision_model_changed)

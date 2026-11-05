@@ -253,7 +253,7 @@ class Executor:
         tool_func = getattr(self.computer, name, None)
         if tool_func is None or not callable(tool_func):
             raise ValueError(
-                f"Action '{name}' failed: unknown tool for the current mode. "
+                f"Action '{name}' failed: unknown tool for this session. "
                 f"Use only tools from the Available Tools list."
             )
 

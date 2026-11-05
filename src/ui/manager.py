@@ -2126,7 +2126,7 @@ class UIManager(QWidget):
             self.right_panel.set_collapsed(True)
 
     def _update_right_panel_visibility(self):
-        """The workspace panel is available in every mode."""
+        """The workspace panel is available in every panel."""
         panel = getattr(self, "right_panel", None)
         if panel is None:
             return
@@ -2139,7 +2139,7 @@ class UIManager(QWidget):
         panel.setVisible(visible)
 
     def set_session_panel(self, payload: dict):
-        """Session and Activity details shown by the right panel in every mode."""
+        """Session and Activity details shown by the right panel in every panel."""
         panel = getattr(self, "right_panel", None)
         if panel is not None:
             panel.set_session_data(payload or {})

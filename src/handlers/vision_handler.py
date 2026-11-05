@@ -1,5 +1,5 @@
 """
-Vision mode, rebuilt on the agent loop (no strategic plan).
+Vision, rebuilt on the agent loop (no strategic plan).
 
 The handler drives a native Computer Use exchange through a provider that
 implements the BaseLLMProvider computer-use contract (one protocol turn per
@@ -910,7 +910,7 @@ class CuaTurnWorker(QThread):
 # ---------------------------------------------------------------------------
 
 class VisionHandler(BaseAgent):
-    """Vision mode on the shared agent loop, grounded by Computer Use."""
+    """Vision on the shared agent loop, grounded by Computer Use."""
 
     SCHEMA_NAME = None
     MAX_CUA_TURNS = MAX_CUA_TURNS  # fallback; live value from settings
@@ -1520,7 +1520,7 @@ class VisionHandler(BaseAgent):
             self.ui.add_message(
                 "<i>Current provider does not support Computer Use. "
                 "Switch to OpenAI, Anthropic or Google (Gemini 3.x) "
-                "to use Vision mode.</i>")
+                "to use Vision.</i>")
             self.stop()
             return
 

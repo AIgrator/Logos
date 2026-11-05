@@ -100,7 +100,7 @@ class MCPServerDialog(QDialog):
         layout = QVBoxLayout(self)
 
         intro = QLabel(
-            "MCP servers add tools to Terminal mode. Logos launches local "
+            "MCP servers add tools to the Terminal panel. Logos launches local "
             "stdio servers itself and connects to remote Streamable HTTP "
             "servers with the headers you enter.")
         intro.setWordWrap(True)

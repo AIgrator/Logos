@@ -639,7 +639,7 @@ def build_summary_prompts(
         )
     user_prompt = (
         f"Project: {project_name or '(unnamed)'}\n"
-        f"Session mode: {mode or 'unknown'}\n\n"
+        f"Session panel: {mode or 'unknown'}\n\n"
         "Previous summary:\n"
         f"{previous.strip() or '(none)'}\n\n"
     )
@@ -785,7 +785,7 @@ def compaction_block(
         return ""
     label = COMPACTION_LABEL
     if mode:
-        label += f" ({mode} mode)"
+        label += f" ({mode} panel)"
     if int(covered_events or 0) == 1:
         scope = " 1 earlier event was replaced by this summary to save context."
     elif covered_events:
@@ -802,13 +802,13 @@ def compaction_block(
 
 
 def injection_block(summary: str, mode: str = "") -> str:
-    """Prompt prefix carrying prior-session context into the current mode."""
+    """Prompt prefix carrying prior-session context into the current panel."""
     summary = (summary or "").strip()
     if not summary:
         return ""
     label = HANDOFF_LABEL
     if mode:
-        label += f" (continuing in {mode} mode)"
+        label += f" (continuing in the {mode} panel)"
     return (
         f"**{label}:**\n\n"
         f"{summary}\n\n"

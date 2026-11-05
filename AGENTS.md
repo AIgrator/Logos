@@ -154,9 +154,9 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   (`AppController._restore_session_model`, after the replay): no chat notice, no
   summary handoff, no new journal event. A saved provider that is no longer
   configured, a model missing from the merged catalogue or one that cannot run
-  the session's mode keeps the current model and adds one italic warning.
+  the session's capabilities keeps the current model and adds one italic warning.
   `model` events are never rendered, and they do not make an empty session
-  non-empty: a mode switch there still rewrites only the header and keeps them.
+  non-empty: a panel switch there still rewrites only the header and keeps them.
   A new session inherits the current model,
   and Settings → Providers holds the default; a switch stays in memory until
   the next settings save (window state on close), so the last used model
@@ -334,7 +334,7 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `UIManager.bottom_center_column`), hovering it opens a themed checklist
   popover, and the pill disappears when the turn ends
   (`BaseAgentHandler._activity_finalize`). A mid-turn user message leaves it
-  alone; a mode switch and `clear_chat` clear it, compact mode only hides it
+  alone; a panel switch and `clear_chat` clear it, compact mode only hides it
   (`set_suppressed`). The journal keeps `plan` events for the model and the
   summary, but replay never shows them.
   Terminal and Browser request one `payload.actions` list per response: up to

@@ -105,7 +105,7 @@ class RightPanel(QWidget):
 
     Session (context/token statistics, then a recap of this session) and
     Activity (skills, tools and attached files) plus Files (read-only project
-    tree, files open in the detected editor) are available in every mode. Git
+    tree, files open in the detected editor) are available in every panel. Git
     (read-only branch and working-tree status) appears only in Terminal mode.
     """
 
@@ -639,7 +639,7 @@ class RightPanel(QWidget):
         if source == "llm":
             return "Updated by the model from the session journal."
         if source == "handoff":
-            return "Copied from the previous session when the mode changed."
+            return "Carried over from the session this one continues."
         if source == "fallback":
             return ("Deterministic fallback; the model summary "
                     "updates automatically.")
@@ -1083,7 +1083,7 @@ class RightPanel(QWidget):
     # -- state ----------------------------------------------------------
 
     def set_mode(self, mode: str):
-        """Session, Activity and Files stay in every mode; Git is Terminal."""
+        """Session, Activity and Files stay in every panel; Git is Terminal."""
         self._mode = str(mode or "chat")
         if (self._mode != "terminal"
                 and self.stack.currentIndex() == self.PAGE_GIT):
