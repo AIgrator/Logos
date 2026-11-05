@@ -246,10 +246,16 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   reaches; a poll updates the state text. The launch step row keeps the same
   clock: `_show_activity_result` records `job_started_at` / `job_finished_at`
   and `ActivityBlockFormatter._step_duration` measures the job, not the
-  half-second step, so the transcript does not freeze at `0s`.
-  `ChatWidget._needs_activity_tick` keeps the 1 s render alive for a block
-  whose turn already finished while a job row still runs
+  half-second step, so the transcript does not freeze at `0s`. Only a
+  launching `execute_shell` gets that handle (`live_job_id`): a poll or stop
+  snapshot reports `status: running` for the job it describes, but its row is
+  a static `ok` row - treating it as the handle left a poll row ticking for
+  minutes after the server was stopped and kept the finished turn from
+  auto-folding. `ChatWidget._needs_activity_tick` keeps the 1 s render alive
+  for a block whose turn already finished while a job row still runs
   (`_has_live_job`), and a replayed row (no `job_started_at`) never ticks.
+  A Stop click on a job that already ended drops its pinned row instead of
+  leaving it in `stopping` (`TerminalHandler.request_stop_job`).
   A session reset (`UIManager.clear_chat`) clears the strip; compact mode
   hides it (`set_suppressed`) without forgetting the jobs.
   Every message carries a footer strip under it: a user bubble the local send

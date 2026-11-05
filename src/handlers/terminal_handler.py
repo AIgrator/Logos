@@ -1628,14 +1628,20 @@ class TerminalHandler(BaseAgentHandler):
             self._pending_action_name, result, self._pending_action_args
         )
         job_id = _running_job_id(result)
+        # `job_id` is the live handle of a background launch, and only a launch
+        # owns the job clock. A poll or stop snapshot reports `status: running`
+        # for the job it describes too, but its row is a snapshot: marking it
+        # live kept its clock ticking after the turn ended and blocked the
+        # block's auto-fold (the 4m49s poll row on a stopped server).
+        live_job_id = job_id if self._pending_action_name == 'execute_shell' else None
         title, _detail, plain, log_path = self._ui_result_fields(output_for_ui)
         self.record_tool_result(
             output_for_llm, name=self._pending_action_name,
             display=plain or '', display_title=title or '',
-            job_id=(job_id if self._pending_action_name == 'execute_shell'
-                    else None),
+            job_id=live_job_id,
             log_path=log_path or '')
-        self._show_activity_result(output_for_llm, output_for_ui, launch_job_id=job_id)
+        self._show_activity_result(output_for_llm, output_for_ui,
+                                   launch_job_id=live_job_id)
         if self._pending_action_name in ('poll_shell_job', 'stop_shell_job') \
                 and isinstance(result, dict) and result.get('job_id') is not None:
             update_state = getattr(self.ui, 'update_job_state', None)
@@ -1647,10 +1653,10 @@ class TerminalHandler(BaseAgentHandler):
                         str(result.get('status') or ''))
                 except Exception as e:
                     logging.warning(f"Job strip state update failed: {e}")
-        if job_id is not None and self._pending_action_name == 'execute_shell':
-            self._track_job_panel(job_id, result, output_for_ui)
+        if live_job_id is not None:
+            self._track_job_panel(live_job_id, result, output_for_ui)
             if self._active_step is not None and self._activity_msg is not None:
-                self._job_steps[int(job_id)] = (self._activity_msg, self._active_step)
+                self._job_steps[int(live_job_id)] = (self._activity_msg, self._active_step)
                 if len(self._job_steps) > 200:
                     self._job_steps.pop(next(iter(self._job_steps)))
             # Background launch: do NOT ask the model immediately (it acts
@@ -1663,7 +1669,7 @@ class TerminalHandler(BaseAgentHandler):
             if isinstance(result, dict) and result.get('readiness_checked'):
                 self._after_action_result(output_for_llm)
                 return
-            self._arm_job_wait(job_id)
+            self._arm_job_wait(live_job_id)
             return
         self._after_action_result(output_for_llm)
 
@@ -1688,7 +1694,13 @@ class TerminalHandler(BaseAgentHandler):
         return title, detail_html, plain, output_for_ui.get('open_log_path')
 
     def _show_activity_result(self, output_for_llm, output_for_ui, launch_job_id=None):
-        """Folds a finished tool result into the active step row."""
+        """Folds a finished tool result into the active step row.
+
+        ``launch_job_id`` is passed for a launching ``execute_shell`` only: it
+        makes the row the job's live handle (1s clock, Stop link). A poll or
+        stop result is a snapshot of someone else's launch and must stay a
+        static row, or nothing ever finishes it.
+        """
         step = self._active_step
         if step is None:
             if output_for_ui:
@@ -1696,8 +1708,6 @@ class TerminalHandler(BaseAgentHandler):
             return
         title, detail_html, _plain, log_path = self._ui_result_fields(output_for_ui)
         failed = _is_error_output(output_for_llm)
-        # Only a launching execute_shell keeps its step live until the job
-        # ends (stop link + elapsed); polls and foreground steps finish now.
         running_job = launch_job_id is not None and not failed
         status = 'running' if running_job else ('error' if failed else 'ok')
         if running_job:
@@ -1877,16 +1887,25 @@ class TerminalHandler(BaseAgentHandler):
         manager = getattr(self.computer, "shell_jobs", None)
         if manager is None:
             return
+        result = manager.request_stop(job_id)
+        if result.get('status') == 'not_found':
+            # The job ended before the click. Drop the pinned row instead of
+            # leaving it in "stopping" with a clock that never stops.
+            finish = getattr(self.ui, 'finish_job', None)
+            if callable(finish):
+                try:
+                    finish(job_id)
+                except Exception as e:
+                    logging.warning(f"Job strip update failed for #{job_id}: {e}")
+            self.ui.add_message(
+                f"<i>Background job #{job_id} has already finished.</i>")
+            return
         update = getattr(self.ui, 'update_job_state', None)
         if callable(update):
             try:
                 update(job_id, 'stopping', 'stopping')
             except Exception:
                 pass
-        result = manager.request_stop(job_id)
-        if result.get('status') == 'not_found':
-            self.ui.add_message(
-                f"<i>Background job #{job_id} has already finished.</i>")
 
     def _arm_job_wait(self, job_id: int):
         self.cancel_job_wait()
