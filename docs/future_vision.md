@@ -206,6 +206,9 @@ session 20 (9 on demand), and a session holding both capabilities 39. That is
 above the target of ≈30 for the mixed case because a few tools were kept native
 deliberately — `find_files`, `path_exists` and `create_directory` are ordinary
 file work, and hiding them would have changed behaviour for a marginal saving.
+Measured on the generated blocks: the mixed session went from 51 declared tools
+and 20.8 KB to 39 and 15.9 KB (≈1.2k tokens per request), and a pure browser
+block from 11.4 KB to 7.7 KB.
 The catalog is a **prompt budget, not a permission**: `search_tools` only
 reaches tools the grants already hold.
 
@@ -358,7 +361,8 @@ prompt prefix. *Done when:* base+terminal+browser fits a sane native budget
 > which `start_task` clears. The strict envelope is built from the declared set,
 > so a catalog tool is accepted by the grammar only after it was loaded. Numbers:
 > 29 native for terminal, 20 for browser, 39 for both (the ≈30 target is not met
-> in the mixed case — see the note above the table).
+> in the mixed case — see the note above the table), and the mixed prompt block
+> shrank from 20.8 KB to 15.9 KB.
 
 **Phase 4 — cleanup.**
 Mode defaults become capability defaults (`mode_models.terminal`,
