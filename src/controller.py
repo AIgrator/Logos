@@ -260,6 +260,7 @@ class AppController(QObject):
         self.ui.terminal_mode_selected.connect(self._activate_terminal_mode)
         self.ui.vision_mode_selected.connect(self._activate_vision_mode)
         self.ui.browser_mode_selected.connect(self._activate_browser_mode)
+        self.ui.capability_detach_requested.connect(self._detach_capability_clicked)
         self.ui.retry_requested.connect(self._handle_retry_request)
         self.ui.continue_requested.connect(self._handle_continue_request)
         self.ui.job_stop_requested.connect(self._handle_job_stop)
@@ -566,10 +567,15 @@ class AppController(QObject):
     def _current_mode(self) -> str:
         return self._valid_mode(getattr(self.ui, "_active_mode_key", "chat"))
 
-    def _restore_session_mode(self, mode: str):
+    def _restore_session_mode(self, mode: str, grants=None):
         mode = self._valid_mode(mode)
         self.session_mode = mode
-        self.session_capabilities = capabilities.grants_for_mode(mode)
+        # A restored session keeps every capability its journal recorded; the
+        # mode only says which panel was open. An empty or legacy session has
+        # no grants yet, so the mode's own set fills in.
+        self.session_capabilities = capabilities.merge_grants(
+            self.session_capabilities if grants is None else grants,
+            capabilities.grants_for_mode(mode))
         handlers = getattr(self, "chat_handler", None)
         if handlers is None:
             return
@@ -583,6 +589,7 @@ class AppController(QObject):
         self._set_state(state)
         if "terminal" in self.session_capabilities:
             self.ensure_mcp_manager()
+        self._sync_capability_ui()
         try:
             self.ui.set_active_mode(mode)
         except Exception as e:
@@ -605,6 +612,7 @@ class AppController(QObject):
         self.session_objective = ""
         self.session_mode = mode
         self.session_capabilities = capabilities.grants_for_mode(mode)
+        self._sync_capability_ui()
         self.session_turn_id = ""
         self.session_events = []
         self._session_event_count = 0
@@ -709,7 +717,71 @@ class AppController(QObject):
             # The terminal capability owns MCP servers; a session that gained it
             # mid-turn must see them on the very next step.
             self.ensure_mcp_manager()
+        self._sync_capability_ui()
         return grants
+
+    def detach_capability(self, capability: str) -> tuple[str, ...]:
+        """Revokes one capability from the open session (P8: explicit, at once).
+
+        Only what the session may do changes: the journal, the transcript and
+        the handler stay, and the next prompt is built from the smaller set.
+        Only ``terminal``/``browser``/``vision`` are revocable (``base`` is not
+        a permission to remove and ``chat`` is not offered), and a capability
+        the session does not hold is a no-op. Resources stay open (the shared
+        browser, the MCP manager) because other panels and the next attachment
+        reuse them.
+        """
+        name = str(capability or "").strip().lower()
+        if name not in (capabilities.TERMINAL, capabilities.BROWSER, capabilities.VISION):
+            return self.session_capabilities
+        if name not in self.session_capabilities:
+            return self.session_capabilities
+        grants = capabilities.remove_grants(self.session_capabilities, name)
+        if tuple(grants) == tuple(self.session_capabilities):
+            return grants
+        if not grants:
+            # A whole-set capability (vision) can leave nothing behind; a
+            # session always keeps base, which is the base-only presentation.
+            grants = (capabilities.BASE,)
+        self.session_capabilities = grants
+        if self.session_file and self.project_manager is not None:
+            if not self.project_manager.update_session_grants(
+                    self.session_file, self.session_mode or "", grants):
+                logging.warning(
+                    f"Could not record the revoked capability '{name}' in the session header.")
+        logging.info(f"Detached capability '{name}'; session grants are now {list(grants)}.")
+        self._sync_capability_ui()
+        return grants
+
+    def _sync_capability_ui(self):
+        """Mirrors the session's grants on the composer's capability controls."""
+        setter = getattr(getattr(self, "ui", None), "set_capabilities", None)
+        if callable(setter):
+            setter(self.session_capabilities)
+
+    def _detach_capability_clicked(self, name: str):
+        """The composer's "Detach" action: revoke, then keep the UI honest."""
+        entry = str(name or "").strip().lower()
+        if entry not in (capabilities.TERMINAL, capabilities.BROWSER, capabilities.VISION):
+            return
+        if entry not in self.session_capabilities:
+            return
+        was_presentation = (self.session_mode or "") == entry
+        if entry == capabilities.VISION and self.current_handler is self.vision_handler:
+            self.vision_handler.stop()
+        grants = self.detach_capability(entry)
+        self.ui.add_message(
+            f"<i>{entry.capitalize()} capability detached from this session.</i>",
+            force_scroll=True)
+        if not was_presentation:
+            return
+        # The open panel lost its capability: show the nearest one still held.
+        if capabilities.TERMINAL in grants:
+            self._activate_terminal_mode()
+        elif capabilities.BROWSER in grants:
+            self._activate_browser_mode()
+        else:
+            self._activate_chat_mode()
 
     def _load_project_session(self):
         """Restores the most recent session stored in the project."""
@@ -777,10 +849,11 @@ class AppController(QObject):
         self.conversation_history.clear()
         self.conversation_history.extend(messages)
         if getattr(self, "chat_handler", None) is not None:
-            self._restore_session_mode(self.session_mode)
+            self._restore_session_mode(self.session_mode, grants=session_capabilities)
             # The journal is the record: keep the grants it stored instead of
             # the mode defaults _restore_session_mode just installed.
             self.session_capabilities = session_capabilities
+            self._sync_capability_ui()
         self._load_handoff_state()
         self._restore_agent_history()
         self._schedule_context_indicator_update()
@@ -2601,8 +2674,6 @@ class AppController(QObject):
         """
         self.is_vision_module_initialized = True
         try:
-            if self.ui and hasattr(self.ui, "spinner_animation"):
-                self.ui.spinner_animation.stop()
             self.ui.set_vision_mode_loading(False)
         except Exception:
             pass
@@ -3623,6 +3694,7 @@ class AppController(QObject):
                 ControllerState.VISION: "vision",
             }.get(new_state, "chat")
         self._prepare_session_for_mode(mode)
+        self._sync_capability_ui()
         self._restore_agent_history()
 
         self._set_state(new_state)
@@ -3642,13 +3714,14 @@ class AppController(QObject):
     def _activate_chat_mode(self):
         self._cleanup_and_switch_handler(self.chat_handler, ControllerState.CHATTING, mode="chat")
         self.ui.set_active_mode('chat')
-        self.ui.add_message("<i>Chat mode enabled.</i>", force_scroll=True)
+        self.ui.add_message(
+            "<i>Chat panel: answers without agent tools.</i>", force_scroll=True)
 
     def _activate_terminal_mode(self):
         self._cleanup_and_switch_handler(self.terminal_handler, ControllerState.TERMINAL, mode="terminal")
         self.ensure_mcp_manager()
         self.ui.set_active_mode('terminal')
-        self.ui.add_message("<i>Terminal mode enabled. I will now use terminal commands to accomplish tasks.</i>", force_scroll=True)
+        self.ui.add_message("<i>Terminal panel opened. Its capability is attached to this session.</i>", force_scroll=True)
         if self.indexer is not None:
             self.indexer.schedule_reindex(force=True)
 
@@ -3672,8 +3745,8 @@ class AppController(QObject):
                 f"{html.escape(str(runtime.browsers_dir()))}.</i>", force_scroll=True)
             return True
         self.ui.add_message(
-            "<i>Browser mode needs Chromium, which is not installed yet. Pick "
-            "Browser mode again to download it, or use Settings → Browser → "
+            "<i>Browser needs Chromium, which is not installed yet. Pick "
+            "Browser again to download it, or use Settings → Browser → "
             "Download…</i>", force_scroll=True)
         return False
 
@@ -3683,7 +3756,7 @@ class AppController(QObject):
             return
         self._cleanup_and_switch_handler(self.browser_handler, ControllerState.BROWSER, mode="browser")
         self.ui.set_active_mode('browser')
-        self.ui.add_message("<i>Browser mode enabled. Describe the web task you want me to perform.</i>", force_scroll=True)
+        self.ui.add_message("<i>Browser panel opened. Its capability is attached to this session.</i>", force_scroll=True)
 
     def _vision_availability_error(self) -> str | None:
         """Returns why Vision cannot start, or None when a CUA model is usable.
@@ -3724,7 +3797,7 @@ class AppController(QObject):
             return
         self._cleanup_and_switch_handler(self.vision_handler, ControllerState.VISION, mode="vision")
         self.ui.set_active_mode('vision')
-        self.ui.add_message("<i>Vision mode enabled. Describe the task you want me to perform.</i>", force_scroll=True)
+        self.ui.add_message("<i>Vision panel opened. Its capability is attached to this session.</i>", force_scroll=True)
         self._apply_mode_default_model("vision")
         self.vision_handler._set_state(VisionState.IDLE)
 
@@ -4527,7 +4600,7 @@ class AppController(QObject):
         if self.state == ControllerState.VISION and self.vision_handler.state in [VisionState.EXECUTING, VisionState.PAUSED]:
             self.vision_handler.pre_pause_state = self.vision_handler.state
             self.vision_handler._set_state(VisionState.PAUSED)
-            self.ui.add_message("<i>Execution paused due to mode switch.</i>")
+            self.ui.add_message("<i>Execution paused due to a panel switch.</i>")
             self.ui.set_paused(True)
             self.ui.set_step_controls_enabled(False)
 

@@ -450,6 +450,25 @@ the chat and leaves no journal behind; the next message creates a session in the
 current mode. Legacy `session-*.json` files are migrated to JSONL on load and the
 old file is kept as `.json.bak`.
 
+The composer no longer carries a mode selector. `src/ui/widgets/capability_bar.py`
+(`CapabilityBar`) holds four controls — Chat, Terminal, Browser, Vision: a check
+marks a capability the session holds, the checked control is the panel the next
+turn presents, and a click asks the controller to open that panel
+(`presentation_requested` → `UIManager._on_capability_opened` → the matching
+`_activate_*`), which attaches the capability on the way. Chat is the base-only
+presentation until Phase 4, so it never carries a check. Revoking is deliberate
+(P8): right-clicking an attached Terminal/Browser/Vision control offers
+"Detach … from session" (`capability_detach_requested` →
+`AppController._detach_capability_clicked` → `detach_capability`), which rewrites
+the header, keeps the journal, the transcript and the handler, leaves the shared
+browser and the MCP manager alive, and falls back to the nearest presentation the
+session still holds (Terminal, else Browser, else Chat). `UIManager.set_capabilities`
+mirrors `session_capabilities`; `_sync_capability_ui` refreshes it after a panel
+switch, an attach/detach and whenever a journal is opened. The bar takes the
+selector's place in both toolbar layouts, and `set_vision_mode_loading` disables
+only the Vision control. Switcher notices speak of panels and capabilities
+("Terminal panel opened…", "Browser capability detached…") instead of modes.
+
 `src/computer/capabilities.py` is the single authority on which tools a session
 may use. A capability is what a session is allowed to do (`base`, `terminal`,
 `browser`, `vision`, plus `chat` until it becomes base-only); a mode is how the

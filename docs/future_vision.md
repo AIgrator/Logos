@@ -297,9 +297,14 @@ schema check reports no problems.
 > because one handler owns both the exec thread and the shared browser service;
 > the panel only picks the system prompt, the response envelope and the
 > `cache/session` view, and the browser step/time budgets and the persistent
-> screenshot rule follow the browser presentation. Still open in this phase: the
-> `exposure` axis (native/catalog/hidden) and the capability panels that replace
-> the mode selector. Phase 2 has started with the first half: `open_browser(url)`
+> screenshot rule follow the browser presentation. The capability controls that
+> replace the mode selector have landed too: `src/ui/widgets/capability_bar.py`
+> holds Chat / Terminal / Browser / Vision, a check marks a granted capability
+> and the checked control is the open panel, a click opens the panel and attaches
+> its capability, and right-click detaches (explicit revoke, P8) with a fallback
+> to the nearest panel the session still holds. Still open in this phase: the
+> `exposure` axis (native/catalog/hidden). Phase 2 has started with the first
+> half: `open_browser(url)`
 > is a real tool that attaches the browser capability from inside a terminal turn
 > (grants grow, nothing is summarized, the page opens on the shared service), and
 > `browser_snapshot` works on the next step. The `open_terminal()` half is

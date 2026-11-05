@@ -13,7 +13,7 @@ from PIL import Image, ImageChops, ImageDraw, ImageOps
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QEasingCurve, QMimeData, QPoint,
                             QPropertyAnimation, QRect, QSize, Qt, Signal, QTimer, Slot)
-from PySide6.QtGui import (QActionGroup, QColor, QCursor, QIcon, QImage, QPainter, QPen, QPixmap,
+from PySide6.QtGui import (QColor, QCursor, QIcon, QImage, QPainter, QPen, QPixmap,
                            QTextCursor, QTextDocument, QTextOption)
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QMenu, QPushButton, QSizeGrip,
@@ -34,6 +34,7 @@ from . import editor_launcher, styles
 from .provider_icons import provider_icon
 from .utils import CustomToolTipManager, IconHoverFilter
 from .widgets.attachment_chip import AttachmentChip
+from .widgets.capability_bar import CapabilityBar
 from .widgets.image_preview_dialog import ImagePreviewDialog
 from .text_render import render_reasoning, render_text, render_user_message
 from .widgets.chat_widget import ChatWidget
@@ -283,6 +284,7 @@ class UIManager(QWidget):
     terminal_mode_selected = Signal()
     vision_mode_selected = Signal()
     browser_mode_selected = Signal()
+    capability_detach_requested = Signal(str)
     model_selected = Signal(str, str)  # provider_id, model_id (remembered per session)
     reasoning_effort_changed = Signal(str, str, str)  # provider_id, model_id, level
     continue_requested = Signal()
@@ -467,7 +469,8 @@ class UIManager(QWidget):
         self.bottom_toolbar_layout.setContentsMargins(0, 8, 0, 0)
 
         # Second row (above the icon toolbar, below the input) dedicated to
-        # mode + model selection so long provider/model names are not clipped.
+        # the capability controls + model selection, so long provider/model
+        # names are not clipped.
         self.mode_model_container = QWidget()
         self.mode_model_layout = QHBoxLayout(self.mode_model_container)
         self.mode_model_layout.setSpacing(10)
@@ -506,30 +509,7 @@ class UIManager(QWidget):
         self.screenshot_action = self.attachment_menu.addAction("Take Screenshot")
         self.add_folder_action.setVisible(False)
 
-        self.mode_button = QPushButton("Chat")
-        self.mode_button.setFixedSize(120, 36)
-        self.tooltip_manager.install(self.mode_button, "Switch mode")
-        self.spinner_animation = qta.Spin(self.mode_button)
-        self.mode_menu = QMenu(self.mode_button)
-        self.vision_mode_spinner = qta.Spin(self.mode_menu)
-        self.mode_action_group = QActionGroup(self)
-        self.mode_action_group.setExclusive(True)
-        self.chat_mode_action = self.mode_action_group.addAction("Chat Mode")
-        self.chat_mode_action.setCheckable(True)
-        self.chat_mode_action.setChecked(True)
-        self.mode_menu.addAction(self.chat_mode_action)
-        self.terminal_mode_action = self.mode_action_group.addAction("Terminal Mode")
-        self.terminal_mode_action.setCheckable(True)
-        self.mode_menu.addAction(self.terminal_mode_action)
-        self.browser_mode_action = self.mode_action_group.addAction("Browser Mode")
-        self.browser_mode_action.setCheckable(True)
-        self.mode_menu.addAction(self.browser_mode_action)
-        self.vision_mode_action = self.mode_action_group.addAction("Vision Mode")
-        self.vision_mode_action.setCheckable(True)
-        self.vision_mode_action.setEnabled(False)
-        self.vision_mode_action.setToolTip("Initializing vision module...")
-        self.mode_menu.addAction(self.vision_mode_action)
-        self.mode_button.setMenu(self.mode_menu)
+        self.capability_bar = CapabilityBar(self.controller.theme_manager, self)
 
         self.model_button = QPushButton("...")
         self.model_button.setMinimumSize(140, 36)
@@ -601,7 +581,7 @@ class UIManager(QWidget):
         self.bottom_toolbar_layout.addWidget(self.attachment_button)
         self.bottom_toolbar_layout.addWidget(self.access_mode_button)
 
-        self.mode_model_layout.addWidget(self.mode_button)
+        self.mode_model_layout.addWidget(self.capability_bar)
         self.mode_model_layout.addWidget(self.model_button, 1)
         self.mode_model_layout.addWidget(
             self.model_effort_badge, 0, Qt.AlignmentFlag.AlignVCenter)
@@ -670,10 +650,8 @@ class UIManager(QWidget):
         self.add_file_action.triggered.connect(self.add_file_clicked.emit)
         self.add_folder_action.triggered.connect(self.add_folder_clicked.emit)
         self.screenshot_action.triggered.connect(self.screenshot_button_clicked.emit)
-        self.chat_mode_action.triggered.connect(self._on_chat_mode_selected)
-        self.terminal_mode_action.triggered.connect(self._on_terminal_mode_selected)
-        self.vision_mode_action.triggered.connect(self._on_vision_mode_selected)
-        self.browser_mode_action.triggered.connect(self._on_browser_mode_selected)
+        self.capability_bar.presentation_requested.connect(self._on_capability_opened)
+        self.capability_bar.detach_requested.connect(self.capability_detach_requested.emit)
         self.cancel_button.clicked.connect(self.cancel_requested.emit)
 
         self.custom_title_bar.pause_resume_clicked.connect(self.pause_resume_clicked.emit)
@@ -980,8 +958,6 @@ class UIManager(QWidget):
         self.icon_robot = qta.icon('fa5s.robot', color=icon_color)
         self.pause_icon = qta.icon('fa5s.pause', color=icon_color)
         self.play_icon = qta.icon('fa5s.play', color=icon_color)
-        self.icon_spinner = qta.icon('fa5s.spinner', color=icon_color, animation=self.spinner_animation)
-        self.icon_spinner_vision = qta.icon('fa5s.spinner', color=icon_color, animation=self.vision_mode_spinner)
         current_toggle_icon = self.toggle_icon_maximize if self.is_compact else self.toggle_icon_minimize
         self.toggle_button.setIcon(current_toggle_icon)
         self._style_context_indicator()
@@ -1215,21 +1191,20 @@ class UIManager(QWidget):
     def _on_pause_task_clicked(self):
         self.pause_resume_clicked.emit()
 
-    def _on_chat_mode_selected(self):
-        self.mode_button.setText("Chat")
-        self.chat_mode_selected.emit()
+    def _on_capability_opened(self, name: str):
+        """A capability control was clicked: open that panel."""
+        emit = {
+            "chat": self.chat_mode_selected.emit,
+            "terminal": self.terminal_mode_selected.emit,
+            "browser": self.browser_mode_selected.emit,
+            "vision": self.vision_mode_selected.emit,
+        }.get(str(name or "").lower())
+        if emit is not None:
+            emit()
 
-    def _on_terminal_mode_selected(self):
-        self.mode_button.setText("Terminal")
-        self.terminal_mode_selected.emit()
-
-    def _on_vision_mode_selected(self):
-        self.mode_button.setText("Vision")
-        self.vision_mode_selected.emit()
-
-    def _on_browser_mode_selected(self):
-        self.mode_button.setText("Browser")
-        self.browser_mode_selected.emit()
+    def set_capabilities(self, grants) -> None:
+        """Mirrors the session's grants on the capability controls."""
+        self.capability_bar.set_attached(grants)
 
     def refresh_model_button(self, title: str):
         """Updates the toolbar model button (called on switch/settings change).
@@ -1402,27 +1377,23 @@ class UIManager(QWidget):
         self._update_right_panel_visibility()
 
         if mode == 'chat':
-            self.chat_mode_action.setChecked(True)
-            self.mode_button.setText("Chat")
+            self.capability_bar.set_active('chat')
             self.screenshot_action.setEnabled(True)
             self.screenshot_action.setToolTip("")
             self.set_paused(False)
         elif mode == 'terminal':
-            self.terminal_mode_action.setChecked(True)
-            self.mode_button.setText("Terminal")
+            self.capability_bar.set_active('terminal')
             self.screenshot_action.setEnabled(False)
-            self.screenshot_action.setToolTip("Screenshots are not available in Terminal Mode")
+            self.screenshot_action.setToolTip("Screenshots are not available in the Terminal panel")
             self.set_paused(False)
         elif mode == 'vision':
-            self.vision_mode_action.setChecked(True)
-            self.mode_button.setText("Vision")
+            self.capability_bar.set_active('vision')
             self.screenshot_action.setEnabled(True)
             self.screenshot_action.setToolTip("")
         elif mode == 'browser':
-            self.browser_mode_action.setChecked(True)
-            self.mode_button.setText("Browser")
+            self.capability_bar.set_active('browser')
             self.screenshot_action.setEnabled(False)
-            self.screenshot_action.setToolTip("Screenshots are not available in Browser Mode")
+            self.screenshot_action.setToolTip("Screenshots are not available in the Browser panel")
 
         self.update_pause_button()
 
@@ -1451,7 +1422,7 @@ class UIManager(QWidget):
         """Width the toolbar needs to fit everything on one row (no clipping)."""
         widgets = [
             self.toggle_button, self.attachment_button,
-            self.mode_button, self.model_button, self.send_button,
+            self.capability_bar, self.model_button, self.send_button,
         ]
         if not self.access_mode_button.isHidden():
             widgets.append(self.access_mode_button)
@@ -1530,7 +1501,7 @@ class UIManager(QWidget):
             return
         self._toolbar_single_row = single
 
-        extras = [self.access_mode_button, self.mode_button,
+        extras = [self.access_mode_button, self.capability_bar,
                   self.model_button, self.model_effort_badge]
         for w in extras:
             self.bottom_toolbar_layout.removeWidget(w)
@@ -1545,28 +1516,21 @@ class UIManager(QWidget):
             # model selector keeps its stretch so it fills the spare width
             # here too, exactly like in the two-row layout.
             self.bottom_toolbar_layout.insertWidget(anchor + 1, self.access_mode_button)
-            self.bottom_toolbar_layout.insertWidget(anchor + 2, self.mode_button)
+            self.bottom_toolbar_layout.insertWidget(anchor + 2, self.capability_bar)
             self.bottom_toolbar_layout.insertWidget(anchor + 3, self.model_button, 1)
             self.bottom_toolbar_layout.insertWidget(
                 anchor + 4, self.model_effort_badge, 0, Qt.AlignmentFlag.AlignVCenter)
             self.mode_model_container.setVisible(False)
         else:
             self.bottom_toolbar_layout.insertWidget(anchor + 1, self.access_mode_button)
-            self.mode_model_layout.addWidget(self.mode_button)
+            self.mode_model_layout.addWidget(self.capability_bar)
             self.mode_model_layout.addWidget(self.model_button, 1)
             self.mode_model_layout.addWidget(
                 self.model_effort_badge, 0, Qt.AlignmentFlag.AlignVCenter)
             self.mode_model_container.setVisible(True)
 
     def set_vision_mode_loading(self, is_loading: bool):
-        if is_loading:
-            self.vision_mode_action.setIcon(self.icon_spinner_vision)
-            self.vision_mode_action.setEnabled(False)
-            self.vision_mode_action.setToolTip("Initializing vision module...")
-        else:
-            self.vision_mode_action.setIcon(QIcon())
-            self.vision_mode_action.setEnabled(True)
-            self.vision_mode_action.setToolTip("")
+        self.capability_bar.set_vision_loading(bool(is_loading))
 
     def _update_send_button_state(self):
         has_text = bool(self.user_input.toPlainText().strip())

@@ -218,6 +218,18 @@ def merge_grants(*sets: Iterable[str]) -> tuple[str, ...]:
     return normalize_grants(merged)
 
 
+def remove_grants(grants: Iterable[str], *names: str) -> tuple[str, ...]:
+    """Grants without the named capabilities; ``base`` always stays.
+
+    Revoking is deliberate and immediate (P8 of the vision plan): the caller is
+    expected to have asked the user, and the next prompt is built from what is
+    left. Base is not a permission to remove, so it is never dropped.
+    """
+    dropped = {str(name).strip().lower() for name in names}
+    return tuple(name for name in normalize_grants(grants)
+                 if name == BASE or name not in dropped)
+
+
 def capability_of_tool(name: str) -> str | None:
     """Which capability owns a tool, or None when nothing grants it."""
     for capability in CAPABILITIES:
