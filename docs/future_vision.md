@@ -371,20 +371,21 @@ stays only as a legacy field read by the loader.
 *Done when:* the word "mode" no longer shapes the agent, the UI or the docs, and
 a fresh install has no switcher to click.
 
-> **Status — 4a done.** The UI, README and developer docs now speak of
-> capabilities and panels: the composer carries the capability controls instead
-> of a selector, notices say "Terminal panel opened…" / "capability detached",
-> the journal banner and the session recap print `Panel:` and `Capabilities:`,
-> and the Vision strings read "Vision" rather than "Vision mode". The dead
+> **Status — done.** The UI, README and developer docs now speak of capabilities
+> and panels: the composer carries the capability controls instead of a selector,
+> notices say "Terminal panel opened…" / "capability detached", the journal
+> banner and the session recap print `Panel:` and `Capabilities:`, and the Vision
+> strings read "Vision" rather than "Vision mode". The dead
 > `handoff_on_mode_switch` setting and its checkbox are gone (a capability change
-> no longer starts a session, so there was nothing to seed). `mode_models` keeps
-> its key name for compatibility and is documented as the per-capability default
-> (`mode_models.vision`); `mode` in a session header stays readable forever.
+> no longer starts a session, so there was nothing to seed).
 >
-> **Still open — 4b.** Chat is not yet a base-only agent session: `ChatHandler`
-> has no tool loop, so `base` tools (file reads, `open_terminal` /
-> `open_browser`) are unreachable from the Chat panel. That is the last item of
-> the plan and the one that changes behaviour.
+> What deliberately keeps the word: `mode` in a session header is still read
+> forever as the legacy field, and `mode_models` keeps its settings key so
+> existing files stay valid — it is the per-capability default
+> (`mode_models.vision`). `src/computer/modes/*` and `Computer(mode=…)` also keep
+> the name: those are the delivery modules the capability registry filters, not a
+> user-facing mode. Chat with base tools is **not** part of this phase; it is open
+> question 2 below and would change behaviour.
 
 ## Acceptance checklist
 
