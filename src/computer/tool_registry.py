@@ -115,10 +115,13 @@ class ToolRegistry:
             return dest
         catalogue = {name: list(caps.TOOLS.get(name, ())) for name in caps.CAPABILITIES}
         catalogue["_modes"] = {mode: list(grants) for mode, grants in caps.MODE_GRANTS.items()}
+        catalogue["_catalog"] = sorted(caps.CATALOG_TOOLS)
         self._write_text(dest, json.dumps(catalogue, indent=2) + "\n")
         return dest
 
     def generate_tools(self, force: bool = False) -> dict:
+        from src.computer import capabilities as caps
+
         generated_files = {}
         for mode in ['vision', 'terminal', 'browser']:
             dest = os.path.join(self.get_cache_dir(), mode, 'tools.txt')
@@ -127,15 +130,35 @@ class ToolRegistry:
                 continue
 
             try:
-                data = self._tools_text(self._get_filtered_metadata(mode))
+                meta = self._declared_metadata(mode)
+                data = self._tools_text(meta, caps.catalog_tools_for_mode(mode))
             except Exception:
                 data = '\n'
 
             self._write_text(dest, data)
         return generated_files
 
-    def _tools_text(self, meta: dict) -> str:
-        """The ``{available_tools}`` block for one metadata set, in its order."""
+    def _declared_metadata(self, mode: str) -> dict:
+        """A mode's metadata without its on-demand tools.
+
+        The per-mode files follow the same exposure split as a session view, so
+        a pure ``base+terminal`` / ``base+browser`` grant set still produces the
+        mode's block byte for byte.
+        """
+        from src.computer import capabilities as caps
+
+        native = set(caps.native_tools_for_grants(caps.grants_for_mode(mode)))
+        return {name: info for name, info in self._get_filtered_metadata(mode).items()
+                if name in native}
+
+    def _tools_text(self, meta: dict, catalog=()) -> str:
+        """The ``{available_tools}`` block for one metadata set, in its order.
+
+        Tools that are granted but not declared are named in a closing section:
+        the model calls ``search_tools`` to load one, and it is declared from
+        the next request on. Names only, because the whole point is to keep the
+        declared set small.
+        """
         lines = []
         for meta_name, info in (meta or {}).items():
             tool = info.get('tool') or {}
@@ -157,7 +180,14 @@ class ToolRegistry:
                     a_desc_q = a_desc.replace('"', '\\"')
                     lines.append(f"    {arg_name}: \"{a_desc_q}\"")
             lines.append("")
-        return '\n'.join(lines).rstrip() + '\n'
+        text = '\n'.join(lines).rstrip() + '\n'
+        names = [str(name).strip() for name in (catalog or ()) if str(name).strip()]
+        if names:
+            text += ("\nTools on demand (granted, not declared): call "
+                     "search_tools(\"<tool name or need>\") to load one; it "
+                     "becomes callable on the next step.\n")
+            text += '\n'.join(f"- {name}" for name in names) + '\n'
+        return text
 
     def generate_response_formats(self, force: bool = False) -> dict:
         """
@@ -193,7 +223,7 @@ class ToolRegistry:
                             build_strict_schema,
                             build_strict_schema_flat,
                         )
-                        meta = self._get_filtered_metadata(mode)
+                        meta = self._declared_metadata(mode)
                         if meta:
                             for fname, fmt in formats_dict.items():
                                 fmt['strict_schema'] = build_strict_schema(
@@ -215,7 +245,8 @@ class ToolRegistry:
                 json.dump(formats_dict, f, indent=2)
         return generated_files
 
-    def generate_session_profile(self, grants, handlers=None, force: bool = False) -> dict:
+    def generate_session_profile(self, grants, handlers=None, force: bool = False,
+                                 promote=()) -> dict:
         """Builds the tool block and strict schema for one session's grants.
 
         A session may hold several capabilities at once, so its tool list is no
@@ -225,6 +256,10 @@ class ToolRegistry:
         last, so the granted set wins over the per-mode definition of the same
         envelope name. A pure terminal or browser grant set produces exactly the
         per-mode block, so nothing the model sees changes for today's sessions.
+
+        ``promote`` lists catalog tools the model loaded through ``search_tools``:
+        they join the declared set (and the strict schema) from this request on,
+        while the rest stay named in the prompt's on-demand section only.
         """
         from src.computer import capabilities
 
@@ -240,11 +275,12 @@ class ToolRegistry:
         for handler in wanted:
             if handler not in capabilities.HANDLER_SCHEMAS:
                 continue
-            tools = capabilities.tools_for_handler(handler, grants)
+            tools = capabilities.tools_for_handler(handler, grants, promote)
             if not tools:
                 continue
+            catalog = capabilities.catalog_tools_for_handler(handler, grants, promote)
             views[handler] = self._generate_session_view(
-                handler, grants, tools, force=force)
+                handler, grants, tools, force=force, catalog=catalog)
         return views
 
     def _session_dir(self, handler: str) -> str:
@@ -261,7 +297,8 @@ class ToolRegistry:
             self._write_text(os.path.join(dest, 'profile.json'),
                              json.dumps({**signature, "handler": handler}, indent=2) + '\n')
 
-    def _generate_session_view(self, handler: str, grants, tools, force: bool = False) -> dict:
+    def _generate_session_view(self, handler: str, grants, tools, force: bool = False,
+                               catalog=()) -> dict:
         """One handler's tool block and response format for a grant set."""
         dest = self._session_dir(handler)
         tools_path = os.path.join(dest, 'tools.txt')
@@ -270,6 +307,7 @@ class ToolRegistry:
         signature = {
             "grants": list(grants),
             "tools": list(tools),
+            "catalog": list(catalog),
             "handler": handler,
             "gen": SCHEMA_GEN_VERSION,
         }
@@ -284,7 +322,7 @@ class ToolRegistry:
                 pass
 
         meta = self._metadata_for_tools(tools, handler)
-        self._write_text(tools_path, self._tools_text(meta))
+        self._write_text(tools_path, self._tools_text(meta, catalog))
 
         schema_name = None
         formats = {}
@@ -350,6 +388,14 @@ class ToolRegistry:
                     merged[name] = info
         return merged
 
+    def metadata_for_tools(self, tools, handler=None) -> dict:
+        """Public manifest view for a tool-name list (``search_tools``)."""
+        return self._metadata_for_tools(tools, handler)
+
+    def definition_text(self, tools, handler=None) -> str:
+        """The prompt block for just these tools, without the catalog section."""
+        return self._tools_text(self._metadata_for_tools(tools, handler))
+
     def generate_all(self, force: bool = False) -> dict:
         start = time.perf_counter()
         # Manifest fingerprint: prompt/cache files must never diverge from the
@@ -397,6 +443,7 @@ class ToolRegistry:
         fingerprint["capabilities"] = {
             "sets": {name: list(capabilities.TOOLS.get(name, ())) for name in capabilities.CAPABILITIES},
             "modes": {mode: list(grants) for mode, grants in capabilities.MODE_GRANTS.items()},
+            "catalog": sorted(capabilities.CATALOG_TOOLS),
         }
         return fingerprint
 

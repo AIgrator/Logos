@@ -186,20 +186,31 @@ tell a shell step from a browser step at a glance.
 
 ## Tool exposure plan
 
-Phase 1 ships **all tools of every granted capability** as `native`, because
-that is the smallest correct step. The split below is the target for Phase 3,
-when we measure the prompt cost of base+terminal+browser in one request.
+Phase 1 shipped **all tools of every granted capability** as `native`, because
+that was the smallest correct step. Phase 3 started by splitting them: the
+common step-by-step tools stay `native` (declared with full schemas in every
+request), and the rest are granted but only *named* in a closing
+"Tools on demand" section of the prompt. The model calls `search_tools` to load
+one; it is declared (and accepted by the strict envelope) from the next request
+on.
 
 | Capability | Native (always declared) | Catalog (on demand) |
 |---|---|---|
-| base | read_files, list_directory, search_file_content, finish, communicate_to_user, update_plan, use_skill, open_terminal, open_browser | — |
-| terminal | execute_shell, poll_shell_job, stop_shell_job, write_file, replace, replace_many, delete_files, copy_files, move_files, screenshot, web_fetchs, web_search, wait_seconds, download_file, get_clipboard_content | mcp_list, mcp_get, mcp_call |
+| base | read_files, list_directory, search_file_content, open_terminal, open_browser, search_tools, finish, communicate_to_user, update_plan, use_skill | — |
+| terminal | find_files, path_exists, create_directory, write_file, replace, replace_many, delete_files, copy_files, move_files, execute_shell, poll_shell_job, stop_shell_job, wait_seconds, screenshot, get_clipboard_content, web_search, web_fetchs, download_file, display_message | mcp_list, mcp_get, mcp_call |
 | browser | browser_goto, browser_snapshot, browser_click, browser_fill, browser_press, browser_read, browser_screenshot, browser_wait_for, browser_tabs, browser_close | browser_eval, browser_console, browser_network, browser_frames, browser_handle_dialog, browser_select_option, browser_hover, browser_find, browser_navigate_back |
 | vision | the provider's Computer Use toolset plus the CUA prompt | — |
 
-`search_tools` (or an equivalent) returns the schema of a catalog entry and adds
-it to the next request. Code Mode — a JavaScript sandbox that composes tool
-calls — stays out of scope; our scale does not need it.
+Actual counts: a terminal session declares 29 tools (3 on demand), a browser
+session 20 (9 on demand), and a session holding both capabilities 39. That is
+above the target of ≈30 for the mixed case because a few tools were kept native
+deliberately — `find_files`, `path_exists` and `create_directory` are ordinary
+file work, and hiding them would have changed behaviour for a marginal saving.
+The catalog is a **prompt budget, not a permission**: `search_tools` only
+reaches tools the grants already hold.
+
+Code Mode — a JavaScript sandbox that composes tool calls — stays out of scope;
+our scale does not need it.
 
 ## Prompts
 
@@ -302,8 +313,7 @@ schema check reports no problems.
 > holds Chat / Terminal / Browser / Vision, a check marks a granted capability
 > and the checked control is the open panel, a click opens the panel and attaches
 > its capability, and right-click detaches (explicit revoke, P8) with a fallback
-> to the nearest panel the session still holds. Still open in this phase: the
-> `exposure` axis (native/catalog/hidden). Phase 2 has started with the first
+> to the nearest panel the session still holds. Phase 2 has started with the first
 > half: `open_browser(url)`
 > is a real tool that attaches the browser capability from inside a terminal turn
 > (grants grow, nothing is summarized, the page opens on the shared service), and
@@ -335,6 +345,20 @@ the page, and everything is one turn in one session.
 Native/catalog split from the table above, `search_tools`, measurement of the
 prompt prefix. *Done when:* base+terminal+browser fits a sane native budget
 (≈30 tools) and the rest is reachable on demand without confusing the model.
+
+> **Status.** The split has landed. `capabilities.CATALOG_TOOLS` names the
+> on-demand tools; `native_tools_for_grants` / `catalog_tools_for_grants` derive
+> both sets from the grants (so `tools_for_handler` still never widens beyond
+> them), and `ToolRegistry` writes the declared set plus a names-only
+> "Tools on demand" section — in the session views **and** in the per-mode files,
+> so a pure grant set still equals its mode block byte for byte. `search_tools`
+> is a `base` control tool intercepted by the agent loop (like `update_plan`):
+> it matches a name or a description, returns the loaded schema and promotes the
+> tool into `_promoted_tools`, which the next prompt and strict schema include and
+> which `start_task` clears. The strict envelope is built from the declared set,
+> so a catalog tool is accepted by the grammar only after it was loaded. Numbers:
+> 29 native for terminal, 20 for browser, 39 for both (the ≈30 target is not met
+> in the mixed case — see the note above the table).
 
 **Phase 4 — cleanup.**
 Mode defaults become capability defaults (`mode_models.terminal`,

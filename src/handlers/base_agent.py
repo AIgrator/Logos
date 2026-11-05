@@ -312,6 +312,10 @@ class BaseAgentHandler:
         # the model is asked again; asking the model ends the batch.
         self._batch_queue = []
         self._job_steps = {}  # job_id -> (activity msg, step row)
+        # Catalog tools the model loaded with search_tools. They join the
+        # declared set from the next request on; a new task starts empty so the
+        # prompt does not grow with tools an old task needed.
+        self._promoted_tools = set()
         # NOTE: there is deliberately NO timeout counter. Timeouts count as
         # ordinary failures; significance is the model's call (assessment
         # turn). Do not reintroduce a second fuse.
@@ -371,6 +375,8 @@ class BaseAgentHandler:
         self._task_tag = f"{type(self).__name__}_{_time.strftime('%H%M%S')}"
         self._turn_seq = 0
         self.original_user_request = user_text
+        # On-demand tools loaded for an earlier task are not declared again.
+        self._promoted_tools.clear()
         # Do not wipe history if already populated (e.g. attachments).
         if not self.command_history:
             self.command_history = []
@@ -954,6 +960,10 @@ class BaseAgentHandler:
             self._attach_terminal_capability()
             return
 
+        if name == 'search_tools':
+            self._search_tools_action(action)
+            return
+
         if name == 'finish':
             self._batch_queue = []
             arguments = action.get('arguments') or {}
@@ -1021,6 +1031,83 @@ class BaseAgentHandler:
                     "network and MCP tools are available from the next step; "
                     "call them directly.")
         self._after_action_result(f"**Tool Result:** {note}")
+
+    def _search_tools_action(self, action: dict):
+        """`search_tools`: loads an on-demand tool's schema into the next request.
+
+        Only tools the session already holds are reachable: the catalog is a
+        prompt budget, not a permission. The matched tool is promoted, so it is
+        declared (and accepted by the strict envelope) from the next step on.
+        """
+        from src.computer import capabilities
+        from src.computer.tool_registry import ToolRegistry
+
+        arguments = action.get('arguments') or {}
+        if not isinstance(arguments, dict):
+            arguments = {}
+        query = str(arguments.get('query') or '').strip()
+        grants = getattr(self.controller, "session_capabilities", ()) or ()
+        available = capabilities.catalog_tools_for_handler(
+            self.tool_view, grants, self._promoted_tools)
+        if not available:
+            self._after_action_result(
+                "**Tool Result:** No on-demand tools are available in this "
+                "session. Every granted tool is either declared already or "
+                "not reachable from this panel.")
+            return
+
+        settings = getattr(self.controller, "settings", None) or self.settings
+        try:
+            registry = ToolRegistry(settings)
+            metadata = registry.metadata_for_tools(list(available), self.tool_view)
+        except Exception as e:  # noqa: BLE001 - the loop must keep going
+            logging.warning(f"{type(self).__name__} search_tools metadata failed: {e}")
+            metadata = {}
+        matches = self._match_catalog_tools(query, available, metadata)
+        if not matches:
+            self._after_action_result(
+                "**Tool Result:** No on-demand tool matches "
+                f"\"{query}\". Available: {', '.join(available)}. Call "
+                "search_tools again with one of those names.")
+            return
+
+        self._promoted_tools.update(matches)
+        try:
+            definition = registry.definition_text(matches, self.tool_view)
+        except Exception as e:  # noqa: BLE001 - send the names at least
+            logging.warning(f"{type(self).__name__} search_tools schema failed: {e}")
+            definition = "\n".join(f"- name: {name}" for name in matches)
+        self.ui.add_message(
+            "<i>Loaded on-demand tool"
+            + ("s" if len(matches) > 1 else "")
+            + f": {', '.join(matches)}.</i>")
+        self._after_action_result(
+            "**Tool Result:** Loaded from the tool catalog (declared and "
+            "callable on the next step):\n\n" + definition.strip(),
+            abort=True)
+
+    @staticmethod
+    def _match_catalog_tools(query: str, available, metadata: dict) -> list[str]:
+        """Best catalog tools for a free-text query, most specific first."""
+        words = [word for word in re.split(r"[^a-z0-9_]+", query.lower()) if word]
+        if not words:
+            return []
+        scored = []
+        for name in available:
+            tool = (metadata.get(name) or {}).get('tool') or {}
+            haystack = f"{name} {tool.get('description') or ''}".lower()
+            score = 0
+            if query.lower() == name:
+                score = 100
+            elif name.lower() in query.lower():
+                score = 60
+            else:
+                score = sum(3 for word in words if word in name.lower())
+                score += sum(1 for word in words if word in haystack)
+            if score:
+                scored.append((score, name))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        return [name for _, name in scored[:2]]
 
     def _after_action_result(self, output=None, from_job_wait=False, abort=False):
         """Continues the queued batch or asks the model to plan the next step.
@@ -1509,7 +1596,8 @@ class BaseAgentHandler:
             from src.computer.session_tools import session_tools_text
             settings = getattr(self.controller, "settings", None) or self.settings
             grants = getattr(self.controller, "session_capabilities", ()) or ()
-            return session_tools_text(settings, grants, self.tool_view)
+            return session_tools_text(
+                settings, grants, self.tool_view, promote=self._promoted_tools)
         except Exception as e:
             logging.warning(f"{type(self).__name__} session tool block failed: {e}")
             return ""

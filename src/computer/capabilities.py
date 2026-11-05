@@ -34,13 +34,15 @@ CAPABILITIES = (BASE, TERMINAL, BROWSER, VISION, CHAT)
 #: Tools every agent session may use: read-only filesystem, control, skills.
 #: ``open_browser`` and ``open_terminal`` are control tools: they ask for a
 #: capability rather than doing its work themselves, so they belong to every
-#: agent session.
+#: agent session. ``search_tools`` promotes an on-demand tool into the next
+#: request (see ``CATALOG_TOOLS``).
 BASE_TOOLS = (
     "read_files",
     "list_directory",
     "search_file_content",
     "open_browser",
     "open_terminal",
+    "search_tools",
     "finish",
     "communicate_to_user",
     "update_plan",
@@ -136,6 +138,30 @@ TOOLS: dict[str, tuple[str, ...]] = {
     CHAT: CHAT_TOOLS,
 }
 
+#: Tools granted but **not declared** in every request: the model reaches them
+#: through ``search_tools``, which promotes one into the next request. They stay
+#: cheap in the prompt (names only) while the common step-by-step tools, which
+#: the model needs without a detour, stay native. Phase 3 of
+#: [the vision plan](../docs/future_vision.md) decides what belongs here.
+CATALOG_TOOLS = frozenset({
+    # The MCP facade is three meta-tools with long schemas, used only when a
+    # configured server is actually needed.
+    "mcp_list",
+    "mcp_get",
+    "mcp_call",
+    # Browser inspection and edge cases: snapshots/clicks/fills are native,
+    # these are reached after a snapshot or a failing step.
+    "browser_eval",
+    "browser_console",
+    "browser_network",
+    "browser_frames",
+    "browser_handle_dialog",
+    "browser_select_option",
+    "browser_hover",
+    "browser_find",
+    "browser_navigate_back",
+})
+
 #: Capabilities a mode grants today, and the shape the journal records.
 MODE_GRANTS: dict[str, tuple[str, ...]] = {
     "chat": (CHAT,),
@@ -194,18 +220,65 @@ def tools_for_mode(mode: str) -> tuple[str, ...]:
     return tools_for_grants(grants_for_mode(mode))
 
 
-def tools_for_handler(handler: str, grants: Iterable[str]) -> tuple[str, ...]:
-    """Tools one agent handler can run for a session's grants.
+def native_tools_for_grants(grants: Iterable[str],
+                            promote: Iterable[str] = ()) -> tuple[str, ...]:
+    """Granted tools declared in every request.
+
+    ``promote`` names catalog tools the model asked for through
+    ``search_tools``; they join the native set from the next request on.
+    """
+    wanted = {str(name).strip() for name in (promote or ()) if str(name).strip()}
+    return tuple(
+        name for name in tools_for_grants(grants)
+        if name not in CATALOG_TOOLS or name in wanted)
+
+
+def catalog_tools_for_grants(grants: Iterable[str],
+                             promote: Iterable[str] = ()) -> tuple[str, ...]:
+    """Granted tools reachable on demand, minus those already promoted."""
+    wanted = {str(name).strip() for name in (promote or ()) if str(name).strip()}
+    granted = set(tools_for_grants(grants))
+    return tuple(
+        name for capability in normalize_grants(grants)
+        for name in TOOLS.get(capability, ())
+        if name in CATALOG_TOOLS and name in granted and name not in wanted)
+
+
+def tools_for_handler(handler: str, grants: Iterable[str],
+                      promote: Iterable[str] = ()) -> tuple[str, ...]:
+    """Tools one agent handler declares for a session's grants.
 
     Never wider than the grants: an ungranted capability's tools stay invisible
-    even when the handler is able to execute them.
+    even when the handler is able to execute them. Catalog tools are left out
+    unless ``promote`` names them (``search_tools`` did).
     """
     handler = (handler or "").strip().lower()
     allowed = HANDLER_CAPABILITIES.get(handler)
     if allowed is None:
-        return tools_for_grants(grants)
-    granted = set(tools_for_grants(grants))
+        return native_tools_for_grants(grants, promote)
+    granted = set(native_tools_for_grants(grants, promote))
     return tuple(name for name in tools_for_grants(allowed) if name in granted)
+
+
+def catalog_tools_for_handler(handler: str, grants: Iterable[str],
+                              promote: Iterable[str] = ()) -> tuple[str, ...]:
+    """On-demand tools this handler could run, for the prompt's catalog line."""
+    handler = (handler or "").strip().lower()
+    allowed = HANDLER_CAPABILITIES.get(handler)
+    reachable = (set(tools_for_grants(allowed)) if allowed is not None
+                 else {name for names in TOOLS.values() for name in names})
+    return tuple(name for name in catalog_tools_for_grants(grants, promote)
+                 if name in reachable)
+
+
+def catalog_tools_for_mode(mode: str) -> tuple[str, ...]:
+    """On-demand tools a mode's own cache block names (its handlers')."""
+    mode = (mode or "").strip().lower()
+    grants = grants_for_mode(mode)
+    if mode in HANDLER_SCHEMAS:
+        return catalog_tools_for_handler(mode, grants)
+    return tuple(name for name in catalog_tools_for_grants(grants)
+                 if name in set(tools_for_grants(grants)))
 
 
 def merge_grants(*sets: Iterable[str]) -> tuple[str, ...]:

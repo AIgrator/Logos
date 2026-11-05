@@ -22,30 +22,34 @@ logger = logging.getLogger(__name__)
 
 
 def ensure_session_profile(settings, grants: Iterable[str],
-                           handlers=None, force: bool = False) -> dict:
+                           handlers=None, force: bool = False,
+                           promote=()) -> dict:
     """Regenerates the session views when the grants changed; returns their paths.
 
     ``settings`` is the app settings mapping (it only needs ``APP_CACHE_DIR``),
-    so a handler can pass its own settings dict.
+    so a handler can pass its own settings dict. ``promote`` names catalog tools
+    the model loaded with ``search_tools``.
     """
     if not settings:
         return {}
     try:
         return ToolRegistry(settings).generate_session_profile(
-            grants, handlers=handlers, force=force)
+            grants, handlers=handlers, force=force, promote=promote)
     except Exception as error:  # noqa: BLE001 - a prompt must still be built
         logger.warning("Could not build the session tool profile: %s", error,
                        exc_info=True)
         return {}
 
 
-def session_tools_text(settings, grants: Iterable[str], handler: str) -> str:
+def session_tools_text(settings, grants: Iterable[str], handler: str,
+                       promote=()) -> str:
     """The ``{available_tools}`` block for one handler under these grants.
 
     Returns an empty string when nothing can be built; the caller then falls
     back to its per-mode file.
     """
-    view = ensure_session_profile(settings, grants, handlers=(handler,)).get(handler)
+    view = ensure_session_profile(
+        settings, grants, handlers=(handler,), promote=promote).get(handler)
     path = (view or {}).get("tools") or ""
     if not path or not os.path.exists(path):
         return ""

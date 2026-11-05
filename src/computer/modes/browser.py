@@ -25,6 +25,7 @@ from src.computer.tools.common.communicate_to_user import communicate_to_user
 from src.computer.tools.common.finish import finish
 from src.computer.tools.common.open_browser import open_browser
 from src.computer.tools.common.open_terminal import open_terminal
+from src.computer.tools.common.search_tools import search_tools
 from src.computer.tools.common.update_plan import update_plan
 from src.computer.tools.common.use_skill import use_skill
 from src.computer.tools.terminal.fs.list_directory import list_directory
@@ -98,6 +99,7 @@ TOOLS_METADATA = {
     "finish": finish,
     "open_browser": open_browser,
     "open_terminal": open_terminal,
+    "search_tools": search_tools,
     "update_plan": update_plan,
     "use_skill": use_skill,
 }

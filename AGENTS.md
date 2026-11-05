@@ -475,14 +475,28 @@ may use. A capability is what a session is allowed to do (`base`, `terminal`,
 `browser`, `vision`, plus `chat` until it becomes base-only); a mode is how the
 current build delivers it, so `MODE_GRANTS` maps `terminal` and `browser` to
 `base + <capability>` and `vision`/`chat` to their own whole sets;
-`merge_grants` unions them when a capability is attached in place. The journal
-header records `capabilities`, and `grants_from_header` derives them from the
-legacy `mode` for journals written before it existed. `ToolRegistry` builds
+`merge_grants` unions them when a capability is attached in place and
+`remove_grants` drops one on an explicit detach (`base` is never dropped). The
+journal header records `capabilities`, and `grants_from_header` derives them from
+the legacy `mode` for journals written before it existed. `ToolRegistry` builds
 every cache file from those grants and drops (with a warning in the log) a tool
 that a mode module declares but no capability grants, so the two can no longer
 drift apart silently; `cache/capabilities/tools.json` is the generated
 catalogue. `AppController.session_capabilities` mirrors the open session's
 grants.
+
+`CATALOG_TOOLS` splits a grant into two exposures, and that split is a prompt
+budget, not a permission: `native_tools_for_grants` keeps the common
+step-by-step tools, `catalog_tools_for_grants` the rest (the three MCP
+meta-tools and the browser edge cases — eval, console, network, frames, dialog,
+select, hover, find, back), which the prompt only *names* under a closing
+"Tools on demand" section. `search_tools` (a `base` control tool intercepted by
+`BaseAgentHandler._dispatch_action` like `update_plan`) matches a name or a
+description, returns the loaded schema and promotes the tool into
+`_promoted_tools`; the next request declares it and the strict grammar accepts
+it, and `start_task` clears the set. Per-mode cache files follow the same split
+(`ToolRegistry._declared_metadata`), so the byte-for-byte equality with a pure
+grant set still holds. Native counts: terminal 29, browser 20, both 39.
 
 `TerminalHandler` is the app's only agent loop: `AppController.browser_handler`
 is the same object, so Terminal and Browser are two *presentations* of one
@@ -505,8 +519,10 @@ The tool block and the response format follow the session's grants, not its
 mode (`src/computer/session_tools.py`, `src/llm/tool_catalog.py`).
 `ToolRegistry.generate_session_profile(grants, handlers)` writes
 `cache/session/<handler>/{tools.txt,response_formats.json,profile.json}`; the
-signature in `profile.json` (grants + tool names + schema generation) is checked
-while the prompt is built, so attaching a capability regenerates the view on the
+signature in `profile.json` (grants + tool names + on-demand names + schema
+generation) is checked
+while the prompt is built, so attaching a capability or promoting an on-demand
+tool regenerates the view on the
 next turn and a pure `base+terminal` / `base+browser` grant set produces exactly
 the per-mode block and envelope, byte for byte. `HANDLER_CAPABILITIES` narrows
 that to what one handler can execute: Terminal and Browser are one loop
@@ -567,6 +583,14 @@ gained terminal tools mid-turn must see its servers on the next step) and hands
 the model a tool result saying the shell/file/MCP tools are available from the
 next step, plus a chat notice for the user. Since both panels are one loop,
 either call grants tools the running handler can execute immediately.
+
+`search_tools` is the third `base` control tool and the way an on-demand tool
+becomes usable: the catalogue is matched by name or description
+(`BaseAgentHandler._match_catalog_tools`), the loaded schema is returned as the
+tool result, and the match is added to `_promoted_tools` so the *next* request
+declares it. That action aborts the rest of the batch (`abort=True`) because the
+queued calls were planned without the tool. Only tools the grants already hold
+are reachable — a catalog entry is never a permission.
 
 ## Settings
 
