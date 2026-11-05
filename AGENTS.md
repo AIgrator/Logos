@@ -355,8 +355,13 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   with `actions` as a JSON string, is wrapped/decoded before validation, so a
   weak model's shape never turns into a silent empty turn. Stringified scalar
   arguments (`"false"`, `"null"`) are matched to the tool's declared parameter
-  types in `src/handlers/tool_exec_worker.py` before the call. A user message
-  mid-turn seals the live block: `ChatWidget.add_message` with
+  types in `src/handlers/tool_exec_worker.py` before the call; a list/object
+  parameter sent as one JSON string (`paths="[\"a.html\"]"`) is decoded, and a
+  bare value for a list parameter becomes a one-item list, because otherwise
+  `read_files` opens the string's characters. `update_plan` steps get the same
+  treatment (`_plan_steps` in `base_agent.py`): a stringified plan is unwrapped
+  instead of turning every character into a step of the live pill. A user
+  message mid-turn seals the live block: `ChatWidget.add_message` with
   `role='user'` calls `seal_live_activity()`, which finishes the block as
   `Done` (`Stopped` when a step was still in flight) and marks that step
   `stopped`, and the handler's next event opens a new block below the message

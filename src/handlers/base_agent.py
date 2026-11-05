@@ -37,6 +37,38 @@ from src.suggestions import normalize_suggestions
 MAX_CONSECUTIVE_ERRORS = 3
 
 
+def _plan_steps(steps) -> list:
+    """Unwraps a plan a weak model stringified ("[{...}]" as text).
+
+    Without this the array arrived as one string and every character became
+    its own single-letter step in the live pill and the journal. A dict
+    wrapper (``{"steps": "[...]"}``) is peeled the same way.
+    """
+    if isinstance(steps, str):
+        text = steps.strip()
+        if text[:1] not in ("[", "{"):
+            return []
+        try:
+            return _plan_steps(json.loads(text))
+        except ValueError:
+            return []
+    if isinstance(steps, dict):
+        return _plan_steps(steps.get("steps"))
+    if not isinstance(steps, list):
+        return []
+    out = []
+    for step in steps:
+        if isinstance(step, str) and step.strip()[:1] == "{":
+            try:
+                decoded = json.loads(step)
+            except ValueError:
+                decoded = None
+            if isinstance(decoded, dict):
+                step = decoded
+        out.append(step)
+    return out
+
+
 def _is_error_output(text) -> bool:
     """Whether a loop output line reports a failure (fact, not verdict)."""
     if not text or not isinstance(text, str):
@@ -887,7 +919,7 @@ class BaseAgentHandler:
     def _apply_plan(self, steps):
         """Shows the model's plan in the live strip above the composer."""
         normalized = []
-        for step in steps or []:
+        for step in _plan_steps(steps):
             if isinstance(step, str):
                 normalized.append({"text": step.strip(), "status": "pending"})
                 continue

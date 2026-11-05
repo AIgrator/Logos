@@ -5,6 +5,7 @@ thread so the chat window never blocks. The caller dispatches with a ticket;
 results carry it back so stale (cancelled/stopped) executions are ignored.
 """
 import inspect
+import json
 import logging
 import threading
 import time
@@ -12,6 +13,39 @@ import types
 import typing
 
 from PySide6.QtCore import QObject, Signal, Slot
+
+
+def _declared_containers(annotation) -> set:
+    """Container types a parameter annotation could accept (list/dict/tuple)."""
+    if annotation is inspect.Parameter.empty:
+        return set()
+    origin = typing.get_origin(annotation)
+    if origin in (typing.Union, types.UnionType):
+        kinds = set()
+        for member in typing.get_args(annotation):
+            kinds |= _declared_containers(member)
+        return kinds
+    if origin in (list, dict, tuple):
+        return {origin}
+    return set()
+
+
+def _decode_container(text: str, kinds: set):
+    """JSON list/object written as text for a container parameter, else None."""
+    stripped = text.strip()
+    if not stripped or stripped[0] not in "[{":
+        return None
+    try:
+        value = json.loads(stripped)
+    except ValueError:
+        return None
+    if list in kinds and isinstance(value, list):
+        return value
+    if tuple in kinds and isinstance(value, list):
+        return value
+    if dict in kinds and isinstance(value, dict):
+        return value
+    return None
 
 
 def coerce_arguments(func, args: dict) -> dict:
@@ -40,6 +74,24 @@ def coerce_arguments(func, args: dict) -> dict:
         allowed = typing.get_args(annotation) if origin in (typing.Union, types.UnionType) else (annotation,)
         text = value.strip()
         lowered = text.lower()
+        containers = _declared_containers(annotation)
+        decoded = _decode_container(text, containers) if containers else None
+        if decoded is not None:
+            # "[\"a\", \"b\"]" sent as one string reached the tool as an
+            # iterable of characters (read_files tried to open '[' and '"').
+            coerced[key] = decoded
+            logging.info(
+                f"Decoded JSON-encoded tool argument '{key}' "
+                f"({type(decoded).__name__} of {len(decoded)} item(s)).")
+            continue
+        if containers & {list, tuple} and text and lowered not in (
+                "null", "none"):
+            # A bare value for a list parameter ("index.html") means one item;
+            # iterating the string would read one character per path.
+            coerced[key] = [value]
+            logging.info(
+                f"Wrapped scalar tool argument '{key}' into a one-item list.")
+            continue
         if lowered in ("null", "none", ""):
             # "null" written as text means "not set". A non-optional parameter
             # falls back to its declared default instead of receiving the word.
