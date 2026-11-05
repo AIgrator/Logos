@@ -237,6 +237,7 @@ class RightPanel(QWidget):
         ("messages", "MESSAGES"),
         ("provider", "PROVIDER"),
         ("model", "MODEL"),
+        ("capabilities", "CAPABILITIES"),
         ("window", "CONTEXT LIMIT"),
         ("total_tokens", "TOTAL TOKENS"),
         ("percent", "USAGE"),
@@ -507,6 +508,10 @@ class RightPanel(QWidget):
         set_value("messages", f"{number('messages'):,}")
         set_value("provider", str(data.get("provider") or "").strip() or "—")
         set_value("model", str(data.get("model") or "").strip() or "—")
+        capabilities = [str(name).strip() for name in (data.get("capabilities") or [])
+                        if str(name).strip()]
+        set_value("capabilities",
+                  " · ".join(name.capitalize() for name in capabilities) or "—")
         set_value("window", f"{window:,}" if window else "—")
         set_value("total_tokens", f"{number('total_tokens'):,}")
         set_value("percent", f"{percent:.0f}%" if window else "—")

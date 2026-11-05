@@ -70,7 +70,8 @@ The full-mode window frame (`window_geometry`) and the sidebar's collapsed state
 (`sidebar_collapsed`) are saved to `settings.json` on close and restored on the
 next launch; layout margins are not persisted. The right workspace panel
 (`src/ui/right_panel.py`) is visible in every mode. Its Session tab leads with
-context statistics (provider, model, context window and usage, token totals,
+context statistics (provider, model, the session's attached capabilities,
+context window and usage, token totals,
 message/tool-call counts, created and last-activity timestamps) fed from the
 same data as the composer indicator, followed by a recap derived from this
 session's own journal: the objective plus bullet lines for assistant messages

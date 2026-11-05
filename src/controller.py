@@ -758,6 +758,10 @@ class AppController(QObject):
         setter = getattr(getattr(self, "ui", None), "set_capabilities", None)
         if callable(setter):
             setter(self.session_capabilities)
+        schedule = getattr(self, "_schedule_context_indicator_update", None)
+        if callable(schedule):
+            # The right panel's Session tab lists the grants too.
+            schedule()
 
     def _detach_capability_clicked(self, name: str):
         """The composer's "Detach" action: revoke, then keep the UI honest."""
@@ -1316,6 +1320,7 @@ class AppController(QObject):
             "title": title or objective,
             "provider": provider_label,
             "model": model_id,
+            "capabilities": list(self.session_capabilities or ()),
             "window": int(stats.get("window") or 0),
             "total_tokens": int(stats.get("actual_tokens") or 0),
             "percent": float(stats.get("percent") or 0.0),
