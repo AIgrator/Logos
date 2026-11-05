@@ -1491,9 +1491,30 @@ class ChatWidget(QAbstractScrollArea):
         if not self._activity_timer.isActive():
             self._activity_timer.start()
 
+    @staticmethod
+    def _has_live_job(msg: dict) -> bool:
+        """A background job launched here is still running.
+
+        The row keeps its 1s clock even after the turn finished: the job
+        outlives the turn, and a frozen elapsed time would hide that it is
+        still alive.
+        """
+        return any(
+            row.get('job_id') is not None
+            and row.get('job_started_at') is not None
+            and row.get('job_finished_at') is None
+            and row.get('status') == 'running'
+            for row in msg.get('rows') or [])
+
+    def _needs_activity_tick(self, msg: dict) -> bool:
+        if msg.get('type') != 'activity':
+            return False
+        if self._has_live_job(msg):
+            return True
+        return self._activity_is_live(msg) and self._has_running_step(msg)
+
     def _stop_activity_timer_if_idle(self):
-        if not any(m.get('type') == 'activity' and self._activity_is_live(m)
-                   and self._has_running_step(m) for m in self.messages):
+        if not any(self._needs_activity_tick(m) for m in self.messages):
             self._activity_timer.stop()
 
     def _render_activity(self, msg):
@@ -1514,9 +1535,7 @@ class ChatWidget(QAbstractScrollArea):
         self._follow_if_at_bottom(was_at_bottom)
 
     def _activity_tick(self):
-        live = [m for m in self.messages
-                if m.get('type') == 'activity' and self._activity_is_live(m)
-                and self._has_running_step(m)]
+        live = [m for m in self.messages if self._needs_activity_tick(m)]
         if not live:
             self._activity_timer.stop()
             return

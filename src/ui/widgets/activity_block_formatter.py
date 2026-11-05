@@ -433,6 +433,18 @@ class ActivityBlockFormatter:
             f"{caret_html}&nbsp;{mark}{title}{suffix}</a>{detail}{actions}</div>")
 
     def _step_duration(self, row: dict, now: float) -> str:
+        # A job row's clock measures the job, not the step: the launch call
+        # returned in half a second, while the server keeps running for
+        # minutes. The start is backdated to the job's own start so the time
+        # matches `poll_shell_job`.
+        if row.get("job_id") is not None and row.get("job_started_at") is not None:
+            try:
+                started = float(row["job_started_at"])
+                finished = row.get("job_finished_at")
+                end = now if finished is None else float(finished)
+                return format_duration(max(0.0, end - started))
+            except (TypeError, ValueError):
+                pass
         started = row.get("started_at")
         if started is None:
             return ""

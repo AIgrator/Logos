@@ -40,6 +40,7 @@ from .text_render import render_reasoning, render_text, render_user_message
 from .widgets.chat_widget import ChatWidget
 from .widgets.model_switch_popup import ModelSwitchPopup, build_effort_menu
 from .widgets.plan_panel import PlanPanel
+from .widgets.job_panel import JobPanel
 from .widgets.terminal_access_popup import TerminalAccessPopup
 from .widgets.custom_title_bar import CustomTitleBar
 from .widgets.flow_layout import FlowLayout
@@ -613,6 +614,13 @@ class UIManager(QWidget):
         self.bottom_center_layout = QVBoxLayout(self.bottom_center_column)
         self.bottom_center_layout.setContentsMargins(0, 0, 0, 0)
         self.bottom_center_layout.setSpacing(0)
+        # Live background jobs are machine state, not transcript content: a
+        # pinned strip keeps them reachable (live time, Stop, Open log) even
+        # when the turn scrolls away from the block that launched one.
+        self.job_panel = JobPanel(self.controller.theme_manager,
+                                 self.bottom_center_column)
+        self.job_panel.job_stop_requested.connect(self.job_stop_requested.emit)
+        self.bottom_center_layout.addWidget(self.job_panel)
         # The live plan belongs to the composer, not the transcript: it sits
         # directly above the input while a turn runs and vanishes with it.
         self.plan_panel = PlanPanel(self.controller.theme_manager,
@@ -1691,6 +1699,7 @@ class UIManager(QWidget):
 
     def clear_chat(self):
         self.plan_panel.clear_plan()
+        self.job_panel.clear()
         self.chat_widget.clear_messages()
 
     def set_assistant_name(self, name: str):
@@ -1960,6 +1969,21 @@ class UIManager(QWidget):
         """Drops the live plan; called whenever the turn ends or the UI resets."""
         self.plan_panel.clear_plan()
 
+    def track_job(self, job: dict) -> None:
+        """Pins a launched background job above the composer."""
+        self.job_panel.track_job(job)
+
+    def update_job_state(self, job_id: int, state: str,
+                         status: str | None = None) -> None:
+        self.job_panel.update_job_state(job_id, state, status)
+
+    def finish_job(self, job_id: int) -> None:
+        """Drops a finished job from the pinned strip."""
+        self.job_panel.finish_job(job_id)
+
+    def clear_jobs(self) -> None:
+        self.job_panel.clear()
+
     def activity_add_step(self, msg, title: str, args: str = "",
                           detail_html: str | None = None, name: str = ""):
         return self.chat_widget.activity_add_step(
@@ -2176,6 +2200,7 @@ class UIManager(QWidget):
         self.compact_position = self.settings_manager.get("compact_mode", {}).get("position", "bottom_center")
         self.attachment_scroll_area.setVisible(False)
         self.plan_panel.set_suppressed(True)
+        self.job_panel.set_suppressed(True)
         self.input_container.setVisible(False)
         self.mode_model_container.setVisible(False)
         self.bottom_toolbar_container.setVisible(False)
@@ -2248,6 +2273,7 @@ class UIManager(QWidget):
         left_margin = 0 if self.workspace_container.isVisible() else 11
         self.layout.setContentsMargins(left_margin, 11, 11, 11)
         self.plan_panel.set_suppressed(False)
+        self.job_panel.set_suppressed(False)
         self.input_container.setVisible(True)
         self.bottom_toolbar_container.setVisible(True)
         self._toolbar_single_row = None  # force single/two-row re-evaluation

@@ -20,15 +20,21 @@ from src.computer.computer import tool_meta
     },
     flags={"platform": "any", "mode": "terminal"}
 )
-def find_files(self, directory: str, pattern: str) -> list[str]:
+def find_files(self, path: str = ".", pattern: str = "",
+               directory: str | None = None) -> list[str]:
     """
     Finds files matching a glob pattern in a directory.
+
+    ``path`` is the name the schema declares; ``directory`` is accepted as a
+    compatibility alias, because the call used to fail with
+    ``find_files() got an unexpected keyword argument 'path'``.
     """
-    if not directory or not pattern:
-        raise ValueError("Action 'find_files' failed: Missing 'directory' or 'pattern' argument.")
+    target = directory if directory is not None else path
+    if not target or not pattern:
+        raise ValueError("Action 'find_files' failed: Missing 'path' or 'pattern' argument.")
 
     try:
-        absolute_directory = self._resolve_path(directory)
+        absolute_directory = self._resolve_path(target)
         logging.info(f"Finding files in '{absolute_directory}' matching pattern '{pattern}'")
         return glob.glob(os.path.join(absolute_directory, pattern), recursive=True)
     except Exception as e:

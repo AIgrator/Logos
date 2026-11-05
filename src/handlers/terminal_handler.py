@@ -1558,6 +1558,43 @@ class TerminalHandler(BaseAgentHandler):
             f"⏳ <b>{html.escape(str(label))}</b>{pct} · {elapsed:.0f}s{tail_html}"
         )
 
+    def _job_elapsed_seconds(self, job_id) -> float:
+        try:
+            manager = getattr(self.computer, "shell_jobs", None)
+            status = manager.status(int(job_id)) if manager is not None else {}
+            return float(status.get("elapsed_seconds") or 0.0)
+        except Exception:
+            return 0.0
+
+    def _track_job_panel(self, job_id, result, output_for_ui) -> None:
+        """Pins the new job above the composer until its final result lands."""
+        track = getattr(self.ui, 'track_job', None)
+        if not callable(track):
+            return
+        try:
+            job_id = int(job_id)
+            commands = getattr(self, '_job_commands', {}) or {}
+            cwds = getattr(self, '_job_cwds', {}) or {}
+            cwd = str(cwds.get(job_id) or '')
+            if not cwd:
+                computer = getattr(self, 'computer', None)
+                cwd = str(getattr(computer, 'working_directory', '') or '')
+            log_path = ''
+            if isinstance(output_for_ui, dict):
+                log_path = str(output_for_ui.get('open_log_path') or '')
+            track({
+                'job_id': job_id,
+                'command': str(commands.get(job_id) or ''),
+                'cwd': cwd,
+                'state': str(result.get('state') or 'starting'),
+                'ready_url': str(result.get('ready_url') or ''),
+                'status_code': result.get('status_code'),
+                'log_path': log_path,
+                'started_at': time.monotonic() - self._job_elapsed_seconds(job_id),
+            })
+        except Exception as e:
+            logging.warning(f"Could not pin background job #{job_id}: {e}")
+
     def _show_job_result(self, job_id, output_for_ui):
         """Replace the job's launch block with its final state.
 
@@ -1599,7 +1636,19 @@ class TerminalHandler(BaseAgentHandler):
                     else None),
             log_path=log_path or '')
         self._show_activity_result(output_for_llm, output_for_ui, launch_job_id=job_id)
+        if self._pending_action_name in ('poll_shell_job', 'stop_shell_job') \
+                and isinstance(result, dict) and result.get('job_id') is not None:
+            update_state = getattr(self.ui, 'update_job_state', None)
+            if callable(update_state):
+                try:
+                    update_state(
+                        result.get('job_id'),
+                        str(result.get('state') or result.get('status') or 'running'),
+                        str(result.get('status') or ''))
+                except Exception as e:
+                    logging.warning(f"Job strip state update failed: {e}")
         if job_id is not None and self._pending_action_name == 'execute_shell':
+            self._track_job_panel(job_id, result, output_for_ui)
             if self._active_step is not None and self._activity_msg is not None:
                 self._job_steps[int(job_id)] = (self._activity_msg, self._active_step)
                 if len(self._job_steps) > 200:
@@ -1651,6 +1700,13 @@ class TerminalHandler(BaseAgentHandler):
         # ends (stop link + elapsed); polls and foreground steps finish now.
         running_job = launch_job_id is not None and not failed
         status = 'running' if running_job else ('error' if failed else 'ok')
+        if running_job:
+            # The step returns as soon as the job is launched, but the job
+            # clock keeps running: start it at the job's real start so the
+            # row matches poll_shell_job instead of freezing at ~0s.
+            step['job_started_at'] = (
+                time.monotonic() - self._job_elapsed_seconds(launch_job_id))
+            step['job_finished_at'] = None
         output_text = None
         if detail_html is None:
             output_text = self._strip_result_prefix(output_for_llm)
@@ -1670,6 +1726,12 @@ class TerminalHandler(BaseAgentHandler):
     def _apply_job_ui(self, job_id, output_for_ui, status: str = "ok"):
         """Updates the job's launch step; falls back to a result card when
         the step is unknown (e.g. a job launched before a restart)."""
+        finish_job = getattr(self.ui, 'finish_job', None)
+        if callable(finish_job):
+            try:
+                finish_job(job_id)
+            except Exception as e:
+                logging.warning(f"Job strip update failed for #{job_id}: {e}")
         try:
             entry = self._job_steps.get(int(job_id))
         except (TypeError, ValueError):
@@ -1678,6 +1740,7 @@ class TerminalHandler(BaseAgentHandler):
             self._show_job_result(job_id, output_for_ui)
             return
         msg, row = entry
+        row['job_finished_at'] = time.monotonic()
         title, detail_html, _plain, log_path = self._ui_result_fields(output_for_ui)
         try:
             self.ui.activity_update_step(
@@ -1814,6 +1877,12 @@ class TerminalHandler(BaseAgentHandler):
         manager = getattr(self.computer, "shell_jobs", None)
         if manager is None:
             return
+        update = getattr(self.ui, 'update_job_state', None)
+        if callable(update):
+            try:
+                update(job_id, 'stopping', 'stopping')
+            except Exception:
+                pass
         result = manager.request_stop(job_id)
         if result.get('status') == 'not_found':
             self.ui.add_message(

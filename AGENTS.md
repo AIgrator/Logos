@@ -233,6 +233,25 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `Request failed`, `Stopped` and `Waiting for you` keep their block open.
   Replay always folds (`collapse="always"`), so a restored session shows all
   work collapsed. There is no green `✓ Done` line under the answer.
+  A background shell job outlives the step that launched it, so it also gets a
+  pinned strip above the composer (`src/ui/widgets/job_panel.py::JobPanel`,
+  mounted first in `UIManager.bottom_center_column`, opposite the live plan):
+  one compact row per live job with a status dot, the command, a 1 s clock and
+  `Stop` / `Open log`, and a hover card (`_JobPopover`) that reads the last
+  lines of the job log and shows the folder, state and readiness URL. The
+  handler pins the job in `_on_tool_finished` (`_track_job_panel`, with the
+  clock backdated through `shell_jobs.status(...).elapsed_seconds`, because a
+  readiness probe can spend half a minute before the launch returns) and drops
+  it in `_apply_job_ui`, which every finish path (event, wait tick, stop)
+  reaches; a poll updates the state text. The launch step row keeps the same
+  clock: `_show_activity_result` records `job_started_at` / `job_finished_at`
+  and `ActivityBlockFormatter._step_duration` measures the job, not the
+  half-second step, so the transcript does not freeze at `0s`.
+  `ChatWidget._needs_activity_tick` keeps the 1 s render alive for a block
+  whose turn already finished while a job row still runs
+  (`_has_live_job`), and a replayed row (no `job_started_at`) never ticks.
+  A session reset (`UIManager.clear_chat`) clears the strip; compact mode
+  hides it (`set_suppressed`) without forgetting the jobs.
   Every message carries a footer strip under it: a user bubble the local send
   time, an answer the model that wrote it, the time and - when the model
   finished its turn with a conclusion - a copy button
@@ -360,7 +379,12 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   bare value for a list parameter becomes a one-item list, because otherwise
   `read_files` opens the string's characters. `update_plan` steps get the same
   treatment (`_plan_steps` in `base_agent.py`): a stringified plan is unwrapped
-  instead of turning every character into a step of the live pill. A user
+  instead of turning every character into a step of the live pill. A tool's
+  declared `arguments` must match its real signature: `find_files` advertised
+  `path` while the function accepted `directory`, so a live run died with
+  `find_files() got an unexpected keyword argument 'path'`. It now takes `path`
+  and keeps `directory` as a compatibility alias, the same way
+  `search_file_content` does. A user
   message mid-turn seals the live block: `ChatWidget.add_message` with
   `role='user'` calls `seal_live_activity()`, which finishes the block as
   `Done` (`Stopped` when a step was still in flight) and marks that step
