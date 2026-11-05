@@ -704,6 +704,17 @@ so it must not retry silently; the dialog defaults to Deny and fails closed.
 The mode applies to Terminal only; Browser and Vision keep their own approval
 flows.
 
+Vision blocks are hard (`src/computer/vision_policy.py`): the action never runs,
+so repeating it cannot help. The chat therefore follows the block reason with a
+`policy_hint_text` line that names the exact settings to change - Settings →
+Vision and «Allow Windows Search / Start menu», «Allow terminal commands during
+Vision tasks», or the `Applications` list with «Scan for Applications» when the
+app is not there yet - plus the blocked app or shortcut the check carried
+(`app` / `attempt`). `VisionHandler._policy_hint_codes` keeps it to one hint per
+code per task (reset in `start_task`) so a retrying model cannot flood the
+transcript, and the restarted CUA chain is seeded with "Do not retry it" and the
+same instruction.
+
 The current mode is also mirrored in the Terminal composer as a chip
 (`AccessModeChip` in `src/ui/manager.py`) with the mode icon and the label from
 `ACCESS_MODE_LABELS`; `full` is painted in the error color. Clicking it opens

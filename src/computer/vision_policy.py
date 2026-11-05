@@ -443,9 +443,24 @@ def _action_label(action: dict) -> str:
 
 
 def _check(code: str, message: str, *, hard: bool = False,
-           action_index: int = 0) -> dict:
-    return {"code": code, "message": message, "hard": bool(hard),
-            "action_index": int(action_index)}
+           action_index: int = 0, **extra) -> dict:
+    check = {"code": code, "message": message, "hard": bool(hard),
+             "action_index": int(action_index)}
+    # Extra fields (the app or the shortcut behind a hard block) are what the
+    # chat hint needs to name the checkbox the user has to tick.
+    check.update({key: value for key, value in extra.items() if value})
+    return check
+
+
+def _app_label(context: dict) -> str:
+    """Human name of the foreground app, e.g. ``Untitled - Notepad (notepad.exe)``."""
+    title = str(context.get("title") or "").strip()
+    process = _basename(context.get("process"))
+    if title and process:
+        return f"'{title}' ({process})"
+    if title:
+        return f"'{title}'"
+    return process
 
 
 def classify_action(action: dict, context: dict | None = None, *,
@@ -470,7 +485,8 @@ def classify_action(action: dict, context: dict | None = None, *,
                 "system_surface_blocked",
                 "Windows Search / Start menu is disabled in Vision settings; "
                 "refusing Win+R.",
-                hard=True, action_index=action_index))
+                hard=True, action_index=action_index,
+                attempt="opening the Run box with Win+R"))
         if (screen_point is not None
                 and kind in ("click", "double_click", "triple_click",
                              "left_mouse_down", "left_mouse_up")
@@ -479,17 +495,19 @@ def classify_action(action: dict, context: dict | None = None, *,
                 "system_surface_blocked",
                 "Windows Search / Start menu is disabled in Vision settings; "
                 "refusing the taskbar Start button.",
-                hard=True, action_index=action_index))
+                hard=True, action_index=action_index,
+                attempt="clicking the taskbar Start button"))
 
     mutating = kind in _APP_LAUNCH_TYPES
     if mutating and not _app_allowed(
             context, allowed_apps,
             system_surfaces_allowed=system_surfaces_allowed):
+        app = _app_label(context)
         checks.append(_check(
             "app_not_allowed",
             f"Foreground app '{context.get('process') or context.get('title') or 'unknown'}' "
             f"is outside Vision allowed_apps; refusing {label}.",
-            hard=True, action_index=action_index))
+            hard=True, action_index=action_index, app=app))
 
     terminal = _is_terminal(context)
     if terminal and not shell_allowed and kind in (
@@ -546,6 +564,63 @@ def classify_actions(actions, context: dict | None = None, *,
             system_surfaces_allowed=system_surfaces_allowed,
             action_index=index))
     return out
+
+
+def policy_hint(check: dict) -> str:
+    """Where to click to lift one hard Vision block ('' when there is none).
+
+    The check message is a diagnosis for the log ("system_surface_blocked");
+    the hint is the instruction the user needs in the chat: the settings page,
+    the exact checkbox, and what to do when an app is missing from the list.
+    """
+    if not isinstance(check, dict):
+        return ""
+    code = str(check.get("code") or "")
+    if code == "system_surface_blocked":
+        attempt = check.get("attempt") or "using the Start menu"
+        return (
+            "Settings → Vision → tick \"Allow Windows Search / Start menu\" "
+            f"(off by default). It is required for {attempt}. If \"Restrict "
+            "actions to selected Applications\" is on, the target app must "
+            "also be ticked under \"Applications\"."
+        )
+    if code == "app_not_allowed":
+        app = check.get("app") or "the application you want to use"
+        return (
+            "Settings → Vision → under \"Applications\" tick "
+            f"{app}. If it is not in the list, press \"Scan for "
+            "Applications\" first, then tick it. Alternative: turn off "
+            "\"Restrict actions to selected Applications\" to allow any window."
+        )
+    if code == "shell_disabled":
+        return (
+            "Settings → Vision → tick \"Allow terminal commands during "
+            "Vision tasks\" (off by default)."
+        )
+    return ""
+
+
+def policy_hints(checks) -> list[str]:
+    """Distinct hints for the hard blocks of one turn, in check order."""
+    hints: list[str] = []
+    for check in checks or []:
+        hint = policy_hint(check)
+        if hint and hint not in hints:
+            hints.append(hint)
+    return hints
+
+
+def policy_hint_text(checks) -> str:
+    """Chat block that tells the user exactly which setting to change."""
+    hints = policy_hints(checks)
+    if not hints:
+        return ""
+    if len(hints) == 1:
+        body = hints[0]
+    else:
+        body = "\n".join(f"{index}. {hint}"
+                         for index, hint in enumerate(hints, 1))
+    return f"How to unblock this:\n{body}"
 
 
 def redact_action(action: dict) -> dict:

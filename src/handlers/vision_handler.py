@@ -29,8 +29,8 @@ from src.computer.computer import Computer
 from src.computer.input_access import InputBlockedError
 from src.computer.tools.constants import KEYBOARD_KEYS
 from src.computer.vision_policy import (action_point, active_window,
-                                        classify_action, redact_action,
-                                        redact_answer)
+                                        classify_action, policy_hint_text,
+                                        redact_action, redact_answer)
 from src.handlers.base_agent import (
     BaseAgentHandler as BaseAgent,
     _is_error_output,
@@ -535,9 +535,10 @@ class CuaTurnWorker(QThread):
             if hard_blocks:
                 message = "; ".join(c.get("message", "blocked") for c in hard_blocks)
                 outcome = {
-                    "policy_blocked": f"**Blocked:** {message}",
+                    "policy_blocked": f"Blocked: {message}",
                     "response_id": turn.get("response_id"),
                     "executed": [],
+                    "checks": hard_blocks,
                 }
                 self._comm_log("CONSUMED", {
                     "turn": turn_no,
@@ -739,9 +740,10 @@ class CuaTurnWorker(QThread):
                     message = "; ".join(
                         c.get("message", "blocked") for c in hard_now)
                     outcome = {
-                        "policy_blocked": f"**Blocked:** {message}",
+                        "policy_blocked": f"Blocked: {message}",
                         "executed": executed,
                         "response_id": turn.get("response_id"),
+                        "checks": hard_now,
                     }
                     self._comm_log("CONSUMED", {
                         "turn": turn_no,
@@ -1066,6 +1068,18 @@ class VisionHandler(BaseAgent):
         self._last_shot_file = None
         self._cua_seed_note = reason
 
+    def _policy_hint_block(self, checks) -> str:
+        """Settings instruction for the hard blocks not explained yet."""
+        fresh = []
+        for check in checks or []:
+            code = str(check.get("code") or "")
+            if code and code in self._policy_hint_codes:
+                continue
+            if code:
+                self._policy_hint_codes.add(code)
+            fresh.append(check)
+        return policy_hint_text(fresh)
+
     def _sleep_checked(self, seconds: float) -> None:
         """Sleep in slices so Stop/Pause/wall-clock interrupt long actions."""
         deadline = time.monotonic() + max(0.0, float(seconds))
@@ -1101,6 +1115,10 @@ class VisionHandler(BaseAgent):
         self._cua_identity = None
         self._cua_seed_note = None
         self._cua_started_at = 0.0
+        # Hard Vision blocks already explained in this task; the settings
+        # hint is shown once per code so a retrying model cannot flood the
+        # transcript with the same instruction.
+        self._policy_hint_codes = set()
         self._worker = None
         self._compact_owned = False
         self._visible_box = {}
@@ -1302,6 +1320,7 @@ class VisionHandler(BaseAgent):
         self._cua_seed_note = None
         self._paused_turn_inflight = False
         self._cua_system_cache = None
+        self._policy_hint_codes = set()
         self._prune_debug_shots()
         try:
             import mss
@@ -1674,9 +1693,15 @@ class VisionHandler(BaseAgent):
         if outcome.get("policy_blocked"):
             self._stop_thinking_timer()
             self.ui.add_text(outcome["policy_blocked"])
+            hint = self._policy_hint_block(outcome.get("checks") or [])
+            if hint:
+                self.ui.add_text(hint)
+            tells = " ".join(hint.splitlines()[1:]).strip()
             self._cua_restart_chain(
                 f"Previous attempt was blocked by the safety gate: "
-                f"{outcome['policy_blocked']}")
+                f"{outcome['policy_blocked']} Do not retry it; take a "
+                f"different route or tell the user what to change: "
+                f"{tells or 'check the Vision settings.'}")
             self._exit_compact()
             self._set_state(VisionState.PAUSED_ON_ERROR)
             return
