@@ -286,7 +286,11 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   continues the loop instead of `_arm_job_wait`. The model is told the user
   moved it and to keep working; it polls or stops the job as usual. The
   auto-detach after `terminal.shell_detach_seconds` (default 25 s, capped at
-  the shell timeout) still covers the case where nobody clicks.
+  the shell timeout) still covers the case where nobody clicks. Its result
+  carries `detached_by_time` and tells the model the command was moved
+  automatically and is not a background launch it asked for, because the old
+  wording ("Background shell job #N started") made a model obeying "do not
+  run anything in the background" stop the job and relaunch it twice.
   A session reset (`UIManager.clear_chat`) clears the strip; compact mode
   hides it (`set_suppressed`) without forgetting the jobs.
   Every message carries a footer strip under it: a user bubble the local send

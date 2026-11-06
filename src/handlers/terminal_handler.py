@@ -1063,6 +1063,25 @@ class TerminalHandler(BaseAgentHandler):
                         "with stop_shell_job when it is no longer needed.\n"
                         f"```\n{result}\n```"
                     )
+                elif isinstance(result, dict) and result.get('detached'):
+                    # The foreground wait ran out: the same command keeps
+                    # running, so the model must not read this as its own
+                    # background launch and kill or relaunch it.
+                    note = (f"Moved to the background as job #{job_id} after the "
+                            f"foreground wait ran out. State: {job_state}. It is the "
+                            "command you started, not a new background launch: do not "
+                            "relaunch it, and ask before stopping it.")
+                    output_for_llm = (
+                        f"**Tool Result:** This foreground command was still running "
+                        f"after the foreground wait, so it was moved to the background "
+                        f"automatically as job #{job_id}; state: {job_state}. It is the "
+                        "same command and keeps running. This was not a background "
+                        "launch you asked for, so do not relaunch it; tell the user it "
+                        "continues in the background strip and ask before stopping it. "
+                        "Otherwise keep working and check it with poll_shell_job (pace "
+                        "polls with wait_seconds).\n"
+                        f"```\n{result}\n```"
+                    )
                 else:
                     note = (f"Started in background as job #{job_id}. "
                             f"State: {job_state}. Use poll_shell_job to check "

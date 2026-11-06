@@ -1043,10 +1043,17 @@ class ShellJobManager:
                     logging.info(f"Foreground command detached into background job "
                                  f"#{job.job_id} after {elapsed:.1f}s.")
                     return {"job_id": job.job_id, "status": "running", "detached": True,
+                            "detached_by_time": True,
                             "state": "starting",
                             "output_file": job.log_path,
-                            "hint": "Still running in background. Use poll_shell_job to check, "
-                                    "stop_shell_job to abort. Full output streams to output_file."}
+                            "hint": ("The foreground command was still running "
+                                     f"after {elapsed:.0f}s, so it was moved to the "
+                                     "background automatically. It is the same command, "
+                                     "not a background launch you asked for, so do not "
+                                     "relaunch it. Tell the user it keeps running in the "
+                                     "background strip and ask before stopping it. Check "
+                                     "it with poll_shell_job, pacing polls with "
+                                     "wait_seconds; full output streams to output_file.")}
                 if progress_cb is not None:
                     with job.lock:
                         snapshot = list(job.stdout_parts)
