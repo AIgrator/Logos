@@ -22,6 +22,8 @@ _OUTPUT_PREVIEW_LINES = 25
 _OUTPUT_PREVIEW_CHARS = 3500
 # Width of the one-line argument peek next to the collapsed Arguments link.
 _ARGS_PREVIEW_CHARS = 110
+# The step's live progress line (waiting clock, percent, last output line).
+_PROGRESS_PREVIEW_CHARS = 140
 
 # Status badges lead a row instead of trailing it. A tick after the title reads
 # like a read receipt; a quiet mark in front of it is a status column, where the
@@ -108,6 +110,21 @@ def block_summary(msg: dict) -> str:
     label = f"{len(steps)} step" if len(steps) == 1 else f"{len(steps)} steps"
     tools = block_tool_summary(msg)
     return f"{label} · {tools}" if tools else label
+
+
+def next_second_delay_ms(now: float | None = None) -> int:
+    """Delay (1..1000 ms) to the next whole wall-clock second.
+
+    Both one-second clocks of the app - the transcript's step timers and the
+    background-job dock - read `time.monotonic()` when they render. Free-running
+    `QTimer`s started from different moments tick out of phase, so the same job
+    could read 10s in its step row and 11s in the dock in the same instant. Both
+    timers are single-shot and re-arm through this helper, so they wake together
+    just after each second and read the clock at the same moment.
+    """
+    current = time.time() if now is None else now
+    delay = 1000 - int((current % 1.0) * 1000)
+    return max(1, min(1000, delay))
 
 
 def format_duration(seconds: float | None) -> str:
@@ -420,6 +437,7 @@ class ActivityBlockFormatter:
         detail = ""
         if expanded:
             detail = self._format_step_detail(msg, row, meta)
+        progress = self._format_progress(row, meta)
         # Job actions stay outside the collapsible body: Stop and Open log
         # must be reachable without expanding the step first.
         actions = self._job_actions(msg, row)
@@ -430,7 +448,24 @@ class ActivityBlockFormatter:
             f'<a href="{self._row_toggle(msg.get("id"), row)}" '
             f'style="text-decoration: none; color: '
             f'{self._get_style("COLLAPSIBLE_TITLE")};">'
-            f"{caret_html}&nbsp;{mark}{title}{suffix}</a>{detail}{actions}</div>")
+            f"{caret_html}&nbsp;{mark}{title}{suffix}</a>{progress}{detail}{actions}</div>")
+
+    def _format_progress(self, row: dict, meta: str) -> str:
+        """The running tool's own progress, one grey line under its title.
+
+        A waiting command used to draw a second live card with the same clock
+        and the same tail, so the transcript showed two competing rows for one
+        call. The line belongs to the step it describes; it disappears with the
+        step's result (``status`` leaves ``running``).
+        """
+        text = str(row.get("progress") or "").strip()
+        if not text or str(row.get("status") or "") != "running":
+            return ""
+        return (
+            f'<div style="margin: 1px 0 0 14px; color: {meta}; '
+            f'font-size: 90%; font-family: Consolas, monospace; '
+            f'white-space: nowrap; overflow: hidden;">'
+            f"{html.escape(_one_line(text, _PROGRESS_PREVIEW_CHARS))}</div>")
 
     def _step_duration(self, row: dict, now: float) -> str:
         # A job row's clock measures the job, not the step: the launch call

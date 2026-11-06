@@ -31,6 +31,7 @@ from src.ui.utils import IconHoverFilter
 from src.ui.widgets.activity_block_formatter import (
     ActivityBlockFormatter,
     block_summary,
+    next_second_delay_ms,
     run_default_expanded,
     steps_in_run,
 )
@@ -267,9 +268,12 @@ class ChatWidget(QAbstractScrollArea):
         self._retry_countdown_msg_idx = -1
 
         # Live activity blocks re-render once a second so their running
-        # step's elapsed time ticks without handler-driven updates.
+        # step's elapsed time ticks without handler-driven updates. Single
+        # shot, re-armed through `next_second_delay_ms`, so this clock and the
+        # background-job dock read `time.monotonic()` together instead of
+        # drifting a second apart.
         self._activity_timer = QTimer(self)
-        self._activity_timer.setInterval(1000)
+        self._activity_timer.setSingleShot(True)
         self._activity_timer.timeout.connect(self._activity_tick)
 
         # Autoscroll functionality
@@ -1362,7 +1366,7 @@ class ChatWidget(QAbstractScrollArea):
             name=str(name or ''),
             args=str(args or ''), output='', detail_html=detail_html,
             expanded=False, args_expanded=False, output_expanded=False,
-            job_id=None, log_path=None,
+            job_id=None, log_path=None, progress='',
             started_at=time.monotonic(), finished_at=None)
         msg['rows'].append(row)
         self._render_activity(msg)
@@ -1374,6 +1378,7 @@ class ChatWidget(QAbstractScrollArea):
                              output: str | None = None,
                              detail_html: str | None = None,
                              job_id=None, log_path=None,
+                             progress: str | None = None,
                              expanded: bool | None = None) -> bool:
         """Updates an existing step row, keeping the rest of the block intact."""
         if not self._has_message(msg) or not isinstance(row, dict):
@@ -1383,6 +1388,10 @@ class ChatWidget(QAbstractScrollArea):
             row['status'] = status
             if status != 'running' and row.get('finished_at') is None:
                 row['finished_at'] = time.monotonic()
+            # A finished call has no progress left to report: the result line
+            # replaces the live tail instead of leaving a frozen one under it.
+            if status != 'running':
+                row['progress'] = ''
         if title is not None:
             row['title'] = str(title)
         if args is not None:
@@ -1395,6 +1404,8 @@ class ChatWidget(QAbstractScrollArea):
             row['job_id'] = job_id
         if log_path is not None:
             row['log_path'] = log_path
+        if progress is not None:
+            row['progress'] = str(progress)
         if expanded is not None:
             row['expanded'] = bool(expanded)
         self._render_activity(msg)
@@ -1426,6 +1437,7 @@ class ChatWidget(QAbstractScrollArea):
                     and row.get('job_id') is None):
                 row['status'] = 'stopped'
                 row['finished_at'] = msg['finished_at']
+                row['progress'] = ''
         if collapse == 'always' or (
                 collapse == 'auto' and self._can_auto_collapse(msg)):
             msg['expanded'] = False
@@ -1490,7 +1502,7 @@ class ChatWidget(QAbstractScrollArea):
 
     def _ensure_activity_timer(self):
         if not self._activity_timer.isActive():
-            self._activity_timer.start()
+            self._activity_timer.start(next_second_delay_ms())
 
     @staticmethod
     def _has_live_job(msg: dict) -> bool:
@@ -1552,6 +1564,10 @@ class ChatWidget(QAbstractScrollArea):
         self._update_scroll_bar()
         self.viewport().update()
         self._follow_if_at_bottom(was_at_bottom)
+        # Re-arm on the wall-clock second instead of a free-running interval,
+        # so the clocks stay in step with the job dock over a long turn.
+        if any(self._needs_activity_tick(m) for m in self.messages):
+            self._activity_timer.start(next_second_delay_ms())
 
     def _handle_activity_anchor(self, anchor: str, content_y: float | None = None) -> bool:
         parts = anchor.split(':', 3)

@@ -287,6 +287,7 @@ class TerminalHandler(BaseAgentHandler):
         self._pending_action_name = None
         self._pending_action_args = None
         self._pending_action_label = None
+        self._last_progress_text = None
         self._job_commands = {}
         self._job_cwds = {}
         self._handled_job_ids = set()
@@ -745,6 +746,7 @@ class TerminalHandler(BaseAgentHandler):
         is_file_op = action_name in ['write_file', 'replace', 'replace_many']
         action_label = _action_summary(action_name, action_args)
         self._pending_action_label = action_label
+        self._last_progress_text = None
         self._update_activity_step(self._active_step, title=action_label)
 
         if is_file_op:
@@ -1557,20 +1559,45 @@ class TerminalHandler(BaseAgentHandler):
     def _on_tool_progress(self, ticket: int, elapsed: float, last_line: str):
         if ticket != self._exec_ticket:
             return
-        pct = ""
-        try:
-            m = re.search(r"(\d{1,3}(?:\.\d+)?)\s*%", last_line or "")
-            if m:
-                pct = f" · {m.group(1)}%"
-        except Exception:
-            pass
-        tail = html.escape((last_line or "")[-200:]).strip()
-        tail_html = f"<br><code>{tail}</code>" if tail else ""
+        line, percent, tail = self._progress_line(elapsed, last_line)
+        # The progress belongs to the running step: one grey line under its
+        # title. It used to be a second live card carrying the same clock and
+        # the same tail, so one call drew two competing rows. The card is kept
+        # only as the fallback for a call without a step row.
+        if self._active_step is not None and line:
+            if line == self._last_progress_text:
+                return
+            self._last_progress_text = line
+            if self._update_activity_step(self._active_step, progress=line):
+                return
         label = self._pending_action_label or self._pending_action_name
+        tail_html = f"<br><code>{html.escape(tail)}</code>" if tail else ""
         self.ui.show_tool_progress(
             ticket,
-            f"⏳ <b>{html.escape(str(label))}</b>{pct} · {elapsed:.0f}s{tail_html}"
+            f"⏳ <b>{html.escape(str(label))}</b>"
+            + (f" · {html.escape(percent)}" if percent else "")
+            + f" · {elapsed:.0f}s{tail_html}"
         )
+
+    @staticmethod
+    def _progress_line(elapsed, last_line):
+        """Plain one-line progress text, its percent and its output tail.
+
+        A waiting counter (`waiting… 12/30s`) already carries the elapsed time,
+        so appending the step clock next to it repeated the same number.
+        """
+        try:
+            seconds = max(0.0, float(elapsed))
+        except (TypeError, ValueError):
+            seconds = 0.0
+        tail = " ".join(str(last_line or "").split())[-160:]
+        match = re.search(r"(\d{1,3}(?:\.\d+)?)\s*%", tail)
+        percent = f"{match.group(1)}%" if match else ""
+        counter = re.search(r"\d+\s*/\s*\d+\s*s", tail)
+        parts = [part for part in (percent, tail) if part]
+        if not counter:
+            parts.append(f"{seconds:.0f}s")
+        return " · ".join(parts), percent, tail
 
     def _job_elapsed_seconds(self, job_id) -> float:
         try:
@@ -1596,6 +1623,19 @@ class TerminalHandler(BaseAgentHandler):
             log_path = ''
             if isinstance(output_for_ui, dict):
                 log_path = str(output_for_ui.get('open_log_path') or '')
+            # The launch step already backdated its job clock; reuse that exact
+            # anchor so the dock and the transcript read the same start instead
+            # of two samples taken a moment apart.
+            started_at = None
+            if isinstance(self._active_step, dict):
+                started_at = self._active_step.get('job_started_at')
+                if started_at is not None:
+                    try:
+                        started_at = float(started_at)
+                    except (TypeError, ValueError):
+                        started_at = None
+            if started_at is None:
+                started_at = time.monotonic() - self._job_elapsed_seconds(job_id)
             track({
                 'job_id': job_id,
                 'command': str(commands.get(job_id) or ''),
@@ -1604,7 +1644,7 @@ class TerminalHandler(BaseAgentHandler):
                 'ready_url': str(result.get('ready_url') or ''),
                 'status_code': result.get('status_code'),
                 'log_path': log_path,
-                'started_at': time.monotonic() - self._job_elapsed_seconds(job_id),
+                'started_at': started_at,
             })
         except Exception as e:
             logging.warning(f"Could not pin background job #{job_id}: {e}")
@@ -1740,7 +1780,7 @@ class TerminalHandler(BaseAgentHandler):
             output_text = self._strip_result_prefix(output_for_llm)
         self._update_activity_step(
             step, status=status, output=output_text, detail_html=detail_html,
-            title=title, job_id=launch_job_id, log_path=log_path,
+            title=title, job_id=launch_job_id, log_path=log_path, progress='',
             expanded=True if failed else None)
 
     @staticmethod

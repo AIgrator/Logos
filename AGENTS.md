@@ -336,7 +336,22 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   renders the body. A long result is a preview of 25 lines / 3 500 characters
   plus a `Show all · N more lines` link (`row['output_expanded']`, anchor
   `...:output:<row id>`, `Show less` to fold back), because the transcript is
-  one `QTextDocument` and cannot nest a scroll area inside a card. Both the
+  one `QTextDocument` and cannot nest a scroll area inside a card. A running
+  call reports itself on one grey line inside its own step row
+  (`row['progress']`, drawn by `ActivityBlockFormatter._format_progress`,
+  clipped to 140 characters): `TerminalHandler._on_tool_progress` writes the
+  clock, the percent and the last output line there and skips a text identical
+  to the previous one, so a progress callback every 0.2 s cannot turn into a
+  5 fps re-render. The old separate live card (`ChatWidget.show_tool_progress`)
+  drew the same clock and the same tail as a second row and is now only the
+  fallback for a call without a step row. The line never outlives the call:
+  `activity_update_step` drops it as soon as `status` leaves `running`, and
+  `finish_activity` / `_show_activity_result` clear it explicitly. A waiting
+  counter (`waiting… 12/30s`) already carries the time, so `_progress_line`
+  does not append the step clock next to it. Both one-second clocks of the
+  transcript and of the job dock are single-shot `QTimer`s re-armed through
+  `next_second_delay_ms()`, so they wake on the same wall-clock second and read
+  `time.monotonic()` together instead of drifting a second apart. Both the
   output box and the code box normalize `\r\n` / `\r` to `\n` before escaping
   (Qt's `pre-wrap` draws a lone `\r` as its own break, so Windows command
   output used to render double spaced) and use a 95 % line-height. A long turn
