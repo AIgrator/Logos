@@ -1225,7 +1225,7 @@ class BaseAgentHandler:
     def record_tool_result(self, text, status: str = "", call_id: str = "",
                            name: str = "", display: str = "",
                            display_title: str = "", job_id=None,
-                           log_path: str = ""):
+                           log_path: str = "", image_path: str = ""):
         call_id = call_id or self._active_call_id
         if not call_id:
             return
@@ -1249,6 +1249,11 @@ class BaseAgentHandler:
             fields["job_id"] = int(job_id)
         if log_path:
             fields["log_path"] = str(log_path)
+        if image_path:
+            # A screenshot step shows its picture again on replay; the path
+            # travels with the event so the transcript does not have to parse
+            # it back out of the display text.
+            fields["image_path"] = str(image_path)
         self._append_session_event("tool_result", **fields)
         self._active_call_id = None
         self._active_tool_name = ""
@@ -1422,6 +1427,9 @@ class BaseAgentHandler:
         log_path = event.get("log_path")
         if log_path:
             row["log_path"] = str(log_path)
+        image_path = event.get("image_path")
+        if image_path:
+            row["image_path"] = str(image_path)
         try:
             self.ui.activity_update_step(msg=self._replay_msg, row=row, **fields)
         except TypeError:

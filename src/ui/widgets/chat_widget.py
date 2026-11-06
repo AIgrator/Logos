@@ -1378,6 +1378,7 @@ class ChatWidget(QAbstractScrollArea):
                              output: str | None = None,
                              detail_html: str | None = None,
                              job_id=None, log_path=None,
+                             image_path: str | None = None,
                              progress: str | None = None,
                              expanded: bool | None = None) -> bool:
         """Updates an existing step row, keeping the rest of the block intact."""
@@ -1404,6 +1405,8 @@ class ChatWidget(QAbstractScrollArea):
             row['job_id'] = job_id
         if log_path is not None:
             row['log_path'] = log_path
+        if image_path:
+            row['image_path'] = str(image_path)
         if progress is not None:
             row['progress'] = str(progress)
         if expanded is not None:

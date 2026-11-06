@@ -10,7 +10,10 @@ message.
 from __future__ import annotations
 
 import html
+import os
 import time
+from pathlib import Path
+from urllib.parse import quote
 
 from src.ui.widgets.status_marks import MARK_SIZE, STATUS_STATES
 
@@ -24,6 +27,11 @@ _OUTPUT_PREVIEW_CHARS = 3500
 _ARGS_PREVIEW_CHARS = 110
 # The step's live progress line (waiting clock, percent, last output line).
 _PROGRESS_PREVIEW_CHARS = 140
+# A screenshot step shows the picture itself. The width is capped so a tall
+# transcript does not turn into a wall of images; the click still opens the
+# full-size preview.
+_IMAGE_MAX_WIDTH = 520
+_IMAGE_MIN_WIDTH = 120
 
 # Status badges lead a row instead of trailing it. A tick after the title reads
 # like a read receipt; a quiet mark in front of it is a status column, where the
@@ -438,6 +446,9 @@ class ActivityBlockFormatter:
         if expanded:
             detail = self._format_step_detail(msg, row, meta)
         progress = self._format_progress(row, meta)
+        # A screenshot is content, not a detail: the picture stays visible
+        # under the step title even while the step itself is folded.
+        image = self._format_image(row, meta)
         # Job actions stay outside the collapsible body: Stop and Open log
         # must be reachable without expanding the step first.
         actions = self._job_actions(msg, row)
@@ -448,7 +459,8 @@ class ActivityBlockFormatter:
             f'<a href="{self._row_toggle(msg.get("id"), row)}" '
             f'style="text-decoration: none; color: '
             f'{self._get_style("COLLAPSIBLE_TITLE")};">'
-            f"{caret_html}&nbsp;{mark}{title}{suffix}</a>{progress}{detail}{actions}</div>")
+            f"{caret_html}&nbsp;{mark}{title}{suffix}</a>"
+            f"{image}{progress}{detail}{actions}</div>")
 
     def _format_progress(self, row: dict, meta: str) -> str:
         """The running tool's own progress, one grey line under its title.
@@ -510,6 +522,46 @@ class ActivityBlockFormatter:
             parts.append(f'<div style="margin-top: 6px;">{detail_html}</div>')
         return (f'<div style="margin: 2px 0 0 14px;">'
                 f'{"".join(part for part in parts if part)}</div>')
+
+    def _format_image(self, row: dict, meta: str) -> str:
+        """The picture of a screenshot step, not just its file path.
+
+        A screenshot the user asked for is content, so the step shows a
+        thumbnail and the path stays in the detail box below it. The thumbnail
+        is an ``attachment-preview:`` link, which the chat already routes to
+        the full-size preview dialog - a click opens the image, not an editor.
+        """
+        path = str(row.get("image_path") or "").strip()
+        if not path or not os.path.isfile(path):
+            return ""
+        try:
+            source = Path(path).as_uri()
+        except ValueError:
+            return ""
+        name = os.path.basename(path)
+        payload = quote(f"{path}|{name}", safe="")
+        caption = html.escape(name)
+        return (
+            f'<div style="margin: 6px 0 0 0;">'
+            f'<a href="attachment-preview:{payload}">'
+            f'<img src="{html.escape(source, quote=True)}" '
+            f'width="{self._image_width()}"></a>'
+            f'<div style="color: {meta}; font-size: 85%;">'
+            f"{caption} &middot; click to enlarge</div></div>"
+        )
+
+    def _image_width(self) -> int:
+        """Thumbnail width: the reading column, capped and never tiny."""
+        getter = getattr(self, "available_width", None)
+        available = 0
+        if callable(getter):
+            try:
+                available = int(getter() or 0)
+            except (TypeError, ValueError):
+                available = 0
+        if available > 0:
+            return max(_IMAGE_MIN_WIDTH, min(_IMAGE_MAX_WIDTH, available - 40))
+        return _IMAGE_MAX_WIDTH
 
     def _row_action(self, msg_id, row: dict, action: str) -> str:
         row_id = html.escape(str(row.get("id") or ""), quote=True)

@@ -139,7 +139,8 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   and the model-facing `input`; `tool_result` events carry `call_id`, `name`,
   `status` (`ok`/`error`/`denied`), `output.text` and, when the UI showed more
   than the model needed, `display` (transcript text), `display_title` (the
-  live row title) and `log_path`; a background launch also records `job_id`,
+  live row title) and `log_path`; a screenshot also records `image_path`, so
+  the picture is drawn again on replay. A background launch also records `job_id`,
   which the later `job_result` (`job_id`, `name`, `status`, `exit_code`, the
   same `display*`/`log_path`) updates in place. `message` events may carry an
   `attachments`
@@ -356,7 +357,16 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   renders the body. A long result is a preview of 25 lines / 3 500 characters
   plus a `Show all · N more lines` link (`row['output_expanded']`, anchor
   `...:output:<row id>`, `Show less` to fold back), because the transcript is
-  one `QTextDocument` and cannot nest a scroll area inside a card. A running
+  one `QTextDocument` and cannot nest a scroll area inside a card. A
+  screenshot step draws the picture itself
+  (`ActivityBlockFormatter._format_image`): the tool result carries
+  `image_path`, the row keeps it (the journal event does too), and a
+  thumbnail sits under the step title, outside the collapsible body, so it is
+  visible without expanding the step. Its width follows the reading column
+  (`available_width`, capped at 520 px), and the picture is an
+  `attachment-preview:` link, so a click opens the existing full-size preview
+  dialog rather than an editor. A pruned file (the newest 200 are kept)
+  renders nothing instead of a broken image. A running
   call reports itself on one grey line inside its own step row
   (`row['progress']`, drawn by `ActivityBlockFormatter._format_progress`,
   clipped to 140 characters): `TerminalHandler._on_tool_progress` writes the

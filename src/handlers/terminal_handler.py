@@ -1517,6 +1517,10 @@ class TerminalHandler(BaseAgentHandler):
                 'copy_payloads': {'output': path},
                 'title_color': self._theme("SUCCESS_COLOR" if attached else "WARNING_COLOR"),
             }
+            if path:
+                # The transcript shows the picture itself and lets a click open
+                # the full-size preview; the path stays in the detail box.
+                output_for_ui['image_path'] = path
 
         else:
             # Generic fallback for any other tool
@@ -1707,12 +1711,14 @@ class TerminalHandler(BaseAgentHandler):
         # live kept its clock ticking after the turn ended and blocked the
         # block's auto-fold (the 4m49s poll row on a stopped server).
         live_job_id = job_id if self._pending_action_name == 'execute_shell' else None
-        title, _detail, plain, log_path = self._ui_result_fields(output_for_ui)
+        title, _detail, plain, log_path, image_path = self._ui_result_fields(
+            output_for_ui)
         self.record_tool_result(
             output_for_llm, name=self._pending_action_name,
             display=plain or '', display_title=title or '',
             job_id=live_job_id,
-            log_path=log_path or '')
+            log_path=log_path or '',
+            image_path=image_path or '')
         self._show_activity_result(output_for_llm, output_for_ui,
                                    launch_job_id=live_job_id)
         if self._pending_action_name in ('poll_shell_job', 'stop_shell_job') \
@@ -1754,12 +1760,13 @@ class TerminalHandler(BaseAgentHandler):
     def _ui_result_fields(output_for_ui):
         """Step-row fields of a formatted UI result.
 
-        Returns (title, detail_html, plain_text, log_path). plain_text is what
-        the journal keeps for replay: it is human-facing and never contains
-        the model-facing wrapper markers.
+        Returns (title, detail_html, plain_text, log_path, image_path).
+        plain_text is what the journal keeps for replay: it is human-facing
+        and never contains the model-facing wrapper markers. image_path marks
+        a result that carries a picture (a screenshot) for the transcript.
         """
         if not isinstance(output_for_ui, dict):
-            return None, None, None, None
+            return None, None, None, None, None
         title = output_for_ui.get('title') or None
         detail_html = None
         if output_for_ui.get('content_is_html'):
@@ -1768,7 +1775,8 @@ class TerminalHandler(BaseAgentHandler):
         if plain is None and detail_html is None:
             content = output_for_ui.get('content')
             plain = None if content is None else str(content)
-        return title, detail_html, plain, output_for_ui.get('open_log_path')
+        return (title, detail_html, plain, output_for_ui.get('open_log_path'),
+                output_for_ui.get('image_path'))
 
     def _show_activity_result(self, output_for_llm, output_for_ui, launch_job_id=None):
         """Folds a finished tool result into the active step row.
@@ -1783,7 +1791,8 @@ class TerminalHandler(BaseAgentHandler):
             if output_for_ui:
                 self.ui.add_message(output_for_ui)
             return
-        title, detail_html, _plain, log_path = self._ui_result_fields(output_for_ui)
+        title, detail_html, _plain, log_path, image_path = self._ui_result_fields(
+            output_for_ui)
         failed = _is_error_output(output_for_llm)
         running_job = launch_job_id is not None and not failed
         status = 'running' if running_job else ('error' if failed else 'ok')
@@ -1799,7 +1808,8 @@ class TerminalHandler(BaseAgentHandler):
             output_text = self._strip_result_prefix(output_for_llm)
         self._update_activity_step(
             step, status=status, output=output_text, detail_html=detail_html,
-            title=title, job_id=launch_job_id, log_path=log_path, progress='',
+            title=title, job_id=launch_job_id, log_path=log_path,
+            image_path=image_path, progress='',
             expanded=True if failed else None)
 
     @staticmethod
@@ -1828,11 +1838,13 @@ class TerminalHandler(BaseAgentHandler):
             return
         msg, row = entry
         row['job_finished_at'] = time.monotonic()
-        title, detail_html, _plain, log_path = self._ui_result_fields(output_for_ui)
+        title, detail_html, _plain, log_path, image_path = self._ui_result_fields(
+            output_for_ui)
         try:
             self.ui.activity_update_step(
                 msg, row, status=status, title=title,
                 detail_html=detail_html, log_path=log_path,
+                image_path=image_path,
                 expanded=True if status == 'error' else None)
         except Exception as e:
             logging.warning(f"Job step update failed for #{job_id}: {e}")
@@ -1932,7 +1944,8 @@ class TerminalHandler(BaseAgentHandler):
         if job_id in self._handled_job_ids:
             return
         self._mark_job_handled(job_id)
-        title, _detail, plain, log_path = self._ui_result_fields(output_for_ui)
+        title, _detail, plain, log_path, _image_path = self._ui_result_fields(
+            output_for_ui)
         self._append_session_event(
             "job_result",
             turn_id=getattr(self.controller, "session_turn_id", ""),
