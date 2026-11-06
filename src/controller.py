@@ -2369,6 +2369,31 @@ class AppController(QObject):
             return None
         return self.ensure_mcp_manager()
 
+    def read_shell_output(self, job_id=None, offset=None, lines: int = 200) -> dict:
+        """Output for the hover preview: a bounded tail or what is new since
+        ``offset``.
+
+        ``job_id=None`` means "the foreground command this turn is waiting
+        on". The preview polls by offset so scrolling back is not fought by
+        the stream, and asks for a tail when it opens mid-command.
+        """
+        try:
+            computer = getattr(self.terminal_handler, "computer", None)
+            manager = getattr(computer, "shell_jobs", None)
+            if manager is None:
+                return {"status": "not_found"}
+            if job_id is None:
+                job_id = manager.foreground_job_id()
+            if job_id is None:
+                return {"status": "not_found"}
+            job_id = int(job_id)
+            if offset is None:
+                return manager.read_tail(job_id, lines)
+            return manager.read_since(job_id, int(offset))
+        except Exception as e:
+            logging.warning(f"Shell output preview read failed: {e}")
+            return {"status": "error"}
+
     def _set_project_context(self, root: str):
         """Re-roots the indexer and the terminal/browser working directories."""
         self.project_root = os.path.abspath(root)

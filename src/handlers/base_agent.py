@@ -942,15 +942,6 @@ class BaseAgentHandler:
             self.ui.clear_plan_panel()
         except Exception as e:
             logging.warning(f"{type(self).__name__} plan clear failed: {e}")
-        # Same for the strip that streams a running command's output: the
-        # recorded output stays in its step row, a frozen copy does not belong
-        # to the next turn. Guarded by getattr - only the agent loop has one.
-        stop_live = getattr(self, '_stop_live_output', None)
-        if callable(stop_live):
-            try:
-                stop_live()
-            except Exception as e:
-                logging.warning(f"{type(self).__name__} live output clear failed: {e}")
         msg, self._activity_msg = self._activity_msg, None
         self._active_step = None
         self._active_step_block = None

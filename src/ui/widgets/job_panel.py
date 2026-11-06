@@ -4,9 +4,10 @@ A background job outlives the step that launched it: the turn moves on, its
 activity block scrolls away or folds, and the user loses the only row that can
 stop the server. This strip keeps the jobs reachable next to the composer.
 
-One job is one row (dot, command, ticking time, Stop / Open log, hover card
-with the folder, the readiness URL and the log tail). Two or more collapse
-into a single capsule - `2 jobs · npm run dev, python -m http.server` - whose
+One job is one row (dot, command, ticking time, Stop / Open log). Hovering it
+asks the window to show the job's live output in a floating card (see
+``output_preview.py``), so the strip itself stays one compact line. Two or more
+collapse into a single capsule - `2 jobs · npm run dev, python -m http.server` - whose
 click opens a list with one line per job (state dot, command, time, Stop,
 Open log). The capsule keeps the composer from growing a row per background
 process. A job that ends while the list is open stays in it until the list is
@@ -18,7 +19,6 @@ handler applies the final job result, and the held ones go with the list.
 from __future__ import annotations
 
 import html
-import os
 import time
 
 from PySide6.QtCore import QPoint, Qt, QTimer, QUrl, Signal
@@ -34,8 +34,6 @@ from PySide6.QtWidgets import (
 
 from src.ui.widgets.activity_block_formatter import next_second_delay_ms
 
-_LOG_TAIL_LINES = 10
-_LOG_TAIL_BYTES = 8192
 # The capsule must stay one compact line in the composer lane; the full command
 # lives in the list, the tooltip and the transcript step.
 _CAPSULE_COMMAND_CHARS = 18
@@ -67,104 +65,12 @@ def _job_count_text(count: int) -> str:
     return f"{count} job" if count == 1 else f"{count} jobs"
 
 
-def _tail_text(path: str) -> str:
-    """Last lines of a job log; '' when it cannot be read."""
-    if not path:
-        return ""
-    try:
-        size = os.path.getsize(path)
-        with open(path, "rb") as handle:
-            if size > _LOG_TAIL_BYTES:
-                handle.seek(size - _LOG_TAIL_BYTES)
-            data = handle.read()
-    except OSError:
-        return ""
-    text = data.decode("utf-8", "replace").replace("\r\n", "\n").replace("\r", "\n")
-    lines = [line.rstrip() for line in text.split("\n") if line.strip()]
-    return "\n".join(lines[-_LOG_TAIL_LINES:])
-
-
 def _state_color(style, state: str) -> str:
     if state == "ready":
         return style("SUCCESS_COLOR")
     if state in ("failed", "error"):
         return style("ERROR_COLOR")
     return style("COLLAPSIBLE_TITLE")
-
-
-class _JobPopover(QFrame):
-    """Hover card with the job's details and log tail; never takes focus."""
-
-    def __init__(self, theme_manager, parent=None):
-        super().__init__(parent, Qt.ToolTip | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_ShowWithoutActivating)
-        self.setAttribute(Qt.WA_TransparentForMouseEvents)
-        self._theme = theme_manager
-        self.setMinimumWidth(320)
-        self.setMaximumWidth(620)
-        self._layout = QVBoxLayout(self)
-        self._layout.setContentsMargins(12, 8, 12, 8)
-        self._layout.setSpacing(0)
-        self._label = QLabel(self)
-        self._label.setTextFormat(Qt.RichText)
-        self._label.setWordWrap(True)
-        self._layout.addWidget(self._label)
-        self._apply_theme()
-
-    def _style(self, key: str) -> str:
-        try:
-            return self._theme.get_style(key) or ""
-        except Exception:
-            return ""
-
-    def _apply_theme(self) -> None:
-        self.setStyleSheet(
-            f"QFrame {{ background-color: {self._style('CODE_BG')}; "
-            f"border: 1px solid {self._style('CODE_BORDER')}; "
-            "border-radius: 8px; }"
-            " QLabel { background: transparent; border: none; }")
-
-    def refresh_theme(self) -> None:
-        self._apply_theme()
-
-    def show_job(self, job: dict, elapsed_text: str, anchor: QWidget) -> None:
-        meta = self._style("COLLAPSIBLE_META")
-        title = self._style("COLLAPSIBLE_TITLE")
-        state = str(job.get("state") or "running")
-        color = _state_color(self._style, state)
-        rows = []
-        ready = str(job.get("ready_url") or "")
-        if ready:
-            code = job.get("status_code")
-            rows.append(
-                f'URL: <span style="color: {title};">{html.escape(ready)}</span>'
-                + (f" (HTTP {html.escape(str(code))})" if code is not None else ""))
-        if job.get("cwd"):
-            rows.append(f"Folder: {html.escape(str(job['cwd']))}")
-        if job.get("log_path"):
-            rows.append(f"Log: {html.escape(str(job['log_path']))}")
-        rows.append(
-            f'State: <span style="color: {color};">{html.escape(state)}</span>'
-            f" &middot; {html.escape(elapsed_text)}")
-        tail = _tail_text(str(job.get("log_path") or ""))
-        if tail:
-            tail_html = (
-                f'<div style="margin-top: 6px; color: {meta}; '
-                f'font-family: Consolas, monospace; font-size: 11px;">'
-                f"{html.escape(tail).replace(chr(10), '<br>')}</div>")
-        else:
-            tail_html = (f'<div style="margin-top: 6px; color: {meta}; '
-                         f'font-size: 11px;">(no log output yet)</div>')
-        command = html.escape(str(job.get("command") or "shell job"))
-        self._label.setText(
-            f'<div style="color: {title}; font-weight: 600;">'
-            f"job #{html.escape(str(job.get('job_id', '?')))}"
-            f" &middot; {command}</div>"
-            f'<div style="color: {meta}; font-size: 11px; margin-top: 2px;">'
-            + "<br>".join(rows)
-            + "</div>" + tail_html)
-        self.adjustSize()
-        _place_above(self, anchor)
 
 
 def _place_above(widget: QWidget, anchor: QWidget) -> None:
@@ -535,6 +441,10 @@ class JobPanel(QWidget):
     """Compact, always-visible strip of live background jobs."""
 
     job_stop_requested = Signal(int)
+    # The pointer entered one live job's row (job dict, row widget); the window
+    # turns that into the floating output card above the task.
+    job_hovered = Signal(object, object)
+    job_unhovered = Signal()
 
     def __init__(self, theme_manager, parent=None):
         super().__init__(parent)
@@ -547,8 +457,6 @@ class JobPanel(QWidget):
         self._mode = "none"
         self._row: _JobRow | None = None
         self._capsule: _JobCapsule | None = None
-        self._hover: _JobPopover | None = None
-        self._hover_job: int | None = None
         self._list: _JobListPopover | None = None
         self._list_open = False
         self._syncing = False
@@ -639,7 +547,7 @@ class JobPanel(QWidget):
         self._jobs.clear()
         self._held.clear()
         self._close_list()
-        self._hide_hover()
+        self.job_unhovered.emit()
         self._sync()
 
     def has_jobs(self) -> bool:
@@ -650,7 +558,7 @@ class JobPanel(QWidget):
         self._suppressed = bool(suppressed)
         if self._suppressed:
             self._close_list()
-            self._hide_hover()
+            self.job_unhovered.emit()
         self._sync()
 
     # -- rendering ----------------------------------------------------------
@@ -696,6 +604,7 @@ class JobPanel(QWidget):
         self.setVisible(mode != "none" and not self._suppressed)
 
     def _drop_widgets(self) -> None:
+        dropped = False
         for widget in (self._row, self._capsule):
             if widget is not None:
                 try:
@@ -703,8 +612,13 @@ class JobPanel(QWidget):
                 except Exception:
                     pass
                 widget.deleteLater()
+                dropped = True
         self._row = None
         self._capsule = None
+        if dropped:
+            # A refreshed job set can replace the row under the pointer; no
+            # leaveEvent arrives from a widget that is being deleted.
+            self.job_unhovered.emit()
 
     def _build(self) -> None:
         if self._mode == "row":
@@ -714,8 +628,8 @@ class JobPanel(QWidget):
             row = _JobRow(job, self._theme, self._column)
             row.stop_requested.connect(self.job_stop_requested.emit)
             row.open_log_requested.connect(self._open_log)
-            row.hovered.connect(self._show_hover)
-            row.unhovered.connect(self._hide_hover)
+            row.hovered.connect(self._on_job_row_hovered)
+            row.unhovered.connect(self.job_unhovered.emit)
             self._column_layout.addWidget(row)
             self._row = row
         elif self._mode == "capsule":
@@ -817,26 +731,14 @@ class JobPanel(QWidget):
         if path:
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
 
-    def _show_hover(self, row: _JobRow) -> None:
+    def _on_job_row_hovered(self, row: _JobRow) -> None:
         job = row.job()
         job_id = job.get("job_id")
         if job_id not in self._jobs:
             return
-        if self._hover is None:
-            self._hover = _JobPopover(self._theme, self)
-        self._hover_job = job_id
-        self._hover.show_job(
-            self._jobs[job_id], format_job_time(self._elapsed(self._jobs[job_id])),
-            row)
-
-    def _hide_hover(self) -> None:
-        self._hover_job = None
-        if self._hover is not None:
-            self._hover.hide()
+        self.job_hovered.emit(dict(self._jobs[job_id]), row)
 
     def _on_theme_changed(self) -> None:
-        if self._hover is not None:
-            self._hover.refresh_theme()
         if self._list is not None:
             self._list.refresh_theme()
         if self._row is not None:
@@ -847,7 +749,7 @@ class JobPanel(QWidget):
                                    self._job_count(), self._list_open)
 
     def hideEvent(self, event):
-        self._hide_hover()
+        self.job_unhovered.emit()
         self._in_hide = True
         try:
             if self._list_open:

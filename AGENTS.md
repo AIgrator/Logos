@@ -254,8 +254,8 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   pinned strip above the composer (`src/ui/widgets/job_panel.py::JobPanel`,
   mounted first in `UIManager.bottom_center_column`, opposite the live plan):
   no job hides it, one job is a full row (status dot, the command, a 1 s clock
-  and `Stop` / `Open log`, plus a hover card `_JobPopover` that reads the last
-  lines of the job log and shows the folder, state and readiness URL), and two
+  and `Stop` / `Open log`; hovering the row asks the window for the floating
+  output card described below, `job_hovered`), and two
   or more fold into one capsule (`2 jobs · npm run dev, http.server 8000 ▾`)
   in the same chrome as the plan pill, so the composer never grows a line per
   background process. Clicking the capsule opens `_JobListPopover` (a
@@ -319,30 +319,40 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   run anything in the background" stop the job and relaunch it twice.
   A session reset (`UIManager.clear_chat`) clears the strip; compact mode
   hides it (`set_suppressed`) without forgetting the jobs.
-  A running shell command gets its own strip above the composer
-  (`src/ui/widgets/live_output_panel.py::LiveOutputPanel`, mounted first in
-  `bottom_center_column`): eight monospaced lines of the command's output in a
-  real `QPlainTextEdit` with a scrollbar, the job number and command, a clock,
-  and `Stop` / `Open log` / `Hide`. It exists because the transcript is one
-  `QTextDocument` and cannot nest a scroll area - the step row holds a single
-  grey progress line, so watching a long command used to mean opening its log
-  in Notepad. `ShellJobManager.read_since(job_id, offset)` returns only the
-  lines printed after the panel's offset (with a note when the in-memory tail
-  dropped older ones), so `TerminalHandler._pump_live_output` appends and never
-  rewrites the lines the reader scrolled back to; the view follows the tail
-  only while it is already at the bottom. `_on_tool_progress` feeds it before
-  any of its early returns (a tick that only refreshed the step line still
-  carries output), a 700 ms timer keeps following the same job after an
-  auto-detach (the command outlives its step and watching it is the point),
-  and the strip freezes on the outcome when the job ends. Before the detach
-  its `Stop` is the window Stop, because the command is the running step;
-  `LiveOutputPanel.set_detached` switches it to `job_stop_requested`, the job
-  Stop the dock offers too. `Hide` remembers the dismissed job
-  (`_dismissed_job_id`) so the next tick cannot reopen it, a new job opens a
-  clean strip, and the strip belongs to the turn like the plan:
-  `BaseAgentHandler._activity_finalize` hides it and
-  `TerminalHandler.start_task` clears it. The recorded output stays in the
-  step row and the job log; the strip is chrome for the moment of watching.
+  A running shell command is watched in a card that follows the pointer
+  (`src/ui/widgets/output_preview.py::OutputPreview`), not in a permanent strip
+  above the composer. The transcript is one `QTextDocument` and cannot nest a
+  scroll area - the step row holds a single grey progress line - so watching a
+  long command used to mean opening its log in Notepad, but a docked eight-line
+  box took that slice of the chat all the time. The card is a `Qt.Tool` window
+  (`WA_TranslucentBackground`, `WA_ShowWithoutActivating`, so the composer keeps
+  focus) with a real `QPlainTextEdit` and scrollbar, the job number and command,
+  a clock, the readiness URL or folder, and `Stop` / `Open log`. It opens only
+  while the pointer rests on a source: a single background job's row in
+  `JobPanel` (`job_hovered(job, row)`) or the title line of a running
+  `execute_shell` step in the transcript (`ChatWidget.live_step_hovered`, the
+  block that carries the step's `activity:<msg>:row:<id>` anchor, so the whole
+  line is a target). The two-job capsule shows its list on click instead. The
+  pointer can cross from the task into the card: `OutputPreview.schedule_hide`
+  waits 260 ms (`HIDE_DELAY_MS`) and `enterEvent` cancels the pending hide.
+  Width is clamped to 400-620 px and centered over the task, above it when
+  there is room; eight lines are visible and the rest scroll.
+  `UIManager._show_output_preview` pulls the data through
+  `AppController.read_shell_output(job_id=None, offset=None)`, which resolves
+  `None` to `ShellJobManager.foreground_job_id()` and reads a bounded
+  `read_tail(200)` on first open or `read_since(offset)` afterwards, so opening
+  mid-command never replays (and re-lays-out) everything. `_pump_output_preview`
+  polls every 600 ms, appends only new lines, follows the tail only while it is
+  already at the bottom, freezes on the outcome, and stops when the job is gone
+  (a foreground command is reaped with its result, so `not_found` leaves the
+  card on what it already shows). Before a detach the card's `Stop` is the
+  window Stop, because the command is the running step;
+  `OutputPreview.set_detached` switches it to `job_stop_requested`, the job Stop
+  the dock offers too. The card closes on clear, in compact mode, when the
+  window is minimized or loses the foreground, and with the pointer. The
+  handler no longer follows anything: there is no live-output timer, and
+  `BaseAgentHandler._activity_finalize` does not touch the card. The recorded
+  output stays in the step row and the job log.
   Every message carries a footer strip under it: a user bubble the local send
   time, an answer the model that wrote it, the time and - when the model
   finished its turn with a conclusion - a copy button

@@ -207,6 +207,10 @@ class ChatWidget(QAbstractScrollArea):
     job_detach_requested = Signal()
     attachment_preview_requested = Signal(str, str)
     suggestion_selected = Signal(str)
+    # The pointer rests on a running shell step (payload: job_id, rect, ...) or
+    # moved away from it; the window shows/hides the floating output card.
+    live_step_hovered = Signal(object)
+    live_step_unhovered = Signal()
 
     # Readable, centered text column. On windows wider than this the chat text
     # stops stretching edge-to-edge and is centered with symmetric margins
@@ -290,6 +294,8 @@ class ChatWidget(QAbstractScrollArea):
         self.current_assistant_name = "Assistant"
         # The message whose hover strip (time, model, copy) is showing.
         self._hover_msg = None
+        # The activity step (msg id, row id) whose output preview is showing.
+        self._live_step_key = None
         self.click_count = 0
         self.last_click_time = 0
         self._retry_countdown_msg_idx = -1
@@ -820,6 +826,77 @@ class ChatWidget(QAbstractScrollArea):
             if any(m is candidate for m in self.messages):
                 self._rerender_message(candidate)
 
+    def _live_step_hover_at(self, pos, char_pos=None):
+        """The running shell step under the pointer, with its global rect.
+
+        Only a step that owns an output stream is interesting: a running
+        ``read_files`` has nothing to preview, and a finished row already
+        carries its recorded output. The title line's block carries the row
+        anchor, so any point on that line is a target; the block's rect is
+        where the card points.
+        """
+        char_pos = char_pos or self._pos_to_char_index(pos)
+        if not char_pos:
+            return None
+        msg_idx, _ = char_pos
+        if not (0 <= msg_idx < len(self.messages)):
+            return None
+        msg = self.messages[msg_idx]
+        if msg.get('type') != 'activity':
+            return None
+        scroll_y = self.verticalScrollBar().value()
+        top = sum(m['doc'].size().height() + self.document_margin
+                  for m in self.messages[:msg_idx])
+        x_offset, _ = self._content_geometry()
+        doc = msg['doc']
+        layout = doc.documentLayout()
+        relative = QPoint(pos.x() - x_offset, pos.y() - int(top - scroll_y))
+        block = doc.findBlock(
+            layout.hitTest(relative, Qt.HitTestAccuracy.FuzzyHit))
+        row_id = None
+        it = block.begin()
+        while not it.atEnd():
+            fragment = it.fragment()
+            if fragment.isValid():
+                href = fragment.charFormat().anchorHref()
+                parts = href.split(':') if href else []
+                if len(parts) == 4 and parts[0] == 'activity' and parts[2] == 'row':
+                    row_id = parts[3]
+                    break
+            it += 1
+        if row_id is None:
+            return None
+        row = next((r for r in msg.get('rows') or []
+                    if str(r.get('id')) == row_id), None)
+        if row is None or str(row.get('status')) != 'running':
+            return None
+        job_id = row.get('job_id')
+        if job_id is not None:
+            try:
+                job_id = int(job_id)
+            except (TypeError, ValueError):
+                job_id = None
+        if job_id is None and row.get('name') != 'execute_shell':
+            return None
+        rect = layout.blockBoundingRect(block)
+        origin = self.viewport().mapToGlobal(QPoint(
+            int(x_offset + rect.x()), int(top - scroll_y + rect.y())))
+        size = QSize(max(1, int(rect.width())), max(1, int(rect.height())))
+        return {'key': (msg.get('id'), row_id), 'job_id': job_id,
+                'row_id': row_id, 'rect': QRect(origin, size)}
+
+    def _update_live_step_hover(self, pos, char_pos=None):
+        """Emits only when the hovered step changes, not on every mouse pixel."""
+        hit = self._live_step_hover_at(pos, char_pos)
+        key = hit.get('key') if hit else None
+        if key == self._live_step_key:
+            return
+        self._live_step_key = key
+        if hit is None:
+            self.live_step_unhovered.emit()
+        else:
+            self.live_step_hovered.emit(hit)
+
     def _copy_collapsible_payload(self, block_id: str, label: str) -> bool:
         """Copy a labelled payload from an expanded collapsible block."""
         for msg in self.messages:
@@ -905,12 +982,16 @@ class ChatWidget(QAbstractScrollArea):
             # pointer; a drag (is_selecting) must not make it flicker.
             idx = char_pos[0] if char_pos else None
             self._apply_hover(self.messages[idx] if idx is not None else None)
+            self._update_live_step_hover(pos, char_pos)
 
         super().mouseMoveEvent(event)
 
     def leaveEvent(self, event):
         # The pointer left the transcript: no message is hovered any more.
         self._apply_hover(None)
+        if self._live_step_key is not None:
+            self._live_step_key = None
+            self.live_step_unhovered.emit()
         super().leaveEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -1064,6 +1145,7 @@ class ChatWidget(QAbstractScrollArea):
         self.is_streaming = False
         self._streaming_msg = None
         self._hover_msg = None
+        self._live_step_key = None
         self._retry_countdown_msg_idx = -1
         self._step_marker = None
         self._sticky_target = None

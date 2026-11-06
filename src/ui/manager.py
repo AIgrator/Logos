@@ -40,7 +40,7 @@ from .widgets.chat_widget import ChatWidget
 from .widgets.model_switch_popup import ModelSwitchPopup, build_effort_menu
 from .widgets.plan_panel import PlanPanel
 from .widgets.job_panel import JobPanel
-from .widgets.live_output_panel import LiveOutputPanel
+from .widgets.output_preview import OutputPreview
 from .widgets.terminal_access_popup import TerminalAccessPopup
 from .widgets.custom_title_bar import CustomTitleBar
 from .widgets.flow_layout import FlowLayout
@@ -635,17 +635,33 @@ class UIManager(QWidget):
         self.job_panel = JobPanel(self.controller.theme_manager,
                                  self.bottom_center_column)
         self.job_panel.job_stop_requested.connect(self.job_stop_requested.emit)
+        self.job_panel.job_hovered.connect(self._on_job_output_hovered)
+        self.job_panel.job_unhovered.connect(self._on_output_preview_unhovered)
         self.bottom_center_layout.addWidget(self.job_panel)
-        # A running command prints into its own strip: the transcript can hold
-        # only one grey progress line (one QTextDocument, no scroll area), so
-        # watching a long command used to mean opening its log in Notepad.
-        self.live_output_panel = LiveOutputPanel(self.controller.theme_manager,
-                                                 self.bottom_center_column)
-        self.live_output_panel.stop_requested.connect(self._on_stop_clicked)
-        self.live_output_panel.job_stop_requested.connect(
+        # A running command's output lives in a card that follows the pointer
+        # instead of a permanent strip: the transcript can hold only one grey
+        # progress line (one QTextDocument, no scroll area), but a strip above
+        # the composer took that slice of the chat all the time.
+        self.output_preview = OutputPreview(self.controller.theme_manager, self)
+        self.output_preview.stop_requested.connect(self._on_stop_clicked)
+        self.output_preview.job_stop_requested.connect(
             self.job_stop_requested.emit)
-        self.live_output_panel.open_log_requested.connect(self._open_live_output_log)
-        self.bottom_center_layout.insertWidget(0, self.live_output_panel)
+        self.output_preview.open_log_requested.connect(self._open_output_log)
+        self.output_preview.closed.connect(self._on_output_preview_closed)
+        self.chat_widget.live_step_hovered.connect(self._on_live_step_hovered)
+        self.chat_widget.live_step_unhovered.connect(
+            self._on_output_preview_unhovered)
+        self._preview_job_id = None
+        self._preview_offset = 0
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setInterval(600)
+        self._preview_timer.timeout.connect(self._pump_output_preview)
+        try:
+            QApplication.instance().applicationStateChanged.connect(
+                self._on_application_state_changed)
+        except Exception:
+            pass
+        self.main_window.installEventFilter(self)
         # The live plan belongs to the composer, not the transcript: it sits
         # directly above the input while a turn runs and vanishes with it.
         self.plan_panel = PlanPanel(self.controller.theme_manager,
@@ -1302,6 +1318,11 @@ class UIManager(QWidget):
         menu.exec(QCursor.pos())
 
     def eventFilter(self, obj, event):
+        if (obj is getattr(self, "main_window", None)
+                and event.type() == QEvent.Type.WindowStateChange
+                and self.main_window.isMinimized()):
+            self.hide_output_preview()
+            return super().eventFilter(obj, event)
         if (obj is getattr(self, "workspace_column", None)
                 and event.type() == QEvent.Type.Resize):
             # The text column and the composer share one cap derived from the
@@ -1763,7 +1784,7 @@ class UIManager(QWidget):
     def clear_chat(self):
         self.plan_panel.clear_plan()
         self.job_panel.clear()
-        self.live_output_panel.clear()
+        self.hide_output_preview()
         self.chat_widget.clear_messages()
 
     def set_assistant_name(self, name: str):
@@ -2034,33 +2055,104 @@ class UIManager(QWidget):
     def clear_jobs(self) -> None:
         self.job_panel.clear()
 
-    # --- Live output of the running shell command -------------------------
+    # --- Output preview on hover ------------------------------------------
 
-    def show_live_output(self, job_id, command: str, log_path: str = "") -> None:
-        """Opens the output strip for the command the turn is running."""
-        if self.is_compact:
+    def _on_job_output_hovered(self, job, row) -> None:
+        """A background job row asked for its output card."""
+        if self.is_compact or not isinstance(job, dict) or row is None:
             return
-        self.live_output_panel.start(job_id, command, log_path)
+        try:
+            anchor = QRect(row.mapToGlobal(QPoint(0, 0)), row.size())
+        except Exception:
+            return
+        hint = str(job.get("ready_url") or job.get("cwd") or "")
+        self._show_output_preview(job.get("job_id"), anchor, hint=hint,
+                                  background=True)
 
-    def append_live_output(self, text: str = "", elapsed=None,
-                           state: str = "") -> None:
-        self.live_output_panel.feed(text, elapsed=elapsed, state=state)
+    def _on_live_step_hovered(self, payload) -> None:
+        """A running shell step in the transcript asked for its output card."""
+        if self.is_compact or not isinstance(payload, dict):
+            return
+        rect = payload.get("rect")
+        if not isinstance(rect, QRect) or rect.isNull():
+            return
+        job_id = payload.get("job_id")
+        self._show_output_preview(job_id, rect, hint="",
+                                  background=job_id is not None)
 
-    def finish_live_output(self, state: str = "done") -> None:
-        """Freezes the strip on the last output (the turn may still be going)."""
-        self.live_output_panel.finish(state)
+    def _on_output_preview_unhovered(self) -> None:
+        preview = getattr(self, "output_preview", None)
+        if preview is not None:
+            preview.schedule_hide()
 
-    def set_live_output_detached(self, detached: bool = True) -> None:
-        """The watched command left its step and became a background job."""
-        self.live_output_panel.set_detached(detached)
+    def _show_output_preview(self, job_id, anchor, hint: str = "",
+                             background: bool = False) -> None:
+        if self.is_compact or anchor is None:
+            return
+        chunk = self.controller.read_shell_output(job_id)
+        if chunk.get("status") not in ("running", "done"):
+            return
+        try:
+            resolved = int(chunk.get("job_id"))
+        except (TypeError, ValueError):
+            return
+        if (resolved == self._preview_job_id
+                and self.output_preview.is_open()):
+            return
+        self._preview_job_id = resolved
+        self._preview_offset = int(chunk.get("offset") or 0)
+        if not self.output_preview.show_for(chunk, anchor, hint=hint,
+                                            detached=background):
+            return
+        self.output_preview.feed(
+            str(chunk.get("text") or ""), chunk.get("elapsed_seconds"),
+            "running" if chunk.get("running")
+            else str(chunk.get("state") or "done"))
+        if chunk.get("running"):
+            self._preview_timer.start()
+        else:
+            self._preview_timer.stop()
 
-    def hide_live_output(self) -> None:
-        self.live_output_panel.hide_output()
+    def _pump_output_preview(self) -> None:
+        """Appends what the previewed job printed since the last read."""
+        preview = getattr(self, "output_preview", None)
+        if preview is None or not preview.is_open() or self._preview_job_id is None:
+            self._preview_timer.stop()
+            return
+        chunk = self.controller.read_shell_output(
+            self._preview_job_id, offset=self._preview_offset)
+        if chunk.get("status") not in ("running", "done"):
+            # A foreground command is reaped with its result the moment it
+            # ends; the card keeps what it already shows.
+            preview.finish("done")
+            self._preview_timer.stop()
+            return
+        self._preview_offset = int(
+            chunk.get("offset") or self._preview_offset)
+        preview.feed(
+            str(chunk.get("text") or ""), chunk.get("elapsed_seconds"),
+            "running" if chunk.get("running")
+            else str(chunk.get("state") or "done"))
+        if not chunk.get("running"):
+            self._preview_timer.stop()
 
-    def clear_live_output(self) -> None:
-        self.live_output_panel.clear()
+    def _on_output_preview_closed(self) -> None:
+        self._preview_timer.stop()
+        self._preview_job_id = None
+        self._preview_offset = 0
 
-    def _open_live_output_log(self, path: str) -> None:
+    def hide_output_preview(self) -> None:
+        preview = getattr(self, "output_preview", None)
+        if preview is not None:
+            preview.hide_now()
+
+    def _on_application_state_changed(self, state) -> None:
+        # The card floats over the app; it must not survive the window losing
+        # the foreground (another app, a minimized window).
+        if state != Qt.ApplicationActive:
+            self.hide_output_preview()
+
+    def _open_output_log(self, path: str) -> None:
         if not path:
             return
         try:
@@ -2285,7 +2377,7 @@ class UIManager(QWidget):
         self.attachment_scroll_area.setVisible(False)
         self.plan_panel.set_suppressed(True)
         self.job_panel.set_suppressed(True)
-        self.live_output_panel.set_suppressed(True)
+        self.hide_output_preview()
         self.input_container.setVisible(False)
         self.mode_model_container.setVisible(False)
         self.bottom_toolbar_container.setVisible(False)
@@ -2359,7 +2451,6 @@ class UIManager(QWidget):
         self.layout.setContentsMargins(left_margin, 11, 11, 11)
         self.plan_panel.set_suppressed(False)
         self.job_panel.set_suppressed(False)
-        self.live_output_panel.set_suppressed(False)
         self.input_container.setVisible(True)
         self.bottom_toolbar_container.setVisible(True)
         self._toolbar_single_row = None  # force single/two-row re-evaluation

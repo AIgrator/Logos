@@ -474,6 +474,20 @@ class JobOutputBuffer:
                      "the job log for the full output ...]\n" + chunk)
         return chunk, self.dropped_lines + len(self._parts)
 
+    def read_tail(self, lines: int) -> tuple:
+        """Returns (last ``lines`` of output, the offset after them).
+
+        The hover preview opens in the middle of a command, so it asks for a
+        bounded tail instead of replaying everything the job ever printed.
+        """
+        try:
+            wanted = max(0, int(lines))
+        except (TypeError, ValueError):
+            wanted = 0
+        start = max(0, len(self._parts) - wanted) if wanted else len(self._parts)
+        chunk = "".join(islice(self._parts, start, None))
+        return chunk, self.dropped_lines + len(self._parts)
+
 
 class JobLogWriter:
     """Line-buffered, size-capped log file for one background job."""
@@ -1176,6 +1190,35 @@ class ShellJobManager:
                 text, new_offset = job.stdout_parts.read_since(int(offset or 0))
         except Exception:
             text, new_offset = "", int(offset or 0)
+        running = not job.done.is_set()
+        return {
+            "job_id": job.job_id,
+            "command": job.command,
+            "status": "running" if running else "done",
+            "running": running,
+            "state": (_running_job_state(job) if running
+                      else job_state_from_result(job.result)),
+            "elapsed_seconds": round(time.monotonic() - job.started, 1),
+            "text": text,
+            "offset": new_offset,
+            "log_path": job.log_path,
+        }
+
+    def read_tail(self, job_id: int, lines: int = 200) -> dict:
+        """A bounded tail of a job's output plus the offset to continue from.
+
+        The hover preview opens in the middle of a command, so it must not
+        replay (and re-layout) everything the job ever printed.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return {"job_id": job_id, "status": "not_found"}
+        try:
+            with job.lock:
+                text, new_offset = job.stdout_parts.read_tail(lines)
+        except Exception:
+            text, new_offset = "", 0
         running = not job.done.is_set()
         return {
             "job_id": job.job_id,
