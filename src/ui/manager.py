@@ -1972,6 +1972,13 @@ class UIManager(QWidget):
                                             copy_text=copy_text, copyable=copyable,
                                             actor=actor)
 
+    def add_notice(self, html_content, seconds=None, force_scroll=False):
+        """Adds a status notice that leaves the chat after a few seconds."""
+        if self.is_compact:
+            force_scroll = True
+        return self.chat_widget.add_notice(html_content, seconds=seconds,
+                                           force_scroll=force_scroll)
+
     def update_collapsible(self, msg, title: str, content_html: str) -> bool:
         """Updates an existing collapsible block, preserving its state."""
         return self.chat_widget.update_collapsible(msg, title, content_html)

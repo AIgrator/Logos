@@ -775,7 +775,7 @@ class AppController(QObject):
         if entry == capabilities.VISION and self.current_handler is self.vision_handler:
             self.vision_handler.stop()
         grants = self.detach_capability(entry)
-        self.ui.add_message(
+        self.ui.add_notice(
             f"<i>{entry.capitalize()} capability detached from this session.</i>",
             force_scroll=True)
         if not was_presentation:
@@ -3725,14 +3725,14 @@ class AppController(QObject):
     def _activate_chat_mode(self):
         self._cleanup_and_switch_handler(self.chat_handler, ControllerState.CHATTING, mode="chat")
         self.ui.set_active_mode('chat')
-        self.ui.add_message(
+        self.ui.add_notice(
             "<i>Chat panel: answers without agent tools.</i>", force_scroll=True)
 
     def _activate_terminal_mode(self):
         self._cleanup_and_switch_handler(self.terminal_handler, ControllerState.TERMINAL, mode="terminal")
         self.ensure_mcp_manager()
         self.ui.set_active_mode('terminal')
-        self.ui.add_message("<i>Terminal panel opened. Its capability is attached to this session.</i>", force_scroll=True)
+        self.ui.add_notice("<i>Terminal panel opened. Its capability is attached to this session.</i>", force_scroll=True)
         if self.indexer is not None:
             self.indexer.schedule_reindex(force=True)
 
@@ -3767,7 +3767,7 @@ class AppController(QObject):
             return
         self._cleanup_and_switch_handler(self.browser_handler, ControllerState.BROWSER, mode="browser")
         self.ui.set_active_mode('browser')
-        self.ui.add_message("<i>Browser panel opened. Its capability is attached to this session.</i>", force_scroll=True)
+        self.ui.add_notice("<i>Browser panel opened. Its capability is attached to this session.</i>", force_scroll=True)
 
     def _vision_availability_error(self) -> str | None:
         """Returns why Vision cannot start, or None when a CUA model is usable.
@@ -3808,7 +3808,7 @@ class AppController(QObject):
             return
         self._cleanup_and_switch_handler(self.vision_handler, ControllerState.VISION, mode="vision")
         self.ui.set_active_mode('vision')
-        self.ui.add_message("<i>Vision panel opened. Its capability is attached to this session.</i>", force_scroll=True)
+        self.ui.add_notice("<i>Vision panel opened. Its capability is attached to this session.</i>", force_scroll=True)
         self._apply_capability_default_model("vision")
         self.vision_handler._set_state(VisionState.IDLE)
 

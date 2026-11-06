@@ -593,6 +593,12 @@ switch, an attach/detach and whenever a journal is opened. The bar takes the
 selector's place in both toolbar layouts, and `set_vision_mode_loading` disables
 only the Vision control. Switcher notices speak of panels and capabilities
 ("Terminal panel opened…", "Browser capability detached…") instead of modes.
+They are chrome, not history: `UIManager.add_notice` (and the handler's
+`_notice`) routes them through `ChatWidget.add_notice`, which drops the line ten
+seconds later (`ChatWidget.NOTICE_SECONDS`), so capability switches cannot leave
+grey lines stacked at the bottom of the chat. A notice is an ordinary transcript
+message until its timer fires, so clearing the chat makes the late removal a
+no-op; real messages never expire.
 
 `src/computer/capabilities.py` is the single authority on which tools a session
 may use. A capability is what a session is allowed to do (`base`, `terminal`,

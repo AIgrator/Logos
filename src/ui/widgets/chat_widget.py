@@ -1315,6 +1315,33 @@ class ChatWidget(QAbstractScrollArea):
         self.viewport().update()
         return msg
 
+    # A notice is chrome, not history: "the panel is open", "the capability is
+    # already attached" have done their job once they are read, so they leave
+    # the transcript on their own instead of stacking up at the bottom of the
+    # chat as if they still mattered.
+    NOTICE_SECONDS = 10.0
+
+    def add_notice(self, html_content: str, seconds: float | None = None,
+                   force_scroll: bool = False):
+        """Shows a short notice that removes itself after ``seconds``."""
+        msg = self.add_message(html_content, force_scroll=force_scroll)
+        if not isinstance(msg, dict):
+            return msg
+        lifetime = self.NOTICE_SECONDS if seconds is None else float(seconds)
+        if lifetime > 0:
+            QTimer.singleShot(int(lifetime * 1000),
+                              lambda: self._dismiss_notice(msg))
+        return msg
+
+    def _dismiss_notice(self, msg):
+        """Drops a notice whose time is up (a no-op once the chat was reset)."""
+        if not self._has_message(msg):
+            return
+        was_at_bottom = self._is_at_bottom()
+        self.remove_message(msg)
+        if was_at_bottom:
+            self.scroll_to_bottom()
+
     def update_collapsible(self, msg, title: str, content_html: str) -> bool:
         """Updates a collapsible block in place, keeping its open/closed state."""
         if not isinstance(msg, dict) or msg.get('type') != 'collapsible':

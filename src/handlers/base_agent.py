@@ -1071,6 +1071,18 @@ class BaseAgentHandler:
 
         self._run_action(action)
 
+    def _notice(self, html_text: str):
+        """Shows a capability notice that leaves the chat on its own.
+
+        Attaching a capability says something only for the moment it happens:
+        the transcript should not keep two grey lines about it forever.
+        """
+        add_notice = getattr(self.ui, "add_notice", None)
+        if callable(add_notice):
+            add_notice(html_text, force_scroll=True)
+            return
+        self.ui.add_message(html_text)
+
     def _attach_terminal_capability(self):
         """`open_terminal`: grants shell/file tools to the open session.
 
@@ -1090,12 +1102,12 @@ class BaseAgentHandler:
                 except Exception as e:
                     logging.warning(f"Could not start the MCP manager: {e}")
         if already:
-            self.ui.add_message(
+            self._notice(
                 "<i>The terminal capability is already attached to this session.</i>")
             note = ("The terminal capability was already attached. Shell, file "
                     "and MCP tools are available; call them directly.")
         else:
-            self.ui.add_message(
+            self._notice(
                 "<i>Terminal capability attached: shell, file and MCP tools are "
                 "available from the next step on.</i>")
             note = ("The terminal capability is attached now. Shell, file, "
