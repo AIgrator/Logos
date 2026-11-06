@@ -12,9 +12,9 @@ from __future__ import annotations
 import html
 import os
 import time
-from pathlib import Path
 from urllib.parse import quote
 
+from src.ui import image_thumbs
 from src.ui.widgets.status_marks import MARK_SIZE, STATUS_STATES
 
 _TEXT_LIMIT = 30000
@@ -27,11 +27,6 @@ _OUTPUT_PREVIEW_CHARS = 3500
 _ARGS_PREVIEW_CHARS = 110
 # The step's live progress line (waiting clock, percent, last output line).
 _PROGRESS_PREVIEW_CHARS = 140
-# A screenshot step shows the picture itself. The width is capped so a tall
-# transcript does not turn into a wall of images; the click still opens the
-# full-size preview.
-_IMAGE_MAX_WIDTH = 520
-_IMAGE_MIN_WIDTH = 120
 
 # Status badges lead a row instead of trailing it. A tick after the title reads
 # like a read receipt; a quiet mark in front of it is a status column, where the
@@ -448,7 +443,7 @@ class ActivityBlockFormatter:
         progress = self._format_progress(row, meta)
         # A screenshot is content, not a detail: the picture stays visible
         # under the step title even while the step itself is folded.
-        image = self._format_image(row, meta)
+        image = self._format_image(row)
         # Job actions stay outside the collapsible body: Stop and Open log
         # must be reachable without expanding the step first.
         actions = self._job_actions(msg, row)
@@ -523,45 +518,31 @@ class ActivityBlockFormatter:
         return (f'<div style="margin: 2px 0 0 14px;">'
                 f'{"".join(part for part in parts if part)}</div>')
 
-    def _format_image(self, row: dict, meta: str) -> str:
+    def _format_image(self, row: dict) -> str:
         """The picture of a screenshot step, not just its file path.
 
-        A screenshot the user asked for is content, so the step shows a
-        thumbnail and the path stays in the detail box below it. The thumbnail
-        is an ``attachment-preview:`` link, which the chat already routes to
-        the full-size preview dialog - a click opens the image, not an editor.
+        A screenshot the user asked for is content, so the step shows the same
+        tile a sent attachment gets: a rounded thumbnail capped at 200 px whose
+        bytes are embedded in the document, so a clock tick that re-renders a
+        running step never reads the file again. The tile is an
+        ``attachment-preview:`` link, which the chat already routes to the
+        full-size preview dialog - a click opens the image, not an editor.
         """
         path = str(row.get("image_path") or "").strip()
-        if not path or not os.path.isfile(path):
+        if not path:
             return ""
-        try:
-            source = Path(path).as_uri()
-        except ValueError:
+        thumb = image_thumbs.thumbnail(path)
+        if thumb is None:
             return ""
+        encoded, width, height = thumb
         name = os.path.basename(path)
         payload = quote(f"{path}|{name}", safe="")
-        caption = html.escape(name)
         return (
-            f'<div style="margin: 6px 0 0 0;">'
+            '<div style="margin: 6px 0 0 0;">'
             f'<a href="attachment-preview:{payload}">'
-            f'<img src="{html.escape(source, quote=True)}" '
-            f'width="{self._image_width()}"></a>'
-            f'<div style="color: {meta}; font-size: 85%;">'
-            f"{caption} &middot; click to enlarge</div></div>"
+            f'<img src="{encoded}" width="{width}" height="{height}"></a>'
+            "</div>"
         )
-
-    def _image_width(self) -> int:
-        """Thumbnail width: the reading column, capped and never tiny."""
-        getter = getattr(self, "available_width", None)
-        available = 0
-        if callable(getter):
-            try:
-                available = int(getter() or 0)
-            except (TypeError, ValueError):
-                available = 0
-        if available > 0:
-            return max(_IMAGE_MIN_WIDTH, min(_IMAGE_MAX_WIDTH, available - 40))
-        return _IMAGE_MAX_WIDTH
 
     def _row_action(self, msg_id, row: dict, action: str) -> str:
         row_id = html.escape(str(row.get("id") or ""), quote=True)

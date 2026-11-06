@@ -2,14 +2,12 @@
 This module is responsible for managing all visual elements of the assistant.
 It is a "dumb" view, controlled by the AppController.
 """
-import base64
-import io
 import logging
 import os
 import sys
 from urllib.parse import quote
 import qtawesome as qta
-from PIL import Image, ImageChops, ImageDraw, ImageOps
+from PIL import Image
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QEasingCurve, QMimeData, QPoint,
                             QPropertyAnimation, QRect, QSize, Qt, Signal, QTimer, Slot)
@@ -31,7 +29,7 @@ from states import ControllerState
 from src.suggestions import normalize_suggestions
 from src.computer.terminal_policy import ACCESS_MODE_LABELS, normalize_mode as normalize_access_mode
 
-from . import editor_launcher, styles
+from . import editor_launcher, image_thumbs, styles
 from .provider_icons import provider_icon
 from .utils import CustomToolTipManager, IconHoverFilter
 from .widgets.attachment_chip import AttachmentChip
@@ -1823,36 +1821,15 @@ class UIManager(QWidget):
         path = resolve_path(record, root)
         if not path or not os.path.isfile(path):
             return ""
-        try:
-            with Image.open(path) as image:
-                image = ImageOps.exif_transpose(image)
-                image.thumbnail((200, 200), Image.Resampling.LANCZOS)
-                image = image.convert("RGBA")
-                width, height = image.size
-                radius = min(10, width // 4, height // 4)
-                if radius > 0:
-                    scale = 4
-                    mask = Image.new(
-                        "L", (width * scale, height * scale), 0)
-                    ImageDraw.Draw(mask).rounded_rectangle(
-                        (0, 0, width * scale - 1, height * scale - 1),
-                        radius=radius * scale, fill=255)
-                    mask = mask.resize(
-                        (width, height), Image.Resampling.LANCZOS)
-                    alpha = ImageChops.multiply(
-                        image.getchannel("A"), mask)
-                    image.putalpha(alpha)
-                buffer = io.BytesIO()
-                image.save(buffer, format="PNG")
-        except Exception as e:
-            logging.warning(f"Could not build attachment preview for {path}: {e}")
+        thumb = image_thumbs.thumbnail(path)
+        if thumb is None:
             return ""
-        encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
+        encoded, width, height = thumb
         payload = quote(f"{os.path.abspath(path)}|{record.get('name') or 'Image'}", safe="")
         return (
             '<p align="right" style="margin: 0 0 10px 0;">'
             f'<a href="attachment-preview:{payload}">'
-            f'<img src="data:image/png;base64,{encoded}" '
+            f'<img src="{encoded}" '
             f'width="{width}" height="{height}"></a></p>'
         )
 

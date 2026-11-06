@@ -360,13 +360,17 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   one `QTextDocument` and cannot nest a scroll area inside a card. A
   screenshot step draws the picture itself
   (`ActivityBlockFormatter._format_image`): the tool result carries
-  `image_path`, the row keeps it (the journal event does too), and a
-  thumbnail sits under the step title, outside the collapsible body, so it is
-  visible without expanding the step. Its width follows the reading column
-  (`available_width`, capped at 520 px), and the picture is an
-  `attachment-preview:` link, so a click opens the existing full-size preview
-  dialog rather than an editor. A pruned file (the newest 200 are kept)
-  renders nothing instead of a broken image. A running
+  `image_path`, the row keeps it (the journal event does too), and a tile
+  sits under the step title, outside the collapsible body, so it is visible
+  without expanding the step. The tile is the same one a sent attachment
+  gets - `src/ui/image_thumbs.py::thumbnail` builds a rounded thumbnail
+  capped at 200 px, embeds its bytes as a `data:` PNG URI and caches the
+  encoding by `(path, mtime)`, because a running step re-renders every second
+  while a file URL would go back to disk (and a screenshot the rotation
+  prunes would leave a hole). The tile is an `attachment-preview:` link, so a
+  click opens the existing full-size preview dialog rather than an editor,
+  and it carries no caption. A missing file renders nothing instead of a
+  broken image. A running
   call reports itself on one grey line inside its own step row
   (`row['progress']`, drawn by `ActivityBlockFormatter._format_progress`,
   clipped to 140 characters): `TerminalHandler._on_tool_progress` writes the
