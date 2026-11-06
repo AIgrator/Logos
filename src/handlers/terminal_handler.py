@@ -1505,15 +1505,22 @@ class TerminalHandler(BaseAgentHandler):
                            "an artifact on disk; switch to a model with image input to see it.")
             note = str(result.get('note') or '')
             hint = str(result.get('hint') or '')
+            restored = bool(result.get('restored_from_minimized'))
+            restored_note = ("The window was minimized, so it has been restored "
+                             "to capture it." if restored else "")
             output_for_llm = f"**Tool Result:** Screenshot saved: {path} ({dims}, {target}). {verdict}"
+            if restored_note:
+                output_for_llm += f"\n{restored_note}"
             if hint:
                 output_for_llm += f"\n{hint}"
-            details = "\n".join(part for part in (path, dims, target, note, hint) if part)
+            details = "\n".join(part for part in (path, dims, target, note,
+                                                  restored_note, hint) if part)
             output_for_ui = {
                 'type': 'collapsible',
                 'title': f"Screenshot · {target}",
                 'content': details,
-                'plain_content': f"Screenshot: {path}\n{dims}\n{target}",
+                'plain_content': "\n".join(part for part in (
+                    f"Screenshot: {path}", dims, target, restored_note) if part),
                 'copy_payloads': {'output': path},
                 'title_color': self._theme("SUCCESS_COLOR" if attached else "WARNING_COLOR"),
             }

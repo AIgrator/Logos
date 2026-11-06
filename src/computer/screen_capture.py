@@ -141,7 +141,12 @@ def _is_cloaked(hwnd) -> bool:
 
 
 def list_windows() -> list[WindowInfo]:
-    """Every visible, titled, non-miniature top-level window."""
+    """Every visible, titled, non-miniature top-level window.
+
+    A minimized window is listed too (with its taskbar rectangle), because the
+    user can ask for a screenshot of it; ``capture_window`` restores it before
+    reading the pixels.
+    """
     if sys.platform != "win32":
         return []
     windows: list[WindowInfo] = []
@@ -162,7 +167,7 @@ def list_windows() -> list[WindowInfo]:
             pid = wintypes.DWORD(0)
             _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
             left, top, width, height = _window_rect(hwnd)
-            if width < 32 or height < 32:
+            if not _user32.IsIconic(hwnd) and (width < 32 or height < 32):
                 return True
             windows.append(WindowInfo(int(hwnd), title, int(pid.value), width, height))
         except Exception:
@@ -295,12 +300,34 @@ def _capture_window_on_screen(window: WindowInfo) -> Image.Image | None:
         return None
 
 
+def is_minimized(window: WindowInfo) -> bool:
+    """True when the window is minimized (its rect is the taskbar sliver)."""
+    if sys.platform != "win32":
+        return False
+    try:
+        return bool(_user32.IsIconic(window.hwnd))
+    except Exception:
+        return False
+
+
 def capture_window(window: WindowInfo) -> tuple[Image.Image, str]:
     """Capture one window; returns the image and the method that produced it."""
     if sys.platform != "win32":
         raise RuntimeError(
             "Window capture is only implemented on Windows. "
             "Grab the screen or a region instead.")
+    if _user32.IsIconic(window.hwnd):
+        # A minimized window reports its taskbar rectangle (-25600, -25600,
+        # 159x27 or so) and PrintWindow happily paints that sliver of caption
+        # buttons, so the caller would get a tiny "screenshot" that passes
+        # every blank check. Restore it first - the screen fallback already
+        # did - and capture the real window.
+        _user32.ShowWindow(window.hwnd, SW_RESTORE)
+        time.sleep(0.35)
+        if _user32.IsIconic(window.hwnd):
+            raise RuntimeError(
+                f"The window '{window.title}' (pid {window.pid}) is minimized "
+                "and could not be restored. Restore it, then ask again.")
     image = _capture_print_window(window.hwnd)
     if image is not None and not _is_blank(image):
         return image, "printwindow"

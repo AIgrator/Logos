@@ -21,12 +21,13 @@ _REGION_KEYS = ("left", "top", "right", "bottom")
             "so you never have to guess how an app, a window or a rendered page looks. "
             "Call it with no arguments for the whole primary display, with window_title "
             "(a case-insensitive part of the title) or process_id for one window, or with "
-            "the four region coordinates for a rectangle. Logos hides itself while a "
-            "screen or region is captured, so its own window does not cover the app; pass "
-            "hide_app=false to include it. The image is attached to your next turn, so look "
-            "at it before deciding what to do next. Use it after launching the app you are "
-            "building, after a UI change to verify the result, or when the user asks how "
-            "something looks."),
+            "the four region coordinates for a rectangle. A minimized window is restored "
+            "first, so the capture is the whole window and not its taskbar sliver. Logos "
+            "hides itself while a screen or region is captured, so its own window does not "
+            "cover the app; pass hide_app=false to include it. The image is attached to your "
+            "next turn, so look at it before deciding what to do next. Use it after launching "
+            "the app you are building, after a UI change to verify the result, or when the "
+            "user asks how something looks."),
         "arguments": {
             "window_title": {
                 "type": "STRING",
@@ -83,6 +84,7 @@ _REGION_KEYS = ("left", "top", "right", "bottom")
                 "target": {"type": "STRING", "description": "What was captured: a window, a region or the screen."},
                 "method": {"type": "STRING", "description": "Capture route: printwindow, screen or region."},
                 "attached": {"type": "BOOLEAN", "description": "True when the image rides along with the next request."},
+                "restored_from_minimized": {"type": "BOOLEAN", "description": "True when the window was minimized and has been restored to capture it."},
                 "note": {"type": "STRING", "description": "Why the image could not be attached, when it was not."},
                 "hint": {"type": "STRING", "description": "Other windows that also matched the title, left untouched."}
             }
@@ -145,6 +147,7 @@ def screenshot(self, window_title: str | None = None, process_id: int | None = N
                 "process_id for the whole screen, or with a shorter part of the title.")
 
     hidden_windows: list = []
+    restored_from_minimized = False
     try:
         if is_region:
             if hide:
@@ -165,8 +168,13 @@ def screenshot(self, window_title: str | None = None, process_id: int | None = N
                     "Action 'screenshot' failed: the matching window belongs to Logos "
                     "itself, and hide_app would hide the very thing being captured. "
                     "Pass hide_app=false to capture Logos, or pick another window.")
+            was_minimized = screen_capture.is_minimized(target_window)
             image, method = screen_capture.capture_window(target_window)
             target = f"window '{target_window.title}' (pid {target_window.pid})"
+            if was_minimized:
+                # capture_window restores a minimized window, so this flag says
+                # the restore really happened.
+                restored_from_minimized = True
         else:
             if hide:
                 hidden_windows = _hide_app()
@@ -206,6 +214,8 @@ def screenshot(self, window_title: str | None = None, process_id: int | None = N
         result["note"] = (
             "The active model cannot receive images, so this PNG is only an artifact "
             "on disk; switch to a model with image input to actually see it.")
+    if restored_from_minimized:
+        result["restored_from_minimized"] = True
     if other_windows:
         result["hint"] = ("Other matching windows were left alone: "
                           + "; ".join(window.title for window in other_windows[:5]))

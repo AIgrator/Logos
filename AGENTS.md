@@ -837,7 +837,14 @@ and bottom-right corners. Window capture is Windows-only: `PrintWindow` with
 `PW_RENDERFULLCONTENT` first (the only way to read a window that other windows
 cover), then a `BitBlt` of the window DC, then bringing the window forward and
 grabbing its rectangle off the screen; a single-color frame counts as a failed
-render. Screen and region grabs go through mss, on every platform, always on
+render. A minimized window is restored before any of that: it reports its
+taskbar rectangle (about 160x30 at -25600,-25600), `PrintWindow` paints that
+sliver of caption buttons and calls it a success, so a capture taken as-is was
+a 199x34 "screenshot" of Notepad++ that told the model nothing. A window that
+cannot be restored (another integrity level) is an error with a hint to
+restore it, and such a minimized window is still listed by `list_windows`, so
+it can be found by title in the first place. Screen and region grabs go through
+mss, on every platform, always on
 the primary monitor for the full-screen case. All coordinates are physical
 pixels - `main.py` asks for Per-Monitor V2 DPI awareness before `QApplication`
 exists, so the tool, mss and the Qt window share one space. A partial region (1
@@ -847,7 +854,11 @@ to 3 coordinates) is an error, not a guess, and so is `right <= left` or
 The PNG is saved to `<project>/.logos/screenshots/screenshot_<timestamp>.png`
 (the app's `APP_SCREENSHOTS_DIR` when no project is open) and the result carries
 `path`, `relative_path`, `width`, `height`, `bytes`, `target`, `method`
-(`printwindow` / `screen` / `region`) and `attached`. The newest 200 files are
+(`printwindow` / `screen` / `region`), `attached` and, for a window that had
+been minimized, `restored_from_minimized`. `TerminalHandler` turns that flag
+into one line in both the model-facing result and the step detail ("The window
+was minimized, so it has been restored to capture it"), so the model knows why
+the window appeared and the journal keeps the explanation. The newest 200 files are
 kept, older ones are pruned like `mcp_outputs`. For screen and region captures
 the tool hides Logos' own `QMainWindow`s through
 `QMetaObject.invokeMethod(..., BlockingQueuedConnection)`, waits for the
