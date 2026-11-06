@@ -425,6 +425,57 @@ person can observe, not an internal detail.
 12. **Vision is fenced.** Vision cannot be attached with a non-CUA model, and no
     model switch happens silently.
 
+> **Verification (2026-11-06, branch `feature/one-session-capabilities`).**
+> Phases 0-4 are in the tree. Checked against the code and the journals of the
+> `test` project:
+>
+> - **One journal, self-attach (2, 4) - proven by real runs.**
+>   `session-20261105-160414-26bcb9` holds capabilities
+>   `base+terminal+browser` with two `execute_shell` steps and a browser step in
+>   one timeline (its first `open_browser` was denied, then succeeded);
+>   `session-20261105-170804-a755b2` has two shell and four browser steps;
+>   `session-20261105-160840-6cdb92` carries all five capabilities
+>   (`base+terminal+browser+vision+chat`) in one header.
+> - **No switcher (3).** No mode selector is left in `src/ui`.
+> - **One Chromium (6).** `BrowserManager` is constructed in exactly one place,
+>   `BrowserService.dispatch`, lazily on the first browser call.
+> - **Restart fidelity (8).** `_restore_agent_history` rebuilds the model-facing
+>   history from the journal, browser calls with their arguments and results
+>   included, so the last URL stays in context; opening a session does not
+>   launch Chromium.
+> - **Old sessions (9).** `capabilities.grants_from_header` maps `mode` when the
+>   header carries no `capabilities`, and `update_session_grants` writes the
+>   field on the next append.
+> - **Approvals (10).** Unchanged: terminal access mode, `classify_action`,
+>   `browser_eval`'s `page_javascript` check, MCP trust, path guards.
+> - **Prompt stability (11).** `ensure_session_profile` is signature-checked, so
+>   the block changes on a grant change - or on a promoted catalog tool, which
+>   is the second case Phase 3 documents - and not per message.
+> - **Vision fenced (12).** `_vision_availability_error` refuses a non-CUA model;
+>   the capability default model switch is announced, never silent.
+>
+> Confirmed in substance, not literally: **1** and **5** (the app has one loop
+> and mixed journals exist, but no stored journal shows a full
+> console-error -> edit -> restart -> re-check cycle; that is the acceptance
+> scenario, not a code gap).
+>
+> **Not met as written: 7 (clean stop).** Stop cancels the reply; the dev server
+> and Chromium survive until project switch or application exit, which is the
+> decision open question 4 records. The browser path of `handle_cancel_request`
+> still calls `TerminalHandler._cleanup_task`, which runs
+> `shell_jobs.kill_all()`, so a Stop in the Browser panel kills a Terminal job
+> while a Stop in the Terminal panel does not - one asymmetry to decide on
+> before this line means anything.
+>
+> Two plan paragraphs are superseded rather than broken. **Prompts**: the build
+> still picks one presentation's prompt (`Brain.get_terminal_prompts` /
+> `get_browser_prompts`) and only the tool block follows the grants, so the
+> "base + Terminal section + Browser section" concatenation was not built (the
+> Phase 1 status note describes the shipped approach). **Grounding**: of
+> "native / dom / local", native and DOM are implemented, while `local` is a
+> placeholder setting with no recognizer behind it - the torch/OCR stack was
+> dropped deliberately, and `system_architecture.md` says so.
+
 ## What stays from the previous vision
 
 The grounding split (`native` / `dom` / `local`), the thin client, project-scoped
@@ -464,3 +515,78 @@ part that said "one session runs one mode".
 5. **Vision placement.** A separate panel, or a toggle inside Terminal once a CUA
    model is selected? Recommendation: separate panel, because it changes the
    provider toolset.
+
+## Backlog: browser tool surface (2026-11-06)
+
+> Status: proposed, not started. Compared against the in-app browser tools of
+> OpenCode desktop. That tool list is used as a checklist only: their Review
+> pane, tab focus model and RPC file transfer are consequences of their
+> architecture (the browser lives in the desktop app, the agent is a server), and
+> porting or forking OpenCode stays a non-goal.
+
+### Already covered
+
+Our browser capability has 19 tools: `goto`, `snapshot` (walks every frame),
+`click` (ref or viewport coordinates), `fill`, `press`, `select_option`,
+`hover`, `tabs` (list/new/select/close), `navigate_back`, `wait_for` (time /
+text / text gone), `handle_dialog`, `find`, `screenshot`, `read`, `console`,
+`network`, `frames`, `eval`, `close`. These already match the bulk of the
+OpenCode list, and in three places we are ahead: console and network keep a
+bounded ring **plus** a session log file, so a noisy SPA does not flood the
+context; coordinate clicks reach canvas and widgets that have no ref; a
+snapshot covers cross-origin frames instead of requiring a frame id per call.
+
+### Not applicable
+
+`preview` and `files.get`/`files.upload` exist there because the agent process
+and the desktop app do not share a filesystem, and tabs live in the app's Review
+pane. Here the browser is in-process, images already render as transcript
+tiles, and files open in the editor. Nothing to adopt.
+
+### Candidates
+
+Cost is for this repository: **S** 1-2 h, **M** about half a day, **L** 2-4 days,
+each including prompt text, journal/replay and a test.
+
+| Candidate | Why | Exposure | Cost |
+|---|---|---|---|
+| `screenshot` with `full_page` and `ref` | today only the viewport; checking a whole page or one section after an edit means scrolling | arguments of the existing tool, no new name | S |
+| `reload`, `navigate_forward` | after `write_file` the dev server serves new code, but `goto` the same URL loses POST state and scroll; only `back` exists | catalog | S each |
+| `scroll` (dx/dy) | virtualized lists and lazy images: a snapshot sees the DOM but does not trigger loading | catalog | S |
+| `check` / `uncheck` by ref | a custom checkbox can toggle twice; setting the state is deterministic | catalog | S |
+| `eval` on an element ref | removes selector guessing inside the script | argument of `browser_eval` | S |
+| `set_files` on `<input type=file>` | the agent cannot test an upload UI today, only describe it | catalog | M |
+| downloads: list + save | a download now disappears; "fetch the report and read it" is a normal task | catalog | M |
+| response bodies (XHR/fetch, bounded) | a 200 with an empty screen is the typical SPA failure; status alone does not explain it | catalog | M |
+| `drag` ref -> ref | kanban, sorting, range sliders; HTML5 drag needs care | catalog | M |
+| `fill_form` (batch) | only saves tokens on long forms; batches already cover the step count | catalog | S |
+| CPU profile / performance trace via CDP | only for performance work; the hard part is summarizing the raw profile, not collecting it | catalog | L each |
+| heap compare / Lighthouse | heap needs an interactive UI to be actionable; Lighthouse pulls a Node package for a rare audit | - | not planned |
+
+### Proposed slices
+
+1. **See and act** (about 1.5-2 days): screenshot arguments, reload, forward,
+   scroll, check, `set_files`. Closes "cannot see the whole page", "cannot see
+   the new code", "cannot test an upload".
+2. **Diagnose** (about 1.5 days): downloads, bounded response bodies, drag.
+   Turns the browser from "look at a page" into "find out why it broke".
+3. **Only on request**: CPU profile and trace, behind the catalog, when a real
+   performance task appears.
+
+### Constraints
+
+- New names go to `CATALOG_TOOLS` (`src/computer/capabilities.py`) so they cost
+  nothing in the prompt until `search_tools` loads them; anything expressible as
+  an argument (`full_page`, `ref`) must not become a new name.
+- Every new tool also needs a `BrowserManager` method, a `@tool_meta` entry in
+  `src/computer/tools/browser/actions.py`, a `classify_action` branch in
+  `src/browser/policy.py`, journal/replay handling and a test - that is most of
+  the cost above.
+- Response bodies must be bounded and limited to documents/XHR, stored in
+  `src/browser/logs.py` beside the existing rings, or a large response hangs the
+  step.
+- Observed in `session-20261105-170804-a755b2`: the first `open_browser` after a
+  cold launch timed out after 30 s (`navigating ... waiting until "commit"`) and
+  an immediate retry worked. Worth one retry on the first navigation, or a
+  launch-aware budget, rather than a tool error the model has to interpret.
+
