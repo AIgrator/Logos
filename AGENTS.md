@@ -260,7 +260,9 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   The launch step row keeps the same
   clock: `_show_activity_result` records `job_started_at` / `job_finished_at`
   and `ActivityBlockFormatter._step_duration` measures the job, not the
-  half-second step, so the transcript does not freeze at `0s`. Only a
+  half-second step, so the transcript does not freeze at `0s`. A duration
+  under a second is omitted entirely (`_duration_text`) instead of printing
+  `· 0s`, so a quick call carries no clock at all. Only a
   launching `execute_shell` gets that handle (`live_job_id`): a poll or stop
   snapshot reports `status: running` for the job it describes, but its row is
   a static `ok` row - treating it as the handle left a poll row ticking for

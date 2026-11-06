@@ -477,7 +477,7 @@ class ActivityBlockFormatter:
                 started = float(row["job_started_at"])
                 finished = row.get("job_finished_at")
                 end = now if finished is None else float(finished)
-                return format_duration(max(0.0, end - started))
+                return self._duration_text(end - started)
             except (TypeError, ValueError):
                 pass
         started = row.get("started_at")
@@ -486,9 +486,19 @@ class ActivityBlockFormatter:
         finished = row.get("finished_at")
         end = finished if finished is not None else now
         try:
-            return format_duration(end - float(started))
+            return self._duration_text(end - float(started))
         except (TypeError, ValueError):
             return ""
+
+    @staticmethod
+    def _duration_text(seconds: float) -> str:
+        """Hides a sub-second duration instead of printing `0s`.
+
+        A quick call would otherwise wear `· 0s` in its title row, which reads
+        like noise next to a real clock and says nothing about the step.
+        """
+        elapsed = max(0.0, seconds)
+        return format_duration(elapsed) if elapsed >= 1.0 else ""
 
     def _format_step_detail(self, msg: dict, row: dict, meta: str) -> str:
         parts = [
