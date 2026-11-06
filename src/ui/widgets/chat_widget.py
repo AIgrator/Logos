@@ -219,6 +219,14 @@ class ChatWidget(QAbstractScrollArea):
     # pixel value silently fails at 125%/150% scaling).
     MAX_CONTENT_WIDTH_WIDE = 960
     WIDE_CONTENT_SCREEN_RATIO = 0.9
+    # Symmetric air between the capped column and whatever sits beside it (the
+    # project sidebar on the left, the workspace panel on the right). The cap
+    # alone is not enough: with both panels open the leftover space can be a
+    # couple of dozen pixels, which reads as text glued to the panel edge.
+    CONTENT_GUTTER = 40
+    # Below this the column stops shrinking and the gutter gives way instead,
+    # so a narrow window keeps a readable line length.
+    MIN_CONTENT_WIDTH = 560
 
     @classmethod
     def content_max_width(cls, window_width: int, screen_width=None) -> int:
@@ -230,6 +238,25 @@ class ChatWidget(QAbstractScrollArea):
         if screen_width > 0 and window_width >= int(screen_width * cls.WIDE_CONTENT_SCREEN_RATIO):
             return cls.MAX_CONTENT_WIDTH_WIDE
         return cls.MAX_CONTENT_WIDTH
+
+    @classmethod
+    def fit_content_width(cls, cap: int, available: int) -> int:
+        """Narrow ``cap`` so the column keeps a gutter inside ``available``.
+
+        The tier above is only a ceiling. When the workspace is hardly wider
+        than the ceiling (both side panels open), that ceiling leaves almost no
+        air beside the text, so the column gives up ``CONTENT_GUTTER`` on each
+        side instead. The gutter thins out below ``MIN_CONTENT_WIDTH`` and
+        disappears entirely on a narrow workspace, where the text keeps the
+        full width as before. ``available <= 0`` means the layout has not run
+        yet, so the plain ceiling is returned.
+        """
+        if available <= 0:
+            return cap
+        if available <= cls.MIN_CONTENT_WIDTH:
+            return available
+        fitted = available - 2 * cls.CONTENT_GUTTER
+        return min(cap, max(cls.MIN_CONTENT_WIDTH, fitted))
 
     def __init__(self, theme_manager, parent=None):
         super().__init__(parent)

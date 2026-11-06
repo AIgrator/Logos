@@ -66,6 +66,21 @@ its footer keeps only Home, New session and Settings. The session context menu
 (shared by the sidebar and the home screen) carries Rename, Show journal, Show in
 Explorer and Delete Session; Show journal opens the raw event journal of that
 session, whether or not it is the open one.
+Chat text and the composer live in one centered column (`ChatWidget`):
+`MAX_CONTENT_WIDTH` 800, or 960 once the window is maximised or at least
+`WIDE_CONTENT_SCREEN_RATIO` (0.9) of its screen's width. That number is a
+ceiling, not the width: `ChatWidget.fit_content_width` fits it to the real
+workspace width with `CONTENT_GUTTER` (40 logical px) on each side, so opening
+the project sidebar together with the workspace panel narrows the text instead
+of pushing it against their edges; the gutter thins out below
+`MIN_CONTENT_WIDTH` (560) and a narrower workspace keeps the full width as
+before. `UIManager._content_max_width` is the single source for both the
+transcript geometry and the capped `bottom_center_column`, so text and composer
+keep the same edges, its tier is measured against the window while the fit is
+measured against `workspace_column`, and a `Resize` of that column schedules the
+toolbar reflow because collapsing a panel changes the width without resizing
+the window. The same column width decides the one-row/two-row toolbar split, so
+a narrow workspace wraps the controls instead of clipping them.
 The full-mode window frame (`window_geometry`) and the sidebar's collapsed state
 (`sidebar_collapsed`) are saved to `settings.json` on close and restored on the
 next launch; layout margins are not persisted. The right workspace panel

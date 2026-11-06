@@ -383,6 +383,10 @@ class UIManager(QWidget):
         self.workspace_column_layout = QVBoxLayout(self.workspace_column)
         self.workspace_column_layout.setContentsMargins(0, 0, 0, 0)
         self.workspace_column_layout.setSpacing(0)
+        # Collapsing a panel or hiding it changes the width of this column
+        # without resizing the window, and the column cap follows that width:
+        # reflow the composer whenever the column itself changes size.
+        self.workspace_column.installEventFilter(self)
         self.workspace_layout.addWidget(self.workspace_column, 1)
         self.right_panel = RightPanel(self.controller.theme_manager)
         self.right_panel.attachment_open_requested.connect(
@@ -1287,7 +1291,15 @@ class UIManager(QWidget):
         menu.exec(QCursor.pos())
 
     def eventFilter(self, obj, event):
-        if (obj is self.model_effort_badge
+        if (obj is getattr(self, "workspace_column", None)
+                and event.type() == QEvent.Type.Resize):
+            # The text column and the composer share one cap derived from the
+            # workspace width, so a panel collapsing or appearing (no window
+            # resize involved) must refresh that cap too.
+            self._schedule_toolbar_reflow()
+            return super().eventFilter(obj, event)
+        badge = getattr(self, "model_effort_badge", None)
+        if (badge is not None and obj is badge
                 and event.type() == QEvent.Type.MouseButtonRelease
                 and event.button() == Qt.MouseButton.LeftButton):
             self._show_effort_badge_menu()
@@ -1462,6 +1474,22 @@ class UIManager(QWidget):
         total += margins.left() + margins.right()
         return total + 8  # small buffer so the last widget is never clipped
 
+    def _workspace_available_width(self) -> int:
+        """Width the chat/input column really has, in logical px.
+
+        Zero before the first layout pass, while the workspace column still has
+        no geometry; callers treat that as "use the plain ceiling".
+        """
+        column = getattr(self, "workspace_column", None)
+        layout = getattr(self, "workspace_column_layout", None)
+        if column is None or layout is None:
+            return 0
+        width = column.width()
+        if width <= 0:
+            return 0
+        margins = layout.contentsMargins()
+        return max(0, width - margins.left() - margins.right())
+
     def _content_max_width(self) -> int:
         """Cap of the centered content column, in logical (DPI-independent) px.
 
@@ -1469,20 +1497,27 @@ class UIManager(QWidget):
         screen — maximised/full-screen, or at least WIDE_CONTENT_SCREEN_RATIO of
         the screen's available width. Using a *fraction* of the screen (not a
         fixed pixel number) keeps it correct under any display scaling.
+
+        The tier is a ceiling, not the answer: the column also has to leave a
+        gutter between itself and the side panels, so opening the project
+        sidebar and the workspace panel narrows the text instead of pushing it
+        against their edges.
         """
+        cap = ChatWidget.MAX_CONTENT_WIDTH
         win = self.main_window
         try:
             if win.isFullScreen() or win.isMaximized():
-                return ChatWidget.MAX_CONTENT_WIDTH_WIDE
-            screen = win.screen()
-            if screen is not None:
-                avail = screen.availableGeometry().width()
-                if avail > 0 and win.width() >= int(
-                        avail * ChatWidget.WIDE_CONTENT_SCREEN_RATIO):
-                    return ChatWidget.MAX_CONTENT_WIDTH_WIDE
+                cap = ChatWidget.MAX_CONTENT_WIDTH_WIDE
+            else:
+                screen = win.screen()
+                if screen is not None:
+                    avail = screen.availableGeometry().width()
+                    if avail > 0 and win.width() >= int(
+                            avail * ChatWidget.WIDE_CONTENT_SCREEN_RATIO):
+                        cap = ChatWidget.MAX_CONTENT_WIDTH_WIDE
         except Exception:
             pass
-        return ChatWidget.MAX_CONTENT_WIDTH
+        return ChatWidget.fit_content_width(cap, self._workspace_available_width())
 
     def _schedule_toolbar_reflow(self):
         """Defer a toolbar reflow to the next event-loop tick.
@@ -1507,13 +1542,20 @@ class UIManager(QWidget):
         if not hasattr(self, "pause_task_button"):
             return
         margins = self.layout.contentsMargins()
-        available = self.main_window.width() - margins.left() - margins.right()
+        window_available = (self.main_window.width() - margins.left()
+                            - margins.right())
         # Two-tier cap for the centered bottom block: 960px on a maximised/very
-        # wide window, 800px otherwise (matches the chat text column). Only a
-        # maximum is set, so the window can still shrink freely.
+        # wide window, 800px otherwise (matches the chat text column), fitted to
+        # the workspace so the block keeps a gutter beside the side panels. Only
+        # a maximum is set, so the window can still shrink freely.
+        cap = self._content_max_width()
         column = getattr(self, "bottom_center_column", None)
         if column is not None:
-            column.setMaximumWidth(self._content_max_width())
+            column.setMaximumWidth(cap)
+        # The row split is decided for the width the toolbar really gets. With
+        # both side panels open that column is much narrower than the window,
+        # and measuring the window kept everything on one row that then clipped.
+        available = min(window_available, cap) if cap > 0 else window_available
         single = available >= self._preferred_single_row_width()
         if single == self._toolbar_single_row:
             return
