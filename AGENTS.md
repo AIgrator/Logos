@@ -236,14 +236,28 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   A background shell job outlives the step that launched it, so it also gets a
   pinned strip above the composer (`src/ui/widgets/job_panel.py::JobPanel`,
   mounted first in `UIManager.bottom_center_column`, opposite the live plan):
-  one compact row per live job with a status dot, the command, a 1 s clock and
-  `Stop` / `Open log`, and a hover card (`_JobPopover`) that reads the last
-  lines of the job log and shows the folder, state and readiness URL. The
-  handler pins the job in `_on_tool_finished` (`_track_job_panel`, with the
+  no job hides it, one job is a full row (status dot, the command, a 1 s clock
+  and `Stop` / `Open log`, plus a hover card `_JobPopover` that reads the last
+  lines of the job log and shows the folder, state and readiness URL), and two
+  or more fold into one capsule (`2 jobs · npm run dev, http.server 8000 ▾`)
+  in the same chrome as the plan pill, so the composer never grows a line per
+  background process. Clicking the capsule opens `_JobListPopover` (a
+  `Qt.Popup` above it, clamped to the screen) with one `_JobListRow` per job:
+  state dot, `job #N · command`, the time, `Stop` and `Open log`; a job that
+  ends while that list is open is held in `JobPanel._held` until the list
+  closes, so the outcome of a Stop does not vanish under the cursor, and the
+  held rows show grey with no Stop link and a frozen time. The dock runs its
+  clock only for a single row or an open list, because the capsule is static
+  text; `_sync` is re-entrancy-guarded (`_syncing` / `_sync_pending`) and
+  `_in_hide` keeps `hideEvent` from re-showing the panel through its own
+  `_on_list_closed`, which is the trap a `Qt.Popup` closing on `hide()` sets.
+  The handler pins the job in `_on_tool_finished` (`_track_job_panel`, with the
   clock backdated through `shell_jobs.status(...).elapsed_seconds`, because a
   readiness probe can spend half a minute before the launch returns) and drops
   it in `_apply_job_ui`, which every finish path (event, wait tick, stop)
-  reaches; a poll updates the state text. The launch step row keeps the same
+  reaches; a poll updates the state text. The dock reuses the launch step's
+  `job_started_at` as its own start, so the two clocks show the same number.
+  The launch step row keeps the same
   clock: `_show_activity_result` records `job_started_at` / `job_finished_at`
   and `ActivityBlockFormatter._step_duration` measures the job, not the
   half-second step, so the transcript does not freeze at `0s`. Only a
