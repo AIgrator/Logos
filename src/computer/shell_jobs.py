@@ -1146,6 +1146,50 @@ class ShellJobManager:
             total_out = job.stdout_parts.total_chars
         return new_out, new_err, total_out
 
+    def tail_lines(self, job_id: int, lines: int = 8) -> list:
+        """Last ``lines`` output lines of a job (stdout, then any stderr)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return []
+        try:
+            with job.lock:
+                chunk = list(job.stdout_parts) + list(job.stderr_parts)
+        except Exception:
+            return []
+        if lines and lines > 0:
+            chunk = chunk[-lines:]
+        return [str(line).rstrip("\r\n") for line in chunk]
+
+    def read_since(self, job_id: int, offset: int = 0) -> dict:
+        """What a job printed after ``offset``, for the live output panel.
+
+        The panel keeps its own offset and appends what is new, so watching a
+        command never rewrites the lines the user scrolled back to read.
+        """
+        with self._lock:
+            job = self._jobs.get(job_id)
+        if job is None:
+            return {"job_id": job_id, "status": "not_found"}
+        try:
+            with job.lock:
+                text, new_offset = job.stdout_parts.read_since(int(offset or 0))
+        except Exception:
+            text, new_offset = "", int(offset or 0)
+        running = not job.done.is_set()
+        return {
+            "job_id": job.job_id,
+            "command": job.command,
+            "status": "running" if running else "done",
+            "running": running,
+            "state": (_running_job_state(job) if running
+                      else job_state_from_result(job.result)),
+            "elapsed_seconds": round(time.monotonic() - job.started, 1),
+            "text": text,
+            "offset": new_offset,
+            "log_path": job.log_path,
+        }
+
     def status(self, job_id: int) -> dict:
         """Lightweight state check: no output consumed, job kept."""
         with self._lock:

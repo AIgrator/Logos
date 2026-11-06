@@ -10,9 +10,9 @@ import qtawesome as qta
 from PIL import Image
 from PIL.ImageQt import ImageQt
 from PySide6.QtCore import (QBuffer, QEvent, QIODevice, QEasingCurve, QMimeData, QPoint,
-                            QPropertyAnimation, QRect, QSize, Qt, Signal, QTimer, Slot)
-from PySide6.QtGui import (QColor, QCursor, QIcon, QImage, QKeySequence, QPainter,
-                           QPen, QPixmap, QShortcut, QTextCursor, QTextDocument,
+                            QPropertyAnimation, QRect, QSize, Qt, Signal, QTimer, QUrl, Slot)
+from PySide6.QtGui import (QColor, QCursor, QDesktopServices, QIcon, QImage, QKeySequence,
+                           QPainter, QPen, QPixmap, QShortcut, QTextCursor, QTextDocument,
                            QTextOption)
 from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMainWindow,
                                QMessageBox, QMenu, QPushButton, QSizeGrip,
@@ -40,6 +40,7 @@ from .widgets.chat_widget import ChatWidget
 from .widgets.model_switch_popup import ModelSwitchPopup, build_effort_menu
 from .widgets.plan_panel import PlanPanel
 from .widgets.job_panel import JobPanel
+from .widgets.live_output_panel import LiveOutputPanel
 from .widgets.terminal_access_popup import TerminalAccessPopup
 from .widgets.custom_title_bar import CustomTitleBar
 from .widgets.flow_layout import FlowLayout
@@ -635,6 +636,16 @@ class UIManager(QWidget):
                                  self.bottom_center_column)
         self.job_panel.job_stop_requested.connect(self.job_stop_requested.emit)
         self.bottom_center_layout.addWidget(self.job_panel)
+        # A running command prints into its own strip: the transcript can hold
+        # only one grey progress line (one QTextDocument, no scroll area), so
+        # watching a long command used to mean opening its log in Notepad.
+        self.live_output_panel = LiveOutputPanel(self.controller.theme_manager,
+                                                 self.bottom_center_column)
+        self.live_output_panel.stop_requested.connect(self._on_stop_clicked)
+        self.live_output_panel.job_stop_requested.connect(
+            self.job_stop_requested.emit)
+        self.live_output_panel.open_log_requested.connect(self._open_live_output_log)
+        self.bottom_center_layout.insertWidget(0, self.live_output_panel)
         # The live plan belongs to the composer, not the transcript: it sits
         # directly above the input while a turn runs and vanishes with it.
         self.plan_panel = PlanPanel(self.controller.theme_manager,
@@ -1752,6 +1763,7 @@ class UIManager(QWidget):
     def clear_chat(self):
         self.plan_panel.clear_plan()
         self.job_panel.clear()
+        self.live_output_panel.clear()
         self.chat_widget.clear_messages()
 
     def set_assistant_name(self, name: str):
@@ -2022,6 +2034,40 @@ class UIManager(QWidget):
     def clear_jobs(self) -> None:
         self.job_panel.clear()
 
+    # --- Live output of the running shell command -------------------------
+
+    def show_live_output(self, job_id, command: str, log_path: str = "") -> None:
+        """Opens the output strip for the command the turn is running."""
+        if self.is_compact:
+            return
+        self.live_output_panel.start(job_id, command, log_path)
+
+    def append_live_output(self, text: str = "", elapsed=None,
+                           state: str = "") -> None:
+        self.live_output_panel.feed(text, elapsed=elapsed, state=state)
+
+    def finish_live_output(self, state: str = "done") -> None:
+        """Freezes the strip on the last output (the turn may still be going)."""
+        self.live_output_panel.finish(state)
+
+    def set_live_output_detached(self, detached: bool = True) -> None:
+        """The watched command left its step and became a background job."""
+        self.live_output_panel.set_detached(detached)
+
+    def hide_live_output(self) -> None:
+        self.live_output_panel.hide_output()
+
+    def clear_live_output(self) -> None:
+        self.live_output_panel.clear()
+
+    def _open_live_output_log(self, path: str) -> None:
+        if not path:
+            return
+        try:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path)))
+        except Exception as e:
+            logging.warning(f"Could not open the job log: {e}")
+
     def activity_add_step(self, msg, title: str, args: str = "",
                           detail_html: str | None = None, name: str = ""):
         return self.chat_widget.activity_add_step(
@@ -2239,6 +2285,7 @@ class UIManager(QWidget):
         self.attachment_scroll_area.setVisible(False)
         self.plan_panel.set_suppressed(True)
         self.job_panel.set_suppressed(True)
+        self.live_output_panel.set_suppressed(True)
         self.input_container.setVisible(False)
         self.mode_model_container.setVisible(False)
         self.bottom_toolbar_container.setVisible(False)
@@ -2312,6 +2359,7 @@ class UIManager(QWidget):
         self.layout.setContentsMargins(left_margin, 11, 11, 11)
         self.plan_panel.set_suppressed(False)
         self.job_panel.set_suppressed(False)
+        self.live_output_panel.set_suppressed(False)
         self.input_container.setVisible(True)
         self.bottom_toolbar_container.setVisible(True)
         self._toolbar_single_row = None  # force single/two-row re-evaluation

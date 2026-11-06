@@ -308,6 +308,17 @@ class TerminalHandler(BaseAgentHandler):
         self._awaiting_job_id = None
         self._job_wait_rounds = 0
 
+        # The live output strip above the composer follows the shell command
+        # the turn is running: progress ticks stream it while the command is
+        # foreground, and the timer keeps it streaming after an auto-detach
+        # (the command outlives the step, and watching it is the point).
+        self._live_output_job_id = None
+        self._live_output_offset = 0
+        self._live_output_shown_job = None
+        self._live_output_timer = QTimer()
+        self._live_output_timer.setInterval(700)
+        self._live_output_timer.timeout.connect(self._pump_live_output)
+
         # Connect to theme changes to update the formatter
         self.theme_manager.theme_changed.connect(self._on_theme_changed)
 
@@ -374,6 +385,7 @@ class TerminalHandler(BaseAgentHandler):
     def start_task(self, user_text: str, attachment_context: str | None = None):
         """A fresh task never inherits captures of an abandoned one."""
         if self.state == VisionState.IDLE:
+            self._stop_live_output()
             clear = getattr(self.computer, "clear_pending_screenshots", None)
             if callable(clear):
                 clear()
@@ -1581,10 +1593,150 @@ class TerminalHandler(BaseAgentHandler):
             pass
         return ""
 
+    # -- live output strip ---------------------------------------------------
+
+    def _live_manager(self):
+        return getattr(getattr(self, "computer", None), "shell_jobs", None)
+
+    def _follow_live_output(self, job_id) -> None:
+        """Opens the strip for a job (or keeps it) and streams what it printed."""
+        try:
+            job_id = int(job_id)
+        except (TypeError, ValueError):
+            return
+        if job_id != self._live_output_job_id:
+            self._live_output_job_id = job_id
+            self._live_output_offset = 0
+        self._pump_live_output()
+        if self._live_output_job_id is not None:
+            if not self._live_output_timer.isActive():
+                self._live_output_timer.start()
+
+    def _pump_live_output(self) -> None:
+        """Appends what the followed job printed since the last read.
+
+        The transcript can hold one grey progress line (a single
+        ``QTextDocument`` cannot nest a scroll area), so a long command used
+        to mean opening its log in Notepad to see what it was doing. Reading
+        by offset appends only new lines, so scrolling back never fights the
+        stream.
+        """
+        manager = self._live_manager()
+        job_id = self._live_output_job_id
+        if manager is None or job_id is None:
+            self._stop_live_output()
+            return
+        try:
+            chunk = manager.read_since(int(job_id), self._live_output_offset)
+        except Exception as e:
+            logging.warning(f"Live output read failed for job #{job_id}: {e}")
+            self._stop_live_output()
+            return
+        if chunk.get("status") == "not_found":
+            # A foreground command that finished inside its wait window is
+            # reaped together with its result: the strip already streamed
+            # everything the progress ticks delivered.
+            self._finish_live_output("done")
+            return
+        self._live_output_offset = int(
+            chunk.get("offset") or self._live_output_offset)
+        append = getattr(self.ui, "append_live_output", None)
+        show = getattr(self.ui, "show_live_output", None)
+        if job_id != self._live_output_shown_job and callable(show):
+            # First read of this job: the strip is not open yet. It is shown
+            # with the command line and the log path of the job itself, and
+            # remembered so a hidden strip is not reopened on every tick.
+            self._live_output_shown_job = job_id
+            show(job_id, str(chunk.get("command") or ""),
+                 str(chunk.get("log_path") or ""))
+        running = bool(chunk.get("running"))
+        if callable(append):
+            append(str(chunk.get("text") or ""),
+                   elapsed=chunk.get("elapsed_seconds"),
+                   state="running" if running else str(chunk.get("state") or "done"))
+        if not running:
+            # The job is done: the strip keeps the outcome, nothing to follow.
+            self._stop_live_output_timer()
+
+    @staticmethod
+    def _result_job_state(result) -> str:
+        """The strip's state for a finished shell result."""
+        if not isinstance(result, dict):
+            return "done"
+        try:
+            exit_code = int(result.get("exit_code"))
+        except (TypeError, ValueError):
+            exit_code = 0
+        if result.get("cancelled") or exit_code == -2:
+            return "stopped"
+        if result.get("timed_out") or result.get("inactivity_timeout"):
+            return "failed"
+        return "done" if exit_code == 0 else "failed"
+
+    def _settle_live_output(self, action_name, result, live_job_id) -> None:
+        """Finishes (or keeps following) the strip when its call returns."""
+        if action_name != 'execute_shell' or self._live_output_job_id is None:
+            return
+        self._pump_live_output()
+        if live_job_id is not None:
+            # The command outlived its step: it is a background job now, but it
+            # is the very command the user is watching, so the strip keeps
+            # streaming it and its Stop targets the job instead of the turn.
+            set_detached = getattr(self.ui, "set_live_output_detached", None)
+            if callable(set_detached):
+                try:
+                    set_detached(True)
+                except Exception as e:
+                    logging.warning(f"Live output detach flag failed: {e}")
+            self._follow_live_output(live_job_id)
+            return
+        self._finish_live_output(self._result_job_state(result))
+
+    def _finish_live_output(self, state: str) -> None:
+        """Freezes the strip on the last output and stops following the job."""
+        self._stop_live_output_timer()
+        finish = getattr(self.ui, "finish_live_output", None)
+        if callable(finish):
+            try:
+                finish(state)
+            except Exception as e:
+                logging.warning(f"Live output finish failed: {e}")
+
+    def _stop_live_output_timer(self) -> None:
+        try:
+            self._live_output_timer.stop()
+        except Exception:
+            pass
+
+    def _stop_live_output(self) -> None:
+        """Drops the strip with the turn that owned it (Stop, or a new task)."""
+        self._stop_live_output_timer()
+        self._live_output_job_id = None
+        self._live_output_offset = 0
+        self._live_output_shown_job = None
+        hide = getattr(self.ui, "hide_live_output", None)
+        if callable(hide):
+            try:
+                hide()
+            except Exception:
+                pass
+
     @Slot(int, float, str)
     def _on_tool_progress(self, ticket: int, elapsed: float, last_line: str):
         if ticket != self._exec_ticket:
             return
+        # Feed the strip before any early return below: a tick whose line did
+        # not change still means the command printed new output.
+        try:
+            manager = self._live_manager()
+            job_id = manager.foreground_job_id() if manager is not None else None
+            # A command that ends in a blink needs no viewer: its step row
+            # already carries the output. Only a command worth watching opens
+            # the strip, so a quick `dir` cannot flash a box above the composer.
+            if job_id is not None and float(elapsed or 0) >= 1.0:
+                self._follow_live_output(job_id)
+        except Exception as e:
+            logging.warning(f"Live output feed failed: {e}")
         line, percent, tail = self._progress_line(elapsed, last_line)
         # The progress belongs to the running step: one grey line under its
         # title. It used to be a second live card carrying the same clock and
@@ -1714,6 +1866,7 @@ class TerminalHandler(BaseAgentHandler):
         # live kept its clock ticking after the turn ended and blocked the
         # block's auto-fold (the 4m49s poll row on a stopped server).
         live_job_id = job_id if self._pending_action_name == 'execute_shell' else None
+        self._settle_live_output(self._pending_action_name, result, live_job_id)
         title, _detail, plain, log_path, image_path = self._ui_result_fields(
             output_for_ui)
         self.record_tool_result(
@@ -1900,6 +2053,14 @@ class TerminalHandler(BaseAgentHandler):
             job_id = int(event.get('job_id'))
         except (TypeError, ValueError):
             return
+        if job_id == self._live_output_job_id:
+            # The strip is watching this very job: read its last lines and
+            # freeze it on the outcome before the tool result lands.
+            self._pump_live_output()
+            if self._live_output_job_id == job_id:
+                state = ('stopped' if event.get('type') == 'stopped'
+                         else str(event.get('state') or 'finished'))
+                self._finish_live_output(state)
         if job_id not in self._job_steps and job_id not in self._job_commands:
             # Foreground execute_shell calls also run as ShellJobManager jobs.
             # Their result already folds into the step row in _on_tool_finished;

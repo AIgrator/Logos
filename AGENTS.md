@@ -319,6 +319,30 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   run anything in the background" stop the job and relaunch it twice.
   A session reset (`UIManager.clear_chat`) clears the strip; compact mode
   hides it (`set_suppressed`) without forgetting the jobs.
+  A running shell command gets its own strip above the composer
+  (`src/ui/widgets/live_output_panel.py::LiveOutputPanel`, mounted first in
+  `bottom_center_column`): eight monospaced lines of the command's output in a
+  real `QPlainTextEdit` with a scrollbar, the job number and command, a clock,
+  and `Stop` / `Open log` / `Hide`. It exists because the transcript is one
+  `QTextDocument` and cannot nest a scroll area - the step row holds a single
+  grey progress line, so watching a long command used to mean opening its log
+  in Notepad. `ShellJobManager.read_since(job_id, offset)` returns only the
+  lines printed after the panel's offset (with a note when the in-memory tail
+  dropped older ones), so `TerminalHandler._pump_live_output` appends and never
+  rewrites the lines the reader scrolled back to; the view follows the tail
+  only while it is already at the bottom. `_on_tool_progress` feeds it before
+  any of its early returns (a tick that only refreshed the step line still
+  carries output), a 700 ms timer keeps following the same job after an
+  auto-detach (the command outlives its step and watching it is the point),
+  and the strip freezes on the outcome when the job ends. Before the detach
+  its `Stop` is the window Stop, because the command is the running step;
+  `LiveOutputPanel.set_detached` switches it to `job_stop_requested`, the job
+  Stop the dock offers too. `Hide` remembers the dismissed job
+  (`_dismissed_job_id`) so the next tick cannot reopen it, a new job opens a
+  clean strip, and the strip belongs to the turn like the plan:
+  `BaseAgentHandler._activity_finalize` hides it and
+  `TerminalHandler.start_task` clears it. The recorded output stays in the
+  step row and the job log; the strip is chrome for the moment of watching.
   Every message carries a footer strip under it: a user bubble the local send
   time, an answer the model that wrote it, the time and - when the model
   finished its turn with a conclusion - a copy button
