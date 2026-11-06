@@ -2423,7 +2423,8 @@ class VisionHandler(BaseAgent):
     def build_prompts(self):
         return "", self.original_user_request or ""
 
-    def _cleanup_task(self):
+    def _release_resources(self):
+        """Stops the CUA worker and leaves compact mode (hard stop only)."""
         worker, self._worker = self._worker, None
         self._cua_generation += 1
         self._cua_started_at = 0.0

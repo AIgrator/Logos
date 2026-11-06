@@ -152,7 +152,8 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   redrawn into a restored transcript, while thoughts and notes rebuild inside
   their activity blocks. `tool_call` events carry `call_id`, `name`
   and the model-facing `input`; `tool_result` events carry `call_id`, `name`,
-  `status` (`ok`/`error`/`denied`), `output.text` and, when the UI showed more
+  `status` (`ok`/`error`/`denied`/`stopped`), `output.text` and, when the UI
+  showed more
   than the model needed, `display` (transcript text), `display_title` (the
   live row title) and `log_path`; a screenshot also records `image_path`, so
   the picture is drawn again on replay. A background launch also records `job_id`,
@@ -288,6 +289,15 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   (`_has_live_job`), and a replayed row (no `job_started_at`) never ticks.
   A Stop click on a job that already ended drops its pinned row instead of
   leaving it in `stopping` (`TerminalHandler.request_stop_job`).
+  The window Stop itself is one action for both panels
+  (`BaseAgentHandler.stop_turn`, called from `AppController.handle_cancel_request`):
+  it closes the live block as `Stopped`, journals the in-flight call as a
+  `stopped` result, drops the batch behind it and idles the handler, while
+  history, background jobs and Chromium survive - the dev server keeps running
+  until a project switch or the application exits. `BaseAgentHandler.stop` is
+  the hard variant (`_release_resources` kills the jobs and quits the exec
+  thread, history is dropped) for a caller that releases the session itself; it
+  is not on the Stop path.
   A command still waiting in the foreground can be handed to the background by
   the user instead of the tail of the turn: a running `execute_shell` step row
   offers `Move to background` (anchor
@@ -623,8 +633,8 @@ allowed — that is the grants' job. Shell/file calls go to the exec thread and
 `browser_*` calls to the shared browser service, so a browser turn can run shell
 tools and a terminal turn can run browser ones. Browser-only habits follow the
 presentation: the step/time budgets (`browser.max_steps`,
-`browser.max_task_seconds`), the persistent (peeked) screenshot, dropping a
-cancelled task's history, and secret/URL redaction of browser arguments. A mode
+`browser.max_task_seconds`), the persistent (peeked) screenshot, and
+secret/URL redaction of browser arguments. A mode
 switch passes its mode explicitly to `_cleanup_and_switch_handler`, or relies on
 the target state naming it (`CHATTING`/`TERMINAL`/`BROWSER`/`VISION`), because
 handler identity no longer tells Terminal from Browser.

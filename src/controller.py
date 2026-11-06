@@ -3334,22 +3334,28 @@ class AppController(QObject):
         self._clear_pending_user_messages()
 
         # If we are in vision mode, just reset the vision handler to IDLE
-        # but keep the controller in ASSISTING state. Otherwise, idle the active
-        # agent handler so a cancelled task does not stay EXECUTING-stalled —
-        # but keep the mode the user still has selected: Stop must NOT silently
-        # drop a Browser/Terminal session into chat (the next message would then
-        # run without tools, while the UI still shows e.g. "Browser").
+        # but keep the controller in ASSISTING state. Otherwise one Stop covers
+        # both agent panels: the live block closes as Stopped, the tool call in
+        # flight is dropped and the handler idles. Background jobs and Chromium
+        # are session resources, so Stop keeps them alive. The mode the user
+        # selected also stays: Stop must NOT silently drop a Browser/Terminal
+        # session into chat (the next message would then run without tools,
+        # while the UI still shows e.g. "Browser").
         if self.state == ControllerState.VISION:
             self.vision_handler._set_state(VisionState.IDLE)
         else:
-            if self.state == ControllerState.BROWSER:
+            if self.state in (ControllerState.TERMINAL, ControllerState.BROWSER):
+                handler = (self.browser_handler
+                           if self.state == ControllerState.BROWSER
+                           else self.terminal_handler)
                 try:
-                    self.browser_handler._cleanup_task()
+                    stop_turn = getattr(handler, "stop_turn", None)
+                    if callable(stop_turn):
+                        stop_turn()
+                    else:
+                        handler._set_state(VisionState.IDLE)
                 except Exception as e:
-                    logging.warning(f"Browser cancel cleanup failed: {e}")
-                self.browser_handler._set_state(VisionState.IDLE)
-            elif self.state == ControllerState.TERMINAL:
-                self.terminal_handler._set_state(VisionState.IDLE)
+                    logging.warning(f"Stop cleanup failed: {e}")
             self._set_state(self._selected_mode_state())
 
         # Cancelling only stops the current reply; messages queued during it
@@ -3835,19 +3841,22 @@ class AppController(QObject):
     def _handle_stop(self):
         """Stops the running work but keeps the mode the user has selected.
 
-        Stop (title-bar button) is a stronger version of the toolbar Cancel: it
-        also stops the mode's agent (a Vision task, or a frozen Browser/Terminal
-        session). Like Cancel it must NOT silently drop a Browser/Terminal/
-        Vision session into chat — the next message should still run with the
-        selected handler and its tools. So we reuse the cancel path, which idles
-        the active handler and restores ``_selected_mode_state()``.
+        Stop (title-bar button) is the toolbar Cancel plus the mode's agent: a
+        Vision task, or a Browser/Terminal task frozen in PAUSED. Both go
+        through the same abort as Cancel, so the outcome does not depend on
+        which button or panel was used: history, background jobs and Chromium
+        survive. Like Cancel it must NOT silently drop a
+        Browser/Terminal/Vision session into chat — the next message should
+        still run with the selected handler and its tools.
         """
         if self.state == ControllerState.VISION:
             self.vision_handler.stop()
         else:
             paused_agent = self._paused_agent()
             if paused_agent is not None:
-                paused_agent.stop()
+                stop_turn = getattr(paused_agent, "stop_turn", None)
+                if callable(stop_turn):
+                    paused_agent.stop_turn()
         self.handle_cancel_request()
 
     def _paused_agent(self):

@@ -14,8 +14,11 @@ Contract for heirs:
     mode-specific UI, and return the history text for the LLM. Return None
     when completion is asynchronous (the heir continues the loop itself
     once the result arrives, e.g. terminal web requests).
-  - _cleanup_task(): heir hook called by stop() (close browsers, kill
-    threads, end UI containers). Default does nothing.
+  - _abort_inflight(): heir hook called by stop_turn() for the Work stop
+    button (drop the tool call in flight and the actions queued behind it).
+  - _release_resources(): heir hook called by stop() for a hard stop (kill
+    background jobs, close browsers, stop worker threads).
+  Both default to doing nothing.
 """
 import json
 import logging
@@ -507,7 +510,7 @@ class BaseAgentHandler:
         logging.info(f"{type(self).__name__} pause button ignored in state {self.state.name} (nothing pausable).")
 
     def stop(self):
-        """Stops the current task and resets state. Heirs clean resources via hook."""
+        """Stops the current task and releases what the session kept for it."""
         was_active = self.state != VisionState.IDLE
         # A steer that never made it into a request dies with the task.
         clear_pending = getattr(self.controller, "_clear_pending_user_messages", None)
@@ -516,22 +519,51 @@ class BaseAgentHandler:
                 clear_pending()
             except Exception:
                 pass
-        self._activity_finalize("Stopped", "stopped")
+        # Release first: a hard stop takes the worker threads and the jobs down
+        # before the handler idles, so a late worker result cannot slip in
+        # between the two (Vision bumps its CUA generation in release).
         try:
-            self._cleanup_task()
+            self._release_resources()
         except Exception as e:
             logging.warning(f"{type(self).__name__} task cleanup failed: {e}")
+        self.stop_turn()
         if was_active:
             logging.info(f"{type(self).__name__} stopped.")
-        self._set_state(VisionState.IDLE)
-        self._stop_thinking_timer()
-        self.original_user_request = None
         self.command_history = []
-        self._batch_queue = []
-        self._tool_in_flight = False
         self._last_action_sig = None
         self._consecutive_errors = 0
         self._assessment_sent = False
+
+    def stop_turn(self):
+        """Stops the running turn and keeps everything the session knows.
+
+        This is what the window's Stop does, for Terminal and Browser alike:
+        the live block closes as ``Stopped``, the tool call in flight and the
+        actions queued behind it are dropped, and the handler idles. History,
+        background shell jobs, the browser and the exec threads deliberately
+        survive - they are session resources, released by a project switch or
+        by application cleanup, so a dev server the model just started keeps
+        running (docs/future_vision.md, open question 4).
+        """
+        if self._tool_in_flight and self._active_call_id:
+            # The dropped ticket means the command never reports back, so the
+            # journal and the model's history record why its step ended.
+            note = "**Tool Result:**\nStopped by the user before it finished."
+            self.command_history.append(note)
+            self.record_tool_result(
+                note, status="stopped", name=self._active_tool_name,
+                display="Stopped by the user before it finished.")
+        self._activity_finalize("Stopped", "stopped")
+        self._batch_queue = []
+        self._stashed_response = None
+        self._tool_in_flight = False
+        try:
+            self._abort_inflight()
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} in-flight abort failed: {e}")
+        self._set_state(VisionState.IDLE)
+        self._stop_thinking_timer()
+        self.original_user_request = None
 
     def handle_fatal_error(self, error_message: str):
         """Freezes the live activity block once the request failed for good.
@@ -544,8 +576,15 @@ class BaseAgentHandler:
         self._batch_queue = []
         self._activity_finalize("Request failed", "error")
 
-    def _cleanup_task(self):
-        """Heir hook: release capability resources (browsers, threads, UI)."""
+    def _abort_inflight(self):
+        """Heir hook: drop the tool call in flight and the work queued behind it.
+
+        Stop only: it must not touch session resources (background jobs, the
+        browser, worker threads), which belong to ``_release_resources``.
+        """
+
+    def _release_resources(self):
+        """Heir hook: release capability resources when the session ends."""
 
     def _history_action(self, action: dict) -> dict:
         """Heir hook: redact secrets before writing an action to history."""
@@ -1406,7 +1445,9 @@ class BaseAgentHandler:
         if row is None:
             return False
         raw_status = str(event.get("status") or "ok")
-        status = raw_status if raw_status in ("ok", "error", "denied") else "ok"
+        status = (raw_status
+                  if raw_status in ("ok", "error", "denied", "stopped")
+                  else "ok")
         text = event.get("display")
         if not text:
             text = self._strip_result_prefix(event_text(event))

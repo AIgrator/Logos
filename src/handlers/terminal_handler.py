@@ -292,8 +292,7 @@ class TerminalHandler(BaseAgentHandler):
         self._job_cwds = {}
         self._handled_job_ids = set()
         # Browser presentation bookkeeping (one loop since Phase 1): the step
-        # budget and the fresh-history rule belong to a browser task only.
-        self._history_dirty = False
+        # budget and the per-task counters belong to a browser task only.
         self._task_started = 0.0
         self._step_count = 0
 
@@ -379,12 +378,9 @@ class TerminalHandler(BaseAgentHandler):
             if callable(clear):
                 clear()
             if self.presentation == "browser":
-                # Stop/Cancel idles the handler without BaseAgentHandler.stop()
-                # in the cancel path; drop that stale task's history on the next
-                # fresh start instead of feeding it to an unrelated task.
-                if self._history_dirty:
-                    self.command_history = []
-                    self._history_dirty = False
+                # A fresh browser task starts with a clean counters streak; its
+                # history stays, like a terminal task's, because Stop no longer
+                # throws the aborted task away.
                 self._consecutive_errors = 0
                 self._assessment_sent = False
                 self._last_action_sig = None
@@ -2104,26 +2100,43 @@ class TerminalHandler(BaseAgentHandler):
         except Exception:
             self._awaiting_job_id = None
 
-    def _cleanup_task(self):
-        if self._tool_in_flight or self.presentation == "browser":
-            # A browser step does not run on the terminal exec thread; drop it
-            # through the shared service so its queued work never lands later.
-            try:
-                service = getattr(self.controller, "browser_service", None)
-                if service is not None:
-                    service.cancel()
-            except Exception as e:
-                logging.warning(f"Browser cancel failed: {e}")
-        if self.presentation == "browser":
-            # A cancelled browser task must not feed its history to the next one.
-            self._history_dirty = True
+    def _abort_inflight(self):
+        """Drops the tool call in flight without touching session resources.
+
+        Stop reaches this through ``BaseAgentHandler.stop_turn`` for both
+        presentations: a browser call can run inside a terminal turn and a
+        terminal command inside a browser one, so the abort belongs to the
+        handler, not to the panel that happened to be open.
+        """
+        # A browser step does not run on the terminal exec thread; drop it
+        # through the shared service so its queued work never lands later.
+        try:
+            service = getattr(self.controller, "browser_service", None)
+            if service is not None:
+                service.cancel()
+        except Exception as e:
+            logging.warning(f"Browser cancel failed: {e}")
         self._exec_ticket += 1
+        try:
+            self._exec_worker.cancel()
+        except Exception as e:
+            logging.warning(f"Exec worker cancel failed: {e}")
         self._tool_in_flight = False
         self.cancel_job_wait()
         try:
             self.computer.cancel_event.set()
-        except Exception:
-            pass
+        except Exception as e:
+            logging.warning(f"Tool cancellation failed: {e}")
+        if self.web_thread is not None and self.web_thread.isRunning():
+            self.web_thread.cancel()
+
+    def _release_resources(self):
+        """Kills background jobs and stops the worker threads.
+
+        A hard stop (``BaseAgentHandler.stop``), a project switch and the
+        application cleanup own this; Stop keeps the dev server and Chromium
+        alive on purpose (``_abort_inflight`` explains why).
+        """
         try:
             manager = getattr(self.computer, "shell_jobs", None)
             if manager is not None:

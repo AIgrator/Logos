@@ -408,9 +408,12 @@ person can observe, not an internal detail.
 6. **One Chromium.** While testing, the machine runs a single Chromium instance
    (one profile, one login state). Entering or leaving a panel does not spawn a
    second one.
-7. **Clean stop.** Stop closes Chromium and the dev server; no orphan processes
-   remain (`tasklist` shows neither `chrome.exe` from our profile nor the
-   `python -m http.server`).
+7. **Clean stop.** Stop ends the turn and the command in flight, closes the
+   live block as `Stopped`, and leaves no orphan process from *that command*.
+   The dev server and Chromium are session resources: they survive a Stop
+   (open question 4) and end on a project switch or application exit, when
+   `tasklist` shows neither `chrome.exe` from our profile nor the
+   `python -m http.server` we started.
 8. **Restart fidelity.** Reopening the session restores the transcript, the
    capabilities and the summary; the browser is not resurrected, and the agent
    can navigate to the last URL from history.
@@ -459,13 +462,19 @@ person can observe, not an internal detail.
 > console-error -> edit -> restart -> re-check cycle; that is the acceptance
 > scenario, not a code gap).
 >
-> **Not met as written: 7 (clean stop).** Stop cancels the reply; the dev server
-> and Chromium survive until project switch or application exit, which is the
-> decision open question 4 records. The browser path of `handle_cancel_request`
-> still calls `TerminalHandler._cleanup_task`, which runs
-> `shell_jobs.kill_all()`, so a Stop in the Browser panel kills a Terminal job
-> while a Stop in the Terminal panel does not - one asymmetry to decide on
-> before this line means anything.
+> **7 (clean stop) was reworded, not met as it stood.** The original line
+> promised that Stop closes Chromium and the dev server, which contradicts open
+> question 4 ("stop the turn, keep the server"). The code was also inconsistent
+> with itself: the Browser branch of `handle_cancel_request` ran
+> `TerminalHandler._cleanup_task`, which calls `shell_jobs.kill_all()`, while the
+> Terminal branch only idled the handler - the same shared handler killed a dev
+> server in one panel and kept it in the other, and neither closed the live
+> block, cleared the plan pill or stopped a running command. Since 2026-11-06
+> both panels go through `BaseAgentHandler.stop_turn`: it closes the block as
+> `Stopped`, terminates the command in flight, journals that call as a
+> `stopped` result, drops the actions queued behind it and keeps history, jobs
+> and Chromium. The checklist line above now says exactly that; resources are
+> released by a project switch and by `AppController.cleanup`.
 >
 > Two plan paragraphs are superseded rather than broken. **Prompts**: the build
 > still picks one presentation's prompt (`Brain.get_terminal_prompts` /
@@ -509,9 +518,10 @@ part that said "one session runs one mode".
    `open_terminal` / `open_browser`. It turns Chat into the entry point instead of
    a dead end, and removes the "Chat cannot start work" limitation.
 3. **Native budget.** 30 tools or 35? Decide after Phase 3 measurement.
-4. **Stop semantics.** Keep "stop everything" (today) or "stop the turn, keep the
-   server"? Recommendation: keep today's behavior in Phase 1, revisit with real
-   usage data.
+4. **Stop semantics. Decided 2026-11-06: stop the turn, keep the server.**
+   Stop aborts the in-flight command and closes the block, but background jobs
+   and Chromium stay until a project switch or exit. The per-job Stop links and
+   `browser_close` cover the explicit cases.
 5. **Vision placement.** A separate panel, or a toggle inside Terminal once a CUA
    model is selected? Recommendation: separate panel, because it changes the
    provider toolset.
