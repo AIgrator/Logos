@@ -13,7 +13,7 @@ Ready-to-run Windows builds are published in [**Releases**](https://github.com/A
 | `LogosSetup.exe` | **Recommended.** Per-user installer (no administrator rights). Adds the Start Menu shortcut and, as optional tasks, the `logos` command, the Explorer "Open with Logos" folder menu and a desktop shortcut. Uninstalls from Settings → Installed apps. |
 | `Logos.exe` | Portable single file. Nothing to install; just run it. |
 
-Both builds keep settings, logs, cache and project data in `%LOCALAPPDATA%\Logos`, not next to the executable. On first launch you pick a provider and paste its API key, so no extra files are needed.
+Both builds keep settings, logs and cache in `%LOCALAPPDATA%\Logos`, not next to the executable, while each project keeps its own data (sessions, attachments, screenshots) in a `.logos` folder at its root. On first launch you pick a provider and paste its API key, so no extra files are needed.
 
 > [!NOTE]
 > Builds are published for Windows. On Linux, run from source (see below).
@@ -53,7 +53,7 @@ The release assets are built from a source checkout on Windows. Both tools are f
 uv run --with pyinstaller pyinstaller logos.spec --noconfirm --clean
 ```
 
-This produces `dist/Logos.exe`. The one-file build unpacks itself to a temporary folder at launch, so settings and data live in `%LOCALAPPDATA%\Logos`.
+This produces `dist/Logos.exe`. The one-file build unpacks itself to a temporary folder at launch, so settings, logs and cache live in `%LOCALAPPDATA%\Logos`; project data stays in each project's `.logos` folder.
 
 **2. Installer** (wraps that executable, needs [Inno Setup 6](https://jrsoftware.org/isdl.php)):
 
@@ -94,15 +94,18 @@ The Windows installer offers the same integrations as tasks (checked by default)
 
 ## Launching the Application
 
-To run the application, use the following command:
+To run the application from the checkout, let `uv` use the project environment:
 ```bash
-python main.py
+uv run main.py
 ```
 
 If you installed using the setup script (setup_windows.ps1 or setup_ubuntu.sh), a shorter command becomes available:
 ```bash
 logos
 ```
+
+> [!TIP]
+> A plain `python main.py` works too, but only after activating the virtual environment the setup script created (`.venv\Scripts\activate` on Windows, `source .venv/bin/activate` on Linux).
 
 ### Working in a Specific Directory
 
@@ -112,12 +115,12 @@ If you have integrated the application with the Windows context menu (an option 
 
 **Linux/macOS:**
 ```bash
-python main.py /home/user/my_project
+uv run main.py /home/user/my_project
 ```
 
 **Windows:**
 ```powershell
-python main.py C:\Users\User\Documents\my_project
+uv run main.py C:\Users\User\Documents\my_project
 ```
 If no path is specified, the remembered active project is used. When there is no usable remembered project, the full-screen **Home** page opens and lets you pick or add one.
 
@@ -140,11 +143,11 @@ The four panels differ in what they show and which tools the turn is given:
 
 *   **Chat:** a plain chat with the LLM. You can converse and send files for analysis. When the selected provider supports native web search, the model can search the web on its own during the response. Responses stream in real-time.
 
-*   **Vision:** the assistant uses the selected provider's native **Computer Use** capability to see the screen and interact with it using the mouse and keyboard. It runs on the same observe → act → assess agent loop as Terminal and Browser and requires a CUA-capable provider (OpenAI, Anthropic, or Google). It is ideal for automating tasks in GUI applications.
+*   **Vision:** the assistant uses the selected provider's native **Computer Use** capability to see the screen and interact with it using the mouse and keyboard. It follows the same observe → act → assess discipline as Terminal and Browser but is driven by the provider's Computer Use protocol, so it requires a CUA-capable provider (OpenAI, Anthropic, or Google). It is ideal for automating tasks in GUI applications.
 
-*   **Terminal:** the assistant acts as an AI agent in the command line. No plan is fixed in advance, but for multi-step work the assistant keeps a short checklist of its own (`update_plan`), shown as a compact `Step N / M` pill above the composer that reveals the full plan on hover and updates as it goes. The LLM autonomously determines the next step, executes the command, and analyzes the result, iteratively moving towards the goal. It does not have access to the visual interface but can execute shell commands, work with the file system, run scripts, and interact with web resources. Long-running commands can be launched as background jobs (`run_in_background`, `poll_shell_job` / `stop_shell_job` / `wait_seconds`). This panel is designed for tasks related to development, file management, and console automation.
+*   **Terminal:** the assistant acts as an AI agent in the command line. No plan is fixed in advance, but for multi-step work the assistant keeps a short checklist of its own (`update_plan`), shown as a compact `Step N / M` pill above the composer that reveals the full plan on hover and updates as it goes. The LLM autonomously determines the next step, executes the command, and analyzes the result, iteratively moving towards the goal. It does not have access to the visual interface but can execute shell commands, work with the file system, run scripts, and interact with web resources. Long-running commands can be launched as background jobs with `execute_shell(run_in_background=true)` and then followed with `poll_shell_job` / `stop_shell_job` / `wait_seconds`. This panel is designed for tasks related to development, file management, and console automation.
 
-*   **Browser:** the assistant drives a real Chromium browser via accessibility snapshots: it sees numbered element references (`browser_snapshot`), clicks/fills/presses them, reads pages, manages tabs, and takes screenshots with overlaid reference badges. Like Terminal, it is **stateful** and works step by step — the agent loops observe → act → assess until the goal is reached or it escalates to the user.
+*   **Browser:** the assistant drives a real Chromium browser via a DOM snapshot: it sees numbered element references (`browser_snapshot`), clicks/fills/presses them, reads pages, manages tabs, and takes screenshots with overlaid reference badges. Like Terminal, it is **stateful** and works step by step — the agent loops observe → act → assess until the goal is reached or it escalates to the user.
 
 A session that holds Terminal and Browser at once lets one turn use both: the
 model can start a dev server, open the page on the same shared browser and fix
@@ -207,7 +210,7 @@ Every Terminal action passes an access policy before it runs. Settings → Termi
 
 ### Workspace panel
 
-The collapsible right panel is always available. **Session** shows context statistics (including the capabilities the session holds) and a recap of the current session; **Activity** lists loaded skills, invoked tools and attached files; **Files** is a read-only tree of the active project; **Git** appears with the Terminal panel and lists uncommitted changes with line counts. Clicking a file opens it in the detected editor.
+The collapsible right panel is always available. **Session** shows context statistics (including the capabilities the session holds) and a recap of the current session; **Activity** lists loaded skills, invoked tools and attached files; **Files** is a read-only tree of the active project; **Git** appears when the session holds the Terminal capability and lists uncommitted changes with line counts. Clicking a file opens it in the detected editor.
 
 ### Suggested next actions
 

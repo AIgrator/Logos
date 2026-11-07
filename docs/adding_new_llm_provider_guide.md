@@ -194,19 +194,22 @@ instantiated and when the settings page is built. Recognized keys:
 The final instance config is: static provider config → the lightweight copy in
 `SettingsManager.PROVIDER_CONFIG` → the user's saved settings for that provider
 → `name` and the selected `model`. The active provider is rejected before
-instantiation if its `api_key` setting is empty, so a keyless local provider
-must either expose an API-key field that the user fills or the check must be
-changed.
+instantiation unless `provider_is_configured()` accepts it: a built-in provider
+needs an API key, while a registered custom provider may be keyless, which is
+what local servers expect. A new built-in provider therefore still has to
+expose an API-key field.
 
 ---
 
 ## 4. UI schema
 
 `get_ui_schema()` is consumed by
-[`src/ui/widgets/provider_form.py`](../src/ui/widgets/provider_form.py): the
-Settings → Providers page renders one `ProviderForm` per provider, and the
-first-run setup wizard reuses the same form through `LLMProviderWidget`
-(`src/ui/widgets/llm_provider_widget.py`). Supported `type` values:
+[`src/ui/widgets/provider_form.py`](../src/ui/widgets/provider_form.py). The
+in-app Settings → Providers page lists providers from `PROVIDER_METADATA` and
+builds a `ProviderForm` only inside the Connect/Edit dialog, so opening Settings
+imports no vendor SDK; the first-run setup wizard builds every page up front
+through `LLMProviderWidget` (`src/ui/widgets/llm_provider_widget.py`). Supported
+`type` values:
 
 | Type | Widget |
 | --- | --- |

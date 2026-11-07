@@ -79,7 +79,7 @@ Any single history entry longer than this value is cut to its head and tail (rou
 
 *Settings.json key: `history_dedup_snapshots` · Default: off*
 
-The Browser panel observes pages through accessibility snapshots, and the same page is often captured several steps in a row. When this option is on, **consecutive identical snapshots** are replaced with `**Tool Result:** (snapshot unchanged since previous step)`.
+The Browser panel observes pages through DOM snapshots, and the same page is often captured several steps in a row. When this option is on, **consecutive identical snapshots** are replaced with `**Tool Result:** (snapshot unchanged since previous step)`.
 
 - Only page snapshots (tool results containing `Interactive elements:`) are affected.
 - The comparison is exact: if anything on the page changed, the new snapshot is kept in full.

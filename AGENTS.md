@@ -22,8 +22,8 @@ Both builders are ephemeral tools, never dependencies: do not add PyInstaller or
 `[project] version` in `pyproject.toml` is the only place a release number
 exists. `src/build_info.py` reads it at runtime (source runs) or from the copy
 `logos.spec` bundles next to the executable, so the window title
-(`… [v0.2.0]`), the startup log line and Settings → About
-(`Version 0.2.0 · build <commit>` for source runs) all follow a one-line bump.
+(`… [v1.0.0]`), the startup log line and Settings → About
+(`Version 1.0.0 · build <commit>` for source runs) all follow a one-line bump.
 `logos.spec` also writes an EXE version resource from that number, and
 `installer/logos.iss` reads it back (`GetStringFileInfo(…, "ProductVersion")`),
 so the installer needs no hand-edited `AppVersion`. The commit hash is still

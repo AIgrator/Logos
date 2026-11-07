@@ -10,9 +10,11 @@ Terminal web access uses two tools and a "Plan A / Plan B" strategy:
 There is no web-search API key in Settings. The local fallback uses the `ddgs`
 package directly and needs no credentials.
 
-This hybrid applies to **Terminal mode**. Chat has its own native search/fetch
-tool loop, and Browser mode navigates pages with Playwright; neither goes
-through `WebTaskThread`.
+This hybrid applies to **Terminal mode** (any session that holds the terminal
+capability). Chat has no tool loop: a chat turn can only use the provider's own
+server-side search, and only OpenAI, Anthropic and xAI offer it (Google does
+not). Browser mode navigates pages with Playwright. None of them goes through
+`WebTaskThread`.
 
 ---
 
