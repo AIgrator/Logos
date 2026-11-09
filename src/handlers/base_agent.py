@@ -1132,11 +1132,28 @@ class BaseAgentHandler:
         grants = getattr(self.controller, "session_capabilities", ()) or ()
         available = capabilities.catalog_tools_for_handler(
             self.tool_view, grants, self._promoted_tools)
+        # Control tools are journaled like any other step, so the Activity tab
+        # and a restored transcript show that the catalog was searched (the
+        # model used to "call" it invisibly).
+        turn_id = getattr(self.controller, "session_turn_id", "")
+        call_id = uuid.uuid4().hex
+        self._append_session_event(
+            "tool_call", turn_id=turn_id, call_id=call_id,
+            name="search_tools", input={"query": query})
+
+        def journal(text, display, status="ok"):
+            self._append_session_event(
+                "tool_result", turn_id=turn_id, call_id=call_id,
+                name="search_tools", status=status,
+                output={"text": str(text or "")},
+                display=str(display or ""))
+
         if not available:
-            self._after_action_result(
-                "**Tool Result:** No on-demand tools are available in this "
-                "session. Every granted tool is either declared already or "
-                "not reachable from this panel.")
+            text = ("**Tool Result:** No on-demand tools are available in this "
+                    "session. Every granted tool is either declared already or "
+                    "not reachable from this panel.")
+            journal(text, "No on-demand tools available")
+            self._after_action_result(text)
             return
 
         settings = getattr(self.controller, "settings", None) or self.settings
@@ -1148,10 +1165,19 @@ class BaseAgentHandler:
             metadata = {}
         matches = self._match_catalog_tools(query, available, metadata)
         if not matches:
-            self._after_action_result(
-                "**Tool Result:** No on-demand tool matches "
-                f"\"{query}\". Available: {', '.join(available)}. Call "
-                "search_tools again with one of those names.")
+            text = ("**Tool Result:** No on-demand tool matches "
+                    f"\"{query}\". Available: {', '.join(available)}. Call "
+                    "search_tools again with one of those names.")
+            # A tool of a capability the session does not hold cannot be in
+            # the catalog at all; naming the attach tool saves a dead end.
+            if "browser" not in grants:
+                text += (" The browser capability is not attached: call "
+                         "open_browser first, then search again.")
+            if "terminal" not in grants:
+                text += (" The terminal capability is not attached: call "
+                         "open_terminal first, then search again.")
+            journal(text, f"No on-demand tool matches \"{query}\"")
+            self._after_action_result(text)
             return
 
         self._promoted_tools.update(matches)
@@ -1164,10 +1190,10 @@ class BaseAgentHandler:
             "<i>Loaded on-demand tool"
             + ("s" if len(matches) > 1 else "")
             + f": {', '.join(matches)}.</i>")
-        self._after_action_result(
-            "**Tool Result:** Loaded from the tool catalog (declared and "
-            "callable on the next step):\n\n" + definition.strip(),
-            abort=True)
+        text = ("**Tool Result:** Loaded from the tool catalog (declared and "
+                "callable on the next step):\n\n" + definition.strip())
+        journal(text, "Loaded on-demand tool: " + ", ".join(matches))
+        self._after_action_result(text, abort=True)
 
     @staticmethod
     def _match_catalog_tools(query: str, available, metadata: dict) -> list[str]:
