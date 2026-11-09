@@ -15,6 +15,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 
+from src.computer.tool_args import validate_tool_arguments
 from src.computer.tools.locations import PATH_TOKENS, expand_path_tokens  # noqa: F401  (re-export)
 
 logger = logging.getLogger(__name__)
@@ -258,6 +259,7 @@ class Executor:
             )
 
         try:
+            kwargs = validate_tool_arguments(tool_func, kwargs)
             raw = tool_func(**kwargs)
         except (ValueError, TypeError, KeyError) as e:
             # Instructional errors from tools feed the correction loop.

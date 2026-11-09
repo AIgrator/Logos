@@ -124,10 +124,7 @@ def browser_snapshot(self, **kwargs):
                 "screen — take a screenshot to see the current state, check "
                 "browser_frames, or click by x/y coordinates before "
                 "deciding your next step.")
-    lines = []
-    for e in elements:
-        where = f"(frame {e['frame']}: {e.get('frame_host', '?')}) " if e.get("frame") else ""
-        lines.append(f"[{e['ref']}] {where}{e['role']}: {e['name'] or '(no label)'}")
+    lines = [mgr.snapshot_line(e) for e in elements]
     note = ""
     if any(e.get("frame") for e in elements):
         note = ("\nElements marked (frame N: host) live inside an iframe: click, fill and "

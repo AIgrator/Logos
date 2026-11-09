@@ -14,6 +14,8 @@ import typing
 
 from PySide6.QtCore import QObject, Signal, Slot
 
+from src.computer.tool_args import validate_tool_arguments
+
 
 def _declared_containers(annotation) -> set:
     """Container types a parameter annotation could accept (list/dict/tuple)."""
@@ -236,7 +238,8 @@ class ToolExecWorker(QObject):
             if not hasattr(self.computer, action_name):
                 raise AttributeError(f"Computer has no tool named '{action_name}'")
             action_func = getattr(self.computer, action_name)
-            result = action_func(**coerce_arguments(action_func, action_args))
+            result = action_func(**validate_tool_arguments(
+                action_func, coerce_arguments(action_func, action_args)))
         except Exception as e:  # noqa: BLE001 - report back to the loop
             if not self._cancelled:
                 logging.error(f"Tool execution error in worker: {e}", exc_info=True)

@@ -86,6 +86,10 @@ def execute_shell(self, command: str, run_in_background: bool = False,
         ready_timeout = max(0.5, min(ready_timeout, 120.0))
 
     working_directory = getattr(self, "working_directory", None)
+    # The tool description promises portable tokens in the command line, and
+    # Vision's executor already expands them; Terminal did not, so
+    # `mkdir {WORKDIR}\x` created a literal "{WORKDIR}" folder in the project.
+    command = expand_path_tokens(str(command), working_directory)
     if cwd:
         expanded_cwd = expand_path_tokens(str(cwd), working_directory)
         working_directory = self._resolve_path(expanded_cwd)

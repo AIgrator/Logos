@@ -798,6 +798,15 @@ class BrowserManager:
                             input_type == "password"
                             or is_sensitive_text(name, explicit_role)),
                     }
+                    checkable = (
+                        (tag == "input" and input_type in ("checkbox", "radio"))
+                        or explicit_role in ("checkbox", "radio", "switch",
+                                             "menuitemcheckbox", "menuitemradio"))
+                    if checkable:
+                        # A snapshot that omits the state makes two identical
+                        # "checkbox 1" rows indistinguishable, so the model
+                        # cannot tell which one to uncheck.
+                        entry["checked"] = self._checked_state(loc)
                     if index:
                         entry["frame"] = index
                         entry["frame_host"] = _frame_host(frame)
@@ -808,6 +817,27 @@ class BrowserManager:
                     f"across {len(self._frames())} frame(s).")
         self._last_snapshot = elements
         return elements
+
+    @staticmethod
+    def snapshot_line(element: dict, include_frame: bool = True) -> str:
+        """One rendered snapshot row (shared by browser_snapshot and find).
+
+        The checked state is part of the row, not a separate field, because
+        the model reads this text: a list of "checkbox: 1" rows with no state
+        cannot be acted on.
+        """
+        where = ""
+        if include_frame and element.get("frame"):
+            where = (f"(frame {element['frame']}: "
+                     f"{element.get('frame_host', '?')}) ")
+        line = (f"[{element['ref']}] {where}{element['role']}: "
+                f"{element['name'] or '(no label)'}")
+        state = element.get("checked")
+        if state is True:
+            line += " (checked)"
+        elif state is False:
+            line += " (unchecked)"
+        return line
 
     def heading_context(self, max_headings: int = 3, max_chars: int = 120) -> str:
         """Visible h1/h2 texts: screen identity for quiz/wizard-style pages.
@@ -873,7 +903,7 @@ class BrowserManager:
             query = text
         else:
             raise ValueError("browser_find needs one of: 'text', 'pattern'.")
-        lines = [f"[{e['ref']}] {e['role']}: {e['name'] or '(no label)'}" for e in self._last_snapshot]
+        lines = [self.snapshot_line(e, include_frame=False) for e in self._last_snapshot]
         hits = [i for i, line in enumerate(lines) if matches(line)]
         if not hits:
             return f"No matches for '{query}' in the latest snapshot ({len(lines)} elements)."
@@ -888,10 +918,17 @@ class BrowserManager:
     @staticmethod
     def _labeled_text(loc) -> str:
         """Visible label for a form control: label[for], wrapping <label>,
-        else short parent text. Empty string when nothing suitable."""
+        else the text right after the control, else short parent text.
+
+        A bare control is often written as ``<input> option A`` with no
+        label element, and several such controls can share one parent. Taking
+        the parent's first line then named every checkbox after the first one,
+        so the sibling text wins and the parent is used only when it holds a
+        single control. Empty string when nothing suitable."""
         try:
             text = loc.evaluate("""e => {
                 const t = el => ((el && el.innerText) || '').trim();
+                const firstLine = el => t(el).split('\\n')[0].trim();
                 if (e.id) {
                     const l = document.querySelector(`label[for="${CSS.escape(e.id)}"]`);
                     const s = t(l);
@@ -905,7 +942,23 @@ class BrowserManager:
                     }
                     p = p.parentElement; hops++;
                 }
-                const direct = e.parentElement ? t(e.parentElement).split('\\n')[0] : '';
+                // Text that follows the control on the same line.
+                let node = e.nextSibling;
+                while (node) {
+                    if (node.nodeType === 3) {
+                        const s = (node.textContent || '').trim();
+                        if (s) return s;
+                    } else if (node.nodeType === 1) {
+                        const s = firstLine(node);
+                        if (s) return s;
+                    }
+                    node = node.nextSibling;
+                }
+                const parent = e.parentElement;
+                if (!parent) return '';
+                // One control per parent, or the label belongs to a sibling.
+                if (parent.querySelectorAll('input, select, textarea').length > 1) return '';
+                const direct = firstLine(parent);
                 return direct.length <= 60 ? direct : '';
             }""") or ""
             return text.strip()

@@ -9,6 +9,8 @@ import os
 import importlib
 from functools import partial
 
+from src.computer.tools.locations import expand_path_tokens
+
 
 def tool_meta(tool=None, flags=None):
     def decorator(fn):
@@ -43,7 +45,14 @@ class Computer:
         self._load_mode_tools(mode)
 
     def _resolve_path(self, path: str) -> str:
-        """Resolves a relative path against the working directory."""
+        """Resolves a relative path against the working directory.
+
+        Portable location tokens ({WORKDIR}, {HOME}, {DESKTOP}, ...) are
+        expanded first, so a file tool that receives one does not create a
+        literal ``{WORKDIR}`` folder (``execute_shell`` already did this for
+        its own ``cwd``).
+        """
+        path = expand_path_tokens(str(path or ""), self.working_directory)
         if os.path.isabs(path):
             return path
         if self.working_directory:
