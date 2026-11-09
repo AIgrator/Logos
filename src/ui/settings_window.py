@@ -47,6 +47,7 @@ from src.ui.theme_manager import (
 from src.ui.navigation import _theme_colors
 
 from settings_manager import SettingsManager
+from app_paths import resource_path
 from context import skills as skills_store
 from context import context_stats as context_stats_store
 from context import handoff as handoff_store
@@ -1357,7 +1358,7 @@ class SettingsPage(QWidget):
         header_layout = QHBoxLayout()
         header_layout.setSpacing(14)
         logo_label = QLabel()
-        logo_label.setPixmap(QIcon("assets/ico.ico").pixmap(QSize(64, 64)))
+        logo_label.setPixmap(QIcon(resource_path("assets", "ico.ico")).pixmap(QSize(64, 64)))
         header_layout.addWidget(logo_label, 0, Qt.AlignTop)
 
         title_layout = QVBoxLayout()

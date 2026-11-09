@@ -83,7 +83,20 @@ the window. The same column width decides the one-row/two-row toolbar split, so
 a narrow workspace wraps the controls instead of clipping them.
 The full-mode window frame (`window_geometry`) and the sidebar's collapsed state
 (`sidebar_collapsed`) are saved to `settings.json` on close and restored on the
-next launch; layout margins are not persisted. The right workspace panel
+next launch; layout margins are not persisted. The window and taskbar icon is
+`assets/ico.ico`, resolved through `app_paths.resource_path` (an absolute path:
+Qt silently yields a null icon for a relative one) and set on `QApplication`
+right after it exists, so the splash and every later window inherit it. It is
+set again by `UIManager._schedule_window_icon_refresh` (0, 1.5, 5 and 12 s after
+the main window is shown): Windows asks a window for its icon (`WM_GETICON`)
+when it creates the taskbar button, and startup keeps the GUI thread busy for
+seconds, so that query times out and the shell falls back to the generic
+"unknown application" glyph for good - the title bar shows the real icon while
+the taskbar does not (reproduced with a probe whose main thread sleeps after
+`show()`). No `SetCurrentProcessExplicitAppUserModelID`: an explicit AUMID that
+no shortcut or registry entry carries makes Windows 11 ignore both the window
+icon and the icon embedded in the EXE and draw that same generic glyph.
+The right workspace panel
 (`src/ui/right_panel.py`) is visible in every mode. Its Session tab leads with
 context statistics (provider, model, the session's attached capabilities,
 context window and usage, token totals,

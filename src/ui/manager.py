@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget, Q
                                QMessageBox, QMenu, QPushButton, QSizeGrip,
                                QTextEdit, QVBoxLayout, QWidget)
 
+from app_paths import resource_path
 from attachments import IMAGE_EXTENSIONS, resolve_path
 from llm.custom_providers import provider_is_configured
 from llm.model_config_manager import ModelConfigManager
@@ -341,7 +342,8 @@ class UIManager(QWidget):
         self.main_window.closing.connect(self.shutdown_requested.emit)
         self.tooltip_manager = CustomToolTipManager(self.main_window)
         self.main_window.setWindowTitle("Logos AI Assistant")
-        self.main_window.setWindowIcon(QIcon("assets/ico.ico"))
+        self.window_icon = QIcon(resource_path("assets", "ico.ico"))
+        self.main_window.setWindowIcon(self.window_icon)
         # Settings page is built on first use: it pulls in every settings
         # section (providers, MCP, skills), which would slow down startup.
         self.settings_page = None
@@ -2258,7 +2260,30 @@ class UIManager(QWidget):
         else:
             self.main_window.showMaximized()
         QTimer.singleShot(0, self._remember_full_geometry)
+        self._schedule_window_icon_refresh()
         logging.info(f"show_main_window called, took {time.perf_counter() - t0:.3f}s to return")
+
+    def _schedule_window_icon_refresh(self):
+        """Re-applies the window icon once the shell can actually read it.
+
+        Windows asks the window for its icon (WM_GETICON) when it creates the
+        taskbar button. Startup keeps the GUI thread busy for seconds after the
+        window is shown (session replay, provider warm-up), so that query times
+        out and the shell falls back to the generic "unknown application" glyph
+        and keeps it - the title bar shows the real icon, the taskbar does not.
+        Setting the icon again when the thread is free makes the shell ask
+        again, so a few attempts are queued instead of one that may land during
+        the same stall.
+        """
+        def apply_icon():
+            try:
+                QApplication.setWindowIcon(self.window_icon)
+                self.main_window.setWindowIcon(self.window_icon)
+            except Exception as e:
+                logging.debug(f"Window icon refresh failed: {e}")
+
+        for delay_ms in (0, 1500, 5000, 12000):
+            QTimer.singleShot(delay_ms, apply_icon)
 
     def _restore_window_geometry(self, saved: dict) -> bool:
         """Applies the remembered frame; False when there is nothing sane to restore."""

@@ -95,15 +95,6 @@ def main():
     from PySide6.QtNetwork import QLocalServer, QLocalSocket
     _phase("Qt imports done")
 
-    # --- Set AppUserModelID for Windows Taskbar Icon ---
-    # This must be done BEFORE the QApplication is instantiated to ensure Windows
-    # associates the correct icon with the process from the very beginning.
-    if sys.platform == "win32":
-        import ctypes
-        myappid = 'Aigrator.Logos.Assistant.1' # arbitrary unique string
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
-    # --- End AppUserModelID ---
-
     # --- DPI awareness (MUST precede QApplication) ---
     # Without this the process gets a virtualized 1536x864 screen at 125%
     # scaling while screenshots are physical 1920x1080: every click beyond
@@ -127,6 +118,28 @@ def main():
     # for seconds — and EXE builds have no console at all.
     app = QApplication.instance() or QApplication(sys.argv)
     _phase("QApplication created")
+
+    # The application icon is what Windows puts on the taskbar button, the
+    # Alt+Tab entry and the window itself. Set it once on the application so
+    # the splash screen and every window created afterwards inherit it, and
+    # give Qt an absolute path: a relative one would silently resolve against
+    # whatever the working directory happens to be.
+    #
+    # Deliberately no SetCurrentProcessExplicitAppUserModelID: an explicit
+    # AppUserModelID that no shortcut or registry entry carries makes Windows
+    # 11 ignore both the window icon and the icon embedded in the EXE and draw
+    # the generic blank-document glyph on the taskbar button. Without it the
+    # shell derives the identity from the executable, which carries the icon
+    # (logos.spec, --icon).
+    try:
+        from PySide6.QtGui import QIcon
+        _app_icon = os.path.join(script_dir, "assets", "ico.ico")
+        if os.path.isfile(_app_icon):
+            app.setWindowIcon(QIcon(_app_icon))
+        else:
+            logging.warning(f"Application icon not found: {_app_icon}")
+    except Exception as e:
+        print(f"application icon setup failed: {e}", flush=True)
 
     # Startup splash, owned by THIS process. Because it is one of our own
     # windows (not a helper process spawned by the .bat), it can never be

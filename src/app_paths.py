@@ -26,3 +26,14 @@ def data_root() -> str:
     if base:
         return os.path.join(base, APP_FOLDER_NAME)
     return os.path.dirname(sys.executable)
+
+
+def resource_path(*parts: str) -> str:
+    """Absolute path to a bundled read-only resource (assets/, prompts/).
+
+    A frozen build copies those folders into the data folder at startup
+    (main._materialize_bundle_resources), so the path is stable for the whole
+    run. Qt resolves a relative path against the working directory, and a
+    missing icon file is silently a null icon, so callers get an absolute one.
+    """
+    return os.path.join(data_root(), *parts)

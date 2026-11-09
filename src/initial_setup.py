@@ -13,6 +13,7 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon
 
 # Assuming settings_manager is available in the path
+from app_paths import resource_path
 from src.ui.widgets.llm_provider_widget import LLMProviderWidget
 from src.ui.theme_manager import ThemeManager, DARK_THEME
 from llm.model_config_manager import ModelConfigManager
@@ -23,7 +24,7 @@ class InitialSetupWizard(QDialog):
     def __init__(self, settings_manager, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Initial Setup")
-        self.setWindowIcon(QIcon("assets/ico.ico"))
+        self.setWindowIcon(QIcon(resource_path("assets", "ico.ico")))
         self.setModal(True)
         self.setMinimumWidth(500)
 

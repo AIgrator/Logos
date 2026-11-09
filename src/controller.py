@@ -21,6 +21,7 @@ from llm.llm_worker import LLMWorker
 from llm.mode_capabilities import ModeCapabilities, SUBSECTIONS
 from project_manager import event_text
 import attachments as attachment_store
+from app_paths import resource_path
 from context import context_stats, handoff, model_context, project_rules, skills
 from context.tokens import ModelMetadata
 from settings_manager import SettingsManager
@@ -3210,7 +3211,7 @@ class AppController(QObject):
             dialog = QDialog(self.ui)
             dialog.setWindowTitle("Logos — permission required")
             try:
-                dialog.setWindowIcon(QIcon("assets/ico.ico"))
+                dialog.setWindowIcon(QIcon(resource_path("assets", "ico.ico")))
             except Exception:
                 pass
             dialog.setFixedWidth(width)
@@ -3297,7 +3298,7 @@ class AppController(QObject):
             dlg = QDialog(self.ui)
             dlg.setWindowTitle("Logos")
             try:
-                dlg.setWindowIcon(QIcon("assets/ico.ico"))
+                dlg.setWindowIcon(QIcon(resource_path("assets", "ico.ico")))
             except Exception:
                 pass
             dlg.setFixedWidth(width)
