@@ -513,7 +513,14 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `path` while the function accepted `directory`, so a live run died with
   `find_files() got an unexpected keyword argument 'path'`. It now takes `path`
   and keeps `directory` as a compatibility alias, the same way
-  `search_file_content` does. A user
+  `search_file_content` does. The argument *names* are checked before the call
+  too (`src/computer/tool_args.py`, used by `ToolExecWorker` and the Vision
+  `Executor`): a missing or extra keyword becomes one readable tool error that
+  names the accepted arguments instead of a Python `TypeError` the model
+  repeats, and a tool with `**kwargs` is left alone. Portable location tokens
+  (`{WORKDIR}`, `{HOME}`, `{DESKTOP}`, ...) are expanded in every file-tool
+  path (`Computer._resolve_path`) and in `execute_shell`'s command as well as
+  its `cwd`, so a token can no longer create a literal `{WORKDIR}` folder. A user
   message mid-turn seals the live block: `ChatWidget.add_message` with
   `role='user'` calls `seal_live_activity()`, which finishes the block as
   `Done` (`Stopped` when a step was still in flight) and marks that step
@@ -755,7 +762,11 @@ becomes usable: the catalogue is matched by name or description
 tool result, and the match is added to `_promoted_tools` so the *next* request
 declares it. That action aborts the rest of the batch (`abort=True`) because the
 queued calls were planned without the tool. Only tools the grants already hold
-are reachable — a catalog entry is never a permission.
+are reachable — a catalog entry is never a permission. It journals its own
+`tool_call`/`tool_result` pair (short display `Loaded on-demand tool: …`), so
+the Activity tab and a restored transcript show it, and a "no matches" result
+names `open_browser` / `open_terminal` when the capability that owns the tool
+is not attached.
 
 ## Settings
 
@@ -993,7 +1004,11 @@ Grounding is refs first, but not refs only (`src/browser/manager.py`).
 `BrowserManager.snapshot()` walks every frame of the page, so a control inside a
 cross-origin iframe (widgets, captchas, checkout forms) gets a ref like any other
 element and is marked `(frame N: host)` in the `browser_snapshot` output; clicks,
-fills and hovers then address it by that ref. `browser_read` appends the text of
+fills and hovers then address it by that ref. A checkable row carries its state
+(`(checked)` / `(unchecked)`) through `BrowserManager.snapshot_line`, which
+`browser_find` reuses, and a bare control takes the text that follows it before
+its parent's, so two checkboxes in one container no longer share the first
+line's label. `browser_read` appends the text of
 each frame as a `Frame N (host)` line, because a cross-origin frame never appears
 in the top document text. `browser_click` also takes `x`/`y` for the cases where
 no ref can exist — canvas, image maps, widgets that react only to raw mouse
@@ -1006,7 +1021,10 @@ or in a frame by index; its result is capped at 6 000 characters and wrapped as
 untrusted page content. `browser_eval` is the only browser tool whose every call
 asks for approval (`classify_action` in `src/browser/policy.py` returns a
 `page_javascript` check showing the script), because page JavaScript can read
-cookies and storage and fetch with the page's session. This is the reason the
+cookies and storage and fetch with the page's session. The prompt is
+`AppController.ask_browser_approval`, which reuses the Terminal permission
+dialog (Deny default, the check messages as reasons) instead of the old Yes/No
+`QMessageBox`. This is the reason the
 webscraper.io bot-check "CDP detection with a click within cross domain iframe"
 test can now pass at all: before frame-aware snapshots the checkbox had no ref
 and no tool could reach it. The remaining failure on that page, "Popular

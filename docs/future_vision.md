@@ -529,7 +529,8 @@ part that said "one session runs one mode".
 ## Backlog: browser tool surface (2026-11-06)
 
 > Status: slice 1 is implemented (see **Done: slice 1** at the end of this
-> section); slice 2 and the on-request items are still proposed. Compared
+> section), and the defects its first live run exposed are fixed (see **Done:
+> live-check fixes**); slice 2 and the on-request items are still proposed. Compared
 > against the in-app browser tools of OpenCode desktop. That tool list is used
 > as a checklist only: their Review pane, tab focus model and RPC file transfer
 > are consequences of their architecture (the browser lives in the desktop app,
@@ -624,4 +625,38 @@ each including prompt text, journal/replay and a test.
   local page: full-page and element screenshots, wheel and into-view scrolling,
   reload, check/uncheck (native and `role=checkbox`), eval by ref, `set_files`,
   and back/forward.
+
+### Done: live-check fixes (2026-11-09)
+
+Found while driving the slice-1 surface through a real task
+(`session-20261107-105225-03370f`), fixed before slice 2:
+
+- **A. Portable tokens.** File tools went through `Computer._resolve_path`,
+  which did not expand `{WORKDIR}` and friends, so `write_file` created a
+  literal `{WORKDIR}` folder inside the project (`path_exists` then said it
+  existed). Tokens now expand there and in `execute_shell`'s command line, not
+  only its `cwd`.
+- **B. Argument names.** The envelope accepts a free-form `arguments` object,
+  so `stop_shell_job` was called with `description` and no `job_id` and died
+  with an opaque Python `TypeError`. `src/computer/tool_args.py` validates the
+  names against the real signature before the call (both `ToolExecWorker` and
+  the Vision `Executor`) and reports the accepted arguments; `**kwargs` tools
+  are exempt.
+- **C. Snapshot rows.** Checkbox/radio/switch rows carry `(checked)` /
+  `(unchecked)`, rendered by `BrowserManager.snapshot_line` (also used by
+  `browser_find`), and a bare control takes the text after it before its
+  parent's, so two checkboxes in one `<div>` no longer both read "checkbox 1".
+- **D. Approval dialog.** A risky browser step asked through the old English
+  Yes/No `QMessageBox` while Terminal used its own dialog.
+  `AppController.ask_browser_approval` now feeds the check messages into the
+  Terminal permission dialog (Deny default), so every approval looks the same.
+- **E. `search_tools` journal.** The control tool ran invisibly: no
+  `tool_call`, so it never appeared in the Activity tab or a restored
+  transcript. It now journals a `tool_call`/`tool_result` pair and, on "no
+  matches", names `open_browser` / `open_terminal` when the owning capability
+  is not attached.
+- **F. Deferred to slice 2.** `browser_screenshot` still draws ref badges on a
+  plain viewport capture only and does not restrict `ref` to interactive
+  elements; deciding what a screenshot should label is part of the slice-2
+  "Diagnose" work.
 
