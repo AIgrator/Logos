@@ -8,7 +8,10 @@
 ; uninstall entry per user (HKCU "Installed apps" / Programs and Features),
 ; and the uninstaller removes the program plus its data folder
 ; %LOCALAPPDATA%\Logos (settings.json, logs, cache, prompts, assets) that the
-; one-file build creates at first launch. The Chromium engine in
+; one-file build creates at first launch. A running instance is ended before
+; any file is removed (WM_CLOSE, then a forced unload): Windows keeps a mapped
+; executable locked, and Setup's CloseApplications applies to installation
+; only. The Chromium engine in
 ; %LOCALAPPDATA%\ms-playwright (~700 MB) is outside both folders and may be
 ; shared with other Playwright programs, so the uninstaller asks about it:
 ; a checkbox that is off by default.
@@ -311,6 +314,52 @@ begin
     RegWriteExpandStringValue(HKCU, UserEnvKey, 'Path', Updated);
 end;
 
+{ The uninstaller cannot delete the program EXE while it is mapped in memory,
+  and Setup's CloseApplications covers installation only, not removal. So the
+  uninstaller ends a running instance itself: WM_CLOSE first (the app saves
+  its window geometry and journals on close), then a forced unload when it is
+  still there after a few seconds. Matching by image name also ends a second
+  copy of the app started from another folder, which is the same program. }
+const
+  AppProcessName = 'Logos.exe';
+
+function AppProcessRunning(): Boolean;
+var
+  ResultCode: Integer;
+begin
+  { tasklist lists the image; find returns 0 only when it matched a line. }
+  Result := Exec(ExpandConstant('{cmd}'),
+    '/C tasklist /FI "IMAGENAME eq ' + AppProcessName + '" /NH | find /I "' +
+    AppProcessName + '" >NUL',
+    '', SW_HIDE, ewWaitUntilTerminated, ResultCode) and (ResultCode = 0);
+end;
+
+procedure TerminateRunningApp();
+var
+  Attempt, ResultCode: Integer;
+begin
+  if not AppProcessRunning() then
+    Exit;
+  Exec(ExpandConstant('{sys}\taskkill.exe'), '/IM ' + AppProcessName,
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  for Attempt := 1 to 12 do
+  begin
+    if not AppProcessRunning() then
+      Exit;
+    Sleep(250);
+  end;
+  { Still alive: a modal dialog or a stuck turn is holding the window. }
+  Exec(ExpandConstant('{sys}\taskkill.exe'),
+       '/F /IM ' + AppProcessName + ' /T',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  for Attempt := 1 to 20 do
+  begin
+    if not AppProcessRunning() then
+      Exit;
+    Sleep(250);
+  end;
+end;
+
 procedure CurStepChanged(CurStep: TSetupStep);
 begin
   if (CurStep = ssPostInstall) and WizardIsTaskSelected('addtopath') then
@@ -321,6 +370,9 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 begin
   if CurUninstallStep = usUninstall then
   begin
+    { Before any file is touched: a running instance locks Logos.exe, the
+      logs and the settings it keeps open. }
+    TerminateRunningApp();
     RemoveUserPathDir(ExpandConstant('{app}'));
     if DeleteBrowserEngine then
       DelTree(BrowserEngineDir(), True, True, True);
