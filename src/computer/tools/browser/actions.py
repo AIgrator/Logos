@@ -70,6 +70,58 @@ def _list_arg(value) -> list:
     return [str(value)]
 
 
+def _object_arg(value) -> dict:
+    """An object argument that may arrive as a dict or a JSON string."""
+    if value is None:
+        return {}
+    if isinstance(value, dict):
+        return dict(value)
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return {}
+        try:
+            decoded = json.loads(text)
+        except ValueError:
+            raise ValueError(
+                f"Expected a JSON object, got '{value}'.") from None
+        if isinstance(decoded, dict):
+            return decoded
+    raise ValueError(f"Expected a JSON object, got '{value}'.")
+
+
+def _clip_arg(value):
+    """Validates the optional clip rectangle of browser_screenshot."""
+    clip = _object_arg(value)
+    if not clip:
+        return None
+    missing = [key for key in ("x", "y", "width", "height")
+               if clip.get(key) is None]
+    if missing:
+        raise ValueError(
+            "browser_screenshot clip needs x, y, width and height; missing: "
+            + ", ".join(missing) + ".")
+    try:
+        rectangle = {
+            "x": int(clip["x"]), "y": int(clip["y"]),
+            "width": int(clip["width"]), "height": int(clip["height"]),
+        }
+    except (TypeError, ValueError):
+        raise ValueError(
+            "browser_screenshot clip values must be integers.") from None
+    if rectangle["width"] <= 0 or rectangle["height"] <= 0:
+        raise ValueError(
+            "browser_screenshot clip width and height must be positive.")
+    return rectangle
+
+
+def _selector_arg(value):
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
 @tool_meta(
     tool={
         "name": "browser_goto",
@@ -496,6 +548,89 @@ def browser_set_files(self, **kwargs):
 
 @tool_meta(
     tool={
+        "name": "browser_downloads",
+        "strategic": "Lists downloaded files and saves one.",
+        "description": (
+            "Lists the files the page has downloaded in this browser session. Each one is "
+            "already staged under the project's .logos/downloads folder, so it survives "
+            "the click that produced it. action=save copies one to a path you choose (the "
+            "path may be a file or an existing folder). A download starts when a click or "
+            "a form submit triggers it; if nothing appears, check browser_network."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "What is being downloaded and why.", "required": True},
+            "action": {"type": "STRING", "description": "list (default) or save.", "required": False},
+            "index": {"type": "INTEGER", "description": "Download number from action=list (required for save).", "required": False},
+            "path": {"type": "STRING", "description": "Destination file or folder for action=save.", "required": False},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_downloads(self, **kwargs):
+    mgr = _manager(self)
+    mgr.pump_events()
+    action = str(kwargs.get("action") or "list").strip().lower()
+    if action == "list":
+        items = mgr.downloads()
+        if not items:
+            return ("No downloads in this browser session yet. A download appears "
+                    "after a click or submit that starts one; check browser_network "
+                    "if it did not.")
+        lines = [f"Downloads: {len(items)} file(s) in this browser session"]
+        for item in items:
+            state = item.get("path") or f"not saved: {item.get('error') or 'unknown'}"
+            source = f" · from {item['url']}" if item.get("url") else ""
+            lines.append(
+                f"  #{item['index']} {item.get('filename') or 'file'}{source} · {state}")
+        lines.append("Use action=save with index and path to copy one elsewhere.")
+        return "\n".join(lines)
+    if action != "save":
+        raise ValueError(
+            f"Action 'browser_downloads' failed: unknown action '{action}'; "
+            f"use list or save.")
+    index = kwargs.get("index")
+    if index is None:
+        raise ValueError(
+            "Action 'browser_downloads' failed: action=save needs an index from "
+            "action=list.")
+    path = str(kwargs.get("path") or "").strip()
+    if not path:
+        raise ValueError(
+            "Action 'browser_downloads' failed: action=save needs a destination path.")
+    resolver = getattr(self, "_resolve_path", None)
+    destination = resolver(path) if callable(resolver) else path
+    return mgr.save_download(index, destination)
+
+
+@tool_meta(
+    tool={
+        "name": "browser_drag",
+        "strategic": "Drags one element onto another.",
+        "description": (
+            "Drags the element with source_ref onto the element with target_ref, for "
+            "kanban boards, sortable lists and sliders. Both refs come from the latest "
+            "browser_snapshot. Take a fresh snapshot afterwards: a drag often re-renders "
+            "the list."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "What is being dragged where, and why.", "required": True},
+            "source_ref": {"type": "INTEGER", "description": "Ref of the element to drag (required).", "required": False},
+            "target_ref": {"type": "INTEGER", "description": "Ref of the element to drop onto (required).", "required": False},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_drag(self, **kwargs):
+    source = _ref_arg(kwargs.get("source_ref"))
+    target = _ref_arg(kwargs.get("target_ref"))
+    if source is None or target is None:
+        raise ValueError(
+            "Action 'browser_drag' failed: both source_ref and target_ref are "
+            "required. Take browser_snapshot first.")
+    mgr = _manager(self)
+    return _with_dialog_note(mgr, mgr.drag(source, target))
+
+
+@tool_meta(
+    tool={
         "name": "browser_wait_for",
         "strategic": "Waits for time or text.",
         "description": "Waits for a number of seconds (max 30), for text to appear, or for text to disappear. Prefer this over blind repeated snapshots.",
@@ -557,13 +692,28 @@ def browser_find(self, **kwargs):
             "Captures a screenshot ONLY when the current step cannot be solved from text "
             "(visual puzzle, image options, layout that text cannot convey). The image is "
             "attached to your next request automatically, exactly once. By default it is "
-            "the visible viewport; full_page=true captures the whole scrollable page, and "
-            "ref captures just that one element. Do NOT use routinely: every image costs "
-            "extra tokens."),
+            "the visible viewport; full_page=true captures the whole scrollable page, "
+            "ref captures one snapshot element, selector captures the first element "
+            "matching a CSS selector (a chart, table or card that has no ref), and clip "
+            "captures a rectangle {x, y, width, height} in CSS pixels of the page. Use "
+            "only one of ref, selector, clip and full_page per call. Do NOT use routinely: "
+            "every image costs extra tokens."),
         "arguments": {
             "description": {"type": "STRING", "description": "Why the image is needed for this step.", "required": True},
             "full_page": {"type": "BOOLEAN", "description": "Capture the whole scrollable page instead of the viewport.", "required": False},
             "ref": {"type": "INTEGER", "description": "Capture only the element with this ref from the latest snapshot.", "required": False},
+            "selector": {"type": "STRING", "description": "Capture the first element matching this CSS selector (for a non-interactive chart/table/card).", "required": False},
+            "clip": {
+                "type": "OBJECT",
+                "description": "Capture a rectangle of the page, in CSS pixels from the document's top-left.",
+                "required": False,
+                "properties": {
+                    "x": {"type": "INTEGER", "description": "Left edge in CSS pixels.", "required": True},
+                    "y": {"type": "INTEGER", "description": "Top edge in CSS pixels.", "required": True},
+                    "width": {"type": "INTEGER", "description": "Rectangle width in CSS pixels.", "required": True},
+                    "height": {"type": "INTEGER", "description": "Rectangle height in CSS pixels.", "required": True},
+                },
+            },
         },
     },
     flags={"platform": "any", "mode": "browser"},
@@ -572,10 +722,35 @@ def browser_screenshot(self, **kwargs):
     mgr = _manager(self)
     full_page = _bool_arg(kwargs.get("full_page"), False)
     ref = _ref_arg(kwargs.get("ref"))
-    prefix = "browser_element" if ref is not None else ("browser_full" if full_page else "browser")
-    path = mgr.capture_screenshot(prefix=prefix, full_page=full_page, ref=ref)
-    scope = (f"element ref={ref}" if ref is not None
-             else ("full page" if full_page else "viewport"))
+    selector = _selector_arg(kwargs.get("selector"))
+    clip = _clip_arg(kwargs.get("clip"))
+    chosen = [name for name, value in (
+        ("ref", ref), ("selector", selector), ("clip", clip)) if value is not None]
+    if len(chosen) > 1:
+        raise ValueError(
+            "browser_screenshot accepts only one of ref, selector or clip per call; "
+            f"got {', '.join(chosen)}.")
+    if full_page and chosen:
+        raise ValueError(
+            "browser_screenshot accepts full_page only without ref, selector or clip.")
+    if ref is not None:
+        prefix, scope = "browser_element", f"element ref={ref}"
+    elif selector is not None:
+        prefix, scope = "browser_selector", f"selector {selector!r}"
+    elif clip is not None:
+        prefix = "browser_clip"
+        scope = (f"clip x={clip['x']} y={clip['y']} "
+                 f"{clip['width']}x{clip['height']}")
+    elif full_page:
+        prefix, scope = "browser_full", "full page"
+    else:
+        prefix, scope = "browser", "viewport"
+    path = mgr.capture_screenshot(prefix=prefix, full_page=full_page, ref=ref,
+                                  clip=clip, selector=selector)
+    if selector is not None:
+        count = mgr.selector_count(selector)
+        if count > 1:
+            scope += f" (first of {count} matches)"
     return (f"Screenshot of the {scope} saved to {path}. It will be attached to "
             f"your next request automatically (once).")
 
@@ -642,16 +817,19 @@ def browser_console(self, **kwargs):
         "strategic": "Shows recent requests with status and timing.",
         "description": (
             "Returns the newest network requests of the current page with method, URL, "
-            "HTTP status, resource type and duration, oldest first. Use it after a form "
-            "submit, a login or a fetch to see what the server actually answered: a 404, "
-            "a 500 or a connection failure explains a broken flow without guessing. "
-            "only_problems=true keeps only failed requests and statuses >= 400. The full "
+            "HTTP status, resource type and duration, oldest first. XHR/fetch responses "
+            "also carry a bounded body preview (JSON or text), which is what explains a "
+            "200 that rendered nothing. Use it after a form submit, a login or a fetch to "
+            "see what the server actually answered: a 404, a 500 or a connection failure "
+            "explains a broken flow without guessing. only_problems=true keeps only failed "
+            "requests and statuses >= 400; include_body=false hides the previews. The full "
             "log of this browser session is a file on disk; read more of it with "
             "read_files or search it with search_file_content."),
         "arguments": {
             "description": {"type": "STRING", "description": "What is being diagnosed.", "required": True},
             "limit": {"type": "INTEGER", "description": "How many newest entries to return (default 40, max 200).", "required": False},
             "only_problems": {"type": "BOOLEAN", "description": "Keep only failed requests and 4xx/5xx statuses.", "required": False},
+            "include_body": {"type": "BOOLEAN", "description": "Include bounded XHR/fetch response body previews (default true).", "required": False},
         },
     },
     flags={"platform": "any", "mode": "browser"},
@@ -661,10 +839,12 @@ def browser_network(self, **kwargs):
     mgr.pump_events()
     limit = _int_arg(kwargs.get("limit"), 40, 1, 200)
     only_problems = _bool_arg(kwargs.get("only_problems"), False)
+    include_body = _bool_arg(kwargs.get("include_body"), True)
     stats = mgr.logs.stats()
     head = (f"Network: {stats['network']} response(s) in this browser session "
             f"({stats['network_problems']} failed or status >= 400)")
-    body = mgr.logs.render_network(limit=limit, only_problems=only_problems)
+    body = mgr.logs.render_network(limit=limit, only_problems=only_problems,
+                                   include_body=include_body)
     if not body:
         return (f"{head}\nNo requests to show"
                 + (" that failed or returned >= 400." if only_problems else "."))

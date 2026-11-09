@@ -9,10 +9,12 @@ later become the `dom` GroundingBackend without changing callers.
 import json
 import logging
 import os
+import shutil
 import time
+from collections import deque
 from urllib.parse import urlsplit
 
-from .logs import BrowserEventLog
+from .logs import BODY_MAX_CHARS, BODY_READ_LIMIT, BrowserEventLog
 from .policy import (BrowserCancelledError, DEFAULT_NETWORK_ACCESS,
                      is_sensitive_text, normalize_network_access,
                      redact_url, validate_url)
@@ -66,7 +68,8 @@ class BrowserManager:
                  timeout_ms: int = 30000, block_ads: bool = True,
                  easylist_path: str | None = None, allowed_domains=None,
                  network_access: str = DEFAULT_NETWORK_ACCESS,
-                 log_dir: str | None = None, screenshot_dir: str = "screenshots"):
+                 log_dir: str | None = None, screenshot_dir: str = "screenshots",
+                 downloads_dir: str | None = None):
         self.headless = headless
         self.profile_dir = profile_dir
         self.timeout_ms = timeout_ms
@@ -78,6 +81,13 @@ class BrowserManager:
         # Where browser_screenshot saves its PNGs (<project>/.logos/screenshots
         # when a project is open; the owner decides, see BrowserService).
         self.screenshot_dir = screenshot_dir or "screenshots"
+        # Downloads are staged beside the screenshots, so a file the page
+        # offered survives the click and can be read/saved later.
+        self.downloads_dir = downloads_dir or ""
+        self._downloads = deque(maxlen=100)
+        self._download_seq = 0
+        self._pending_downloads = deque(maxlen=100)
+        self._pending_bodies = deque(maxlen=100)
         self.logs = BrowserEventLog()
         self._diag_pages = set()  # id(page) with console/network listeners
         self.allowed_domains = list(allowed_domains or [])
@@ -350,6 +360,10 @@ class BrowserManager:
         self._guard_pages = set()
         self._guard_sessions = {}
         self._diag_pages = set()
+        self._downloads.clear()
+        self._download_seq = 0
+        self._pending_downloads.clear()
+        self._pending_bodies.clear()
         self.logs.close()
         self.last_known_url = ""
 
@@ -448,9 +462,25 @@ class BrowserManager:
                         duration = end - start
                 except Exception:
                     duration = None
-                logs.network(request.method, redact_url(request.url or ""),
-                             response.status, request.resource_type or "",
-                             duration)
+                resource_type = request.resource_type or ""
+                entry = logs.network(request.method, redact_url(request.url or ""),
+                                     response.status, resource_type,
+                                     duration)
+                # A 200 with an empty screen is usually a fetch that returned
+                # nothing useful. Queue the body read for pump_events, because
+                # reading it here would block Playwright's event dispatch.
+                if (resource_type in ("xhr", "fetch")
+                        and (response.status or 0) < 400):
+                    self._pending_bodies.append((entry.get("id"), response))
+            except Exception:
+                pass
+
+        def _download(download):
+            # The event fires after the headers, but the bytes are only
+            # available while the page is alive: keep the object and save it
+            # in pump_events, which every browser tool calls before reading.
+            try:
+                self._pending_downloads.append(download)
             except Exception:
                 pass
 
@@ -477,7 +507,7 @@ class BrowserManager:
         for event, handler in (
                 ("console", _console), ("pageerror", _page_error),
                 ("response", _response), ("requestfailed", _request_failed),
-                ("framenavigated", _navigated)):
+                ("download", _download), ("framenavigated", _navigated)):
             try:
                 page.on(event, handler)
             except Exception as e:
@@ -498,7 +528,9 @@ class BrowserManager:
         Playwright's sync API dispatches page events only while a protocol call
         is in flight, so ``browser_console``/``browser_network`` would otherwise
         report the state of the previous call. A tiny wait is enough: the queue
-        already holds everything that happened in between.
+        already holds everything that happened in between. Response bodies and
+        downloads are consumed here too, because reading them inside the event
+        handler would block the dispatcher.
         """
         page = self._page
         if page is None:
@@ -507,6 +539,115 @@ class BrowserManager:
             page.wait_for_timeout(max(1, int(milliseconds)))
         except Exception as e:
             logger.debug(f"Event pump skipped: {e}")
+        self._drain_downloads()
+        self._drain_response_bodies()
+
+    def _drain_downloads(self) -> None:
+        while self._pending_downloads:
+            try:
+                download = self._pending_downloads.popleft()
+            except IndexError:
+                return
+            self._save_download_object(download)
+
+    def _save_download_object(self, download) -> None:
+        """Saves one Playwright download into the staging folder (best effort)."""
+        self._download_seq += 1
+        entry = {
+            "index": self._download_seq,
+            "filename": "",
+            "url": "",
+            "path": "",
+            "error": "",
+            "at": time.time(),
+        }
+        try:
+            entry["filename"] = os.path.basename(
+                str(download.suggested_filename or "download.bin"))
+        except Exception:
+            entry["filename"] = "download.bin"
+        try:
+            entry["url"] = redact_url(str(download.url or ""))
+        except Exception:
+            entry["url"] = ""
+        try:
+            directory = self._download_dir()
+            os.makedirs(directory, exist_ok=True)
+            stamp = time.strftime("%Y%m%d_%H%M%S")
+            target = os.path.join(directory, f"{stamp}_{entry['filename']}")
+            stem, suffix = os.path.splitext(target)
+            counter = 2
+            while os.path.exists(target):
+                target = f"{stem}_{counter}{suffix}"
+                counter += 1
+            download.save_as(target)
+            entry["path"] = target
+            logger.info(f"Browser download saved: {target}")
+            self._prune_downloads()
+        except Exception as e:
+            entry["error"] = str(e)[:300]
+            logger.warning(f"Could not save a browser download: {e}")
+        self._downloads.append(entry)
+
+    def _download_dir(self) -> str:
+        """``<project>/.logos/downloads``, or a folder beside the screenshots."""
+        if self.downloads_dir:
+            return self.downloads_dir
+        return os.path.join(
+            os.path.dirname(os.path.abspath(self.screenshot_dir)), "downloads")
+
+    def _prune_downloads(self, keep: int = 100) -> None:
+        """Keeps the newest staged downloads so a long project stays bounded."""
+        try:
+            directory = self._download_dir()
+            names = [name for name in os.listdir(directory)
+                     if os.path.isfile(os.path.join(directory, name))]
+            paths = [os.path.join(directory, name) for name in names]
+            paths.sort(key=os.path.getmtime, reverse=True)
+            for stale in paths[keep:]:
+                try:
+                    os.remove(stale)
+                except OSError:
+                    pass
+        except OSError as error:
+            logger.debug(f"Could not prune downloads: {error}")
+
+    def _drain_response_bodies(self) -> None:
+        while self._pending_bodies:
+            try:
+                entry_id, response = self._pending_bodies.popleft()
+            except IndexError:
+                return
+            self._read_response_body(entry_id, response)
+
+    def _read_response_body(self, entry_id, response) -> None:
+        """Reads one XHR/fetch body, bounded, and never raises into the pump."""
+        try:
+            headers = response.headers or {}
+            content_type = headers.get("content-type", "")
+            try:
+                declared = int(headers.get("content-length") or 0)
+            except (TypeError, ValueError):
+                declared = 0
+            if declared > BODY_READ_LIMIT:
+                self.logs.attach_body(
+                    entry_id, "", content_type,
+                    error=f"body skipped: {declared} bytes declared")
+                return
+            raw = response.body()
+            if raw is None:
+                self.logs.attach_body(entry_id, "", content_type,
+                                      error="body was empty")
+                return
+            text = raw.decode("utf-8", errors="replace")
+            self.logs.attach_body(
+                entry_id, text, content_type,
+                truncated=len(text) > BODY_MAX_CHARS)
+        except Exception as e:
+            try:
+                self.logs.attach_body(entry_id, "", "", error=str(e)[:300])
+            except Exception:
+                pass
 
     def _install_dialog_router(self, page) -> None:
         """Records JS dialogs; auto-dismiss preserves default Playwright behavior."""
@@ -1262,6 +1403,55 @@ class BrowserManager:
         names = ", ".join(os.path.basename(p) for p in files)
         return f"Attached {len(files)} file(s) to element ref={ref}: {names}."
 
+    def downloads(self) -> list[dict]:
+        """Downloads captured in this browser session (staged copies)."""
+        self._drain_downloads()
+        return [dict(item) for item in self._downloads]
+
+    def save_download(self, index, destination) -> str:
+        """Copies a staged download to a path the user (or the model) chose."""
+        self._drain_downloads()
+        try:
+            number = int(index)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"browser_downloads needs a numeric index, got {index!r}.") from None
+        entry = next(
+            (item for item in self._downloads if item.get("index") == number), None)
+        if entry is None:
+            available = ", ".join(str(item["index"]) for item in self._downloads) or "none"
+            raise ValueError(
+                f"Download #{number} does not exist. Available indexes: {available}.")
+        source = entry.get("path") or ""
+        if not source or not os.path.isfile(source):
+            reason = entry.get("error") or "the file was not saved"
+            raise ValueError(
+                f"Download #{number} ({entry.get('filename') or 'file'}) cannot be "
+                f"saved: {reason}.")
+        target = str(destination or "").strip()
+        if not target:
+            raise ValueError("browser_downloads save needs a destination path.")
+        if os.path.isdir(target) or target.endswith(("/", os.sep)):
+            os.makedirs(target, exist_ok=True)
+            target = os.path.join(target, entry.get("filename")
+                                  or os.path.basename(source))
+        else:
+            os.makedirs(os.path.dirname(os.path.abspath(target)), exist_ok=True)
+        shutil.copy2(source, target)
+        logger.info(f"Browser download #{number} copied to {target}")
+        return (f"Saved download #{number} ({entry.get('filename') or 'file'}) "
+                f"to {target}.")
+
+    def drag(self, source_ref: int, target_ref: int) -> str:
+        """Drags one snapshot element onto another (kanban, sorting, sliders)."""
+        self._check_cancel()
+        source = self._ref(source_ref)
+        target = self._ref(target_ref)
+        logger.info(f"Browser drag ref={source_ref} -> ref={target_ref}")
+        source.drag_to(target, timeout=self.timeout_ms)
+        self._last_screenshot_path = None
+        return f"Dragged element ref={source_ref} onto ref={target_ref}."
+
     def navigate_back(self) -> str:
         self._check_cancel()
         page = self._require_page()
@@ -1534,12 +1724,50 @@ class BrowserManager:
         except Exception:
             pass
 
-    def screenshot(self, path: str, full_page: bool = False, ref: int | None = None) -> str:
+    def _selector_locator(self, selector: str):
+        """The first element matching a CSS selector, or a readable error.
+
+        Selectors are the semantic way to capture a chart, table or card that
+        has no snapshot ref: refs exist only for interactive elements.
+        """
+        text = str(selector or "").strip()
+        if not text:
+            raise ValueError("browser_screenshot needs a non-empty selector.")
+        page = self._require_page()
+        try:
+            locator = page.locator(text)
+            count = locator.count()
+        except Exception as e:
+            raise ValueError(
+                f"Invalid selector {text!r}: {e}") from None
+        if not count:
+            raise ValueError(
+                f"No element matches selector {text!r}. Check the page HTML or "
+                f"take a browser_snapshot first.")
+        return locator.first, count
+
+    def selector_count(self, selector: str) -> int:
+        """How many elements match a selector (0 when invalid or none)."""
+        try:
+            return int(self._selector_locator(selector)[1])
+        except Exception:
+            return 0
+
+    def screenshot(self, path: str, full_page: bool = False, ref: int | None = None,
+                   clip: dict | None = None, selector: str | None = None) -> str:
         self._check_cancel()
         page = self._require_page()
         if ref is not None and str(ref).strip() != "":
             # One element: badges of other refs would only add noise.
             self._ref(ref).screenshot(path=path, timeout=self.timeout_ms)
+            return path
+        if selector is not None and str(selector).strip() != "":
+            locator, _count = self._selector_locator(selector)
+            locator.screenshot(path=path, timeout=self.timeout_ms)
+            return path
+        if clip:
+            self._check_clip(clip)
+            page.screenshot(path=path, clip=clip)
             return path
         if full_page:
             # Ref badges are fixed-position overlays; on a full-page capture
@@ -1553,8 +1781,32 @@ class BrowserManager:
             self._remove_ref_badges()
         return path
 
+    @staticmethod
+    def _check_clip(clip: dict) -> None:
+        """Validates a clip rectangle before Playwright sees it."""
+        if not isinstance(clip, dict):
+            raise ValueError("browser_screenshot clip must be an object.")
+        missing = [key for key in ("x", "y", "width", "height")
+                   if clip.get(key) is None]
+        if missing:
+            raise ValueError(
+                "browser_screenshot clip needs x, y, width and height; missing: "
+                + ", ".join(missing) + ".")
+        try:
+            width = int(clip["width"])
+            height = int(clip["height"])
+            int(clip["x"])
+            int(clip["y"])
+        except (TypeError, ValueError):
+            raise ValueError(
+                "browser_screenshot clip values must be integers.") from None
+        if width <= 0 or height <= 0:
+            raise ValueError(
+                "browser_screenshot clip width and height must be positive.")
+
     def capture_screenshot(self, prefix: str = "browser", full_page: bool = False,
-                           ref: int | None = None) -> str:
+                           ref: int | None = None, clip: dict | None = None,
+                           selector: str | None = None) -> str:
         """Saves a screenshot, remembered once for the next LLM request."""
         self._check_cancel()
         from datetime import datetime
@@ -1563,7 +1815,8 @@ class BrowserManager:
         path = os.path.join(
             self.screenshot_dir,
             f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png")
-        self.screenshot(path, full_page=full_page, ref=ref)
+        self.screenshot(path, full_page=full_page, ref=ref, clip=clip,
+                        selector=selector)
         self._prune_screenshots()
         self._last_screenshot_path = path
         logger.info(f"Browser screenshot saved: {path}")

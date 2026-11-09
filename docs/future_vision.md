@@ -198,11 +198,12 @@ on.
 |---|---|---|
 | base | read_files, list_directory, search_file_content, open_terminal, open_browser, search_tools, finish, communicate_to_user, update_plan, use_skill | — |
 | terminal | find_files, path_exists, create_directory, write_file, replace, replace_many, delete_files, copy_files, move_files, execute_shell, poll_shell_job, stop_shell_job, wait_seconds, screenshot, get_clipboard_content, web_search, web_fetchs, download_file, display_message | mcp_list, mcp_get, mcp_call |
-| browser | browser_goto, browser_snapshot, browser_click, browser_fill, browser_press, browser_read, browser_screenshot, browser_wait_for, browser_tabs, browser_close | browser_eval, browser_console, browser_network, browser_frames, browser_handle_dialog, browser_select_option, browser_hover, browser_find, browser_navigate_back |
+| browser | browser_goto, browser_snapshot, browser_click, browser_fill, browser_press, browser_read, browser_screenshot, browser_wait_for, browser_tabs, browser_close | browser_eval, browser_console, browser_network, browser_frames, browser_handle_dialog, browser_select_option, browser_hover, browser_find, browser_navigate_back, browser_navigate_forward, browser_reload, browser_scroll, browser_check, browser_uncheck, browser_set_files, browser_downloads, browser_drag |
 | vision | the provider's Computer Use toolset plus the CUA prompt | — |
 
 Actual counts: a terminal session declares 29 tools (3 on demand), a browser
-session 20 (9 on demand), and a session holding both capabilities 39. That is
+session 20 native plus 17 on demand (37 granted), and a session holding both
+capabilities 39 native (59 granted). That is
 above the target of ≈30 for the mixed case because a few tools were kept native
 deliberately — `find_files`, `path_exists` and `create_directory` are ordinary
 file work, and hiding them would have changed behaviour for a marginal saving.
@@ -528,9 +529,10 @@ part that said "one session runs one mode".
 
 ## Backlog: browser tool surface (2026-11-06)
 
-> Status: slice 1 is implemented (see **Done: slice 1** at the end of this
-> section), and the defects its first live run exposed are fixed (see **Done:
-> live-check fixes**); slice 2 and the on-request items are still proposed. Compared
+> Status: slice 1 and slice 2 are implemented (see **Done: slice 1** and
+> **Done: slice 2** at the end of this section), and the defects their first
+> live runs exposed are fixed (see **Done: live-check fixes**); the on-request
+> items are still proposed. Compared
 > against the in-app browser tools of OpenCode desktop. That tool list is used
 > as a checklist only: their Review pane, tab focus model and RPC file transfer
 > are consequences of their architecture (the browser lives in the desktop app,
@@ -582,8 +584,9 @@ each including prompt text, journal/replay and a test.
 1. **See and act** (about 1.5-2 days): screenshot arguments, reload, forward,
    scroll, check, `set_files`. Closes "cannot see the whole page", "cannot see
    the new code", "cannot test an upload".
-2. **Diagnose** (about 1.5 days): downloads, bounded response bodies, drag.
-   Turns the browser from "look at a page" into "find out why it broke".
+2. **Diagnose** (done, see **Done: slice 2**): downloads, bounded response
+   bodies, drag. Turns the browser from "look at a page" into "find out why it
+   broke".
 3. **Only on request**: CPU profile and trace, behind the catalog, when a real
    performance task appears.
 
@@ -655,8 +658,43 @@ Found while driving the slice-1 surface through a real task
   transcript. It now journals a `tool_call`/`tool_result` pair and, on "no
   matches", names `open_browser` / `open_terminal` when the owning capability
   is not attached.
-- **F. Deferred to slice 2.** `browser_screenshot` still draws ref badges on a
-  plain viewport capture only and does not restrict `ref` to interactive
-  elements; deciding what a screenshot should label is part of the slice-2
-  "Diagnose" work.
+- **F. Screenshot scopes.** `browser_screenshot` could only capture the
+  viewport, the whole page or one *interactive* element, because snapshot refs
+  exist only for links, buttons, fields and other controls. A chart, table or
+  card with no ref could not be captured at all. Slice 2 adds `selector` and
+  `clip` for exactly that; ref badges still appear only on a plain viewport
+  capture, and badges on a full-page capture remain deliberately deferred (the
+  user saw no need for them).
+
+### Done: slice 2 (2026-11-09)
+
+The "Diagnose" slice, plus the F decision from the live check:
+
+- **Screenshot scopes.** `browser_screenshot` takes `selector` (first element
+  matching a CSS selector, for a chart/table/card with no ref) and `clip`
+  (`{x, y, width, height}` in CSS pixels of the page). `ref`, `selector`, `clip`
+  and `full_page` are mutually exclusive scopes; a call naming more than one is
+  rejected with a readable error. `clip` is validated before Playwright sees it,
+  and `selector` reports how many elements matched. The action layer accepts the
+  object either as a real object or as a JSON string.
+- **Downloads.** `BrowserManager` hooks `page.on("download")`, stages each file
+  under `<project>/.logos/downloads` (newest 100 kept) in `pump_events` rather
+  than inside the event handler, and exposes `browser_downloads`
+  (`action=list|save`, `index`, `path`). A download no longer disappears when
+  the click that produced it returns.
+- **Response bodies.** XHR/fetch responses queue their `Response` object;
+  `pump_events` reads the body after the event, keeps at most 4 000 characters
+  in `src/browser/logs.py` and the session log, and skips a declared body over
+  256 KB. `browser_network` shows a 600-character preview (`include_body=false`
+  hides it), so a `200` with an empty screen can be explained from the JSON the
+  server actually sent.
+- **Drag.** `browser_drag` drags one snapshot ref onto another with
+  `locator.drag_to`, for kanban boards, sortable lists and sliders. It shares the
+  risky-action word list with `browser_click`, so a drag described as
+  destructive asks for approval.
+- `src/browser/test_cli.py slice2 --headless` verifies selector and clip
+  screenshots, a real XHR body, a staged and saved download, and an HTML5 drag
+  on a local HTTP page. `slice1`, `verify` and `form` still pass.
+- Full-page ref badges stay out of scope, as decided during the F discussion:
+  the full-page capture is for layout, not for acting by refs.
 

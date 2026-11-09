@@ -9,8 +9,11 @@ the model reads in slices with `read_files` or greps with
 a noisy single-page app does not eat the context window.
 
 The capture is deliberately passive: it never blocks, never raises into the
-Playwright event loop and never stores page bodies - only console text, request
-lines and statuses.
+Playwright event loop and keeps only a bounded preview of XHR/fetch response
+bodies. A status alone cannot explain the typical SPA failure ("200, but the
+screen is empty"), so the model needs the JSON/text the server actually sent.
+Bodies are read by the manager after the event (see `BrowserManager`), capped
+here, and never stored for documents or assets.
 """
 import logging
 import os
@@ -27,6 +30,11 @@ CONSOLE_MAX = 1000
 NETWORK_MAX = 3000
 ENTRY_MAX_CHARS = 2000
 RENDER_MAX_CHARS = 7000
+# A response body is evidence, not a document: keep the first part of it and
+# say so. The full body would blow up the ring, the log file and the transcript.
+BODY_MAX_CHARS = 4000
+BODY_PREVIEW_CHARS = 600
+BODY_READ_LIMIT = 256 * 1024
 
 # level=… argument of browser_console -> accepted message levels.
 _LEVEL_FILTERS = {
@@ -87,6 +95,7 @@ class BrowserEventLog:
         self._console_warnings = 0
         self._network_total = 0
         self._network_problems = 0
+        self._network_seq = 0
 
     # -- lifecycle ------------------------------------------------------
 
@@ -130,6 +139,7 @@ class BrowserEventLog:
             self._console_warnings = 0
             self._network_total = 0
             self._network_problems = 0
+            self._network_seq = 0
 
     def _prune(self) -> None:
         """Keeps the newest files; the current session is not written yet."""
@@ -202,7 +212,7 @@ class BrowserEventLog:
             self._write_locked(f"[{stamp}] {kind} {level}: {text}{where}\n")
 
     def network(self, method: str, url: str, status=None,
-                resource_type: str = "", duration_ms=None, error: str = "") -> None:
+                resource_type: str = "", duration_ms=None, error: str = "") -> dict:
         stamp = self._next_stamp()
         failed = bool(error) or status is None
         try:
@@ -216,13 +226,47 @@ class BrowserEventLog:
             "type": str(resource_type or ""),
             "ms": round(float(duration_ms), 1) if duration_ms is not None else None,
             "failed": failed, "error": _one_line(error)[:300],
+            "body": None, "body_type": "", "body_truncated": False,
+            "body_error": "",
         }
         with self._lock:
+            self._network_seq += 1
+            entry["id"] = self._network_seq
             self._network.append(entry)
             self._network_total += 1
             if problem:
                 self._network_problems += 1
             self._write_locked(self._network_line(entry) + "\n")
+        return entry
+
+    def attach_body(self, entry_id: int, text: str, content_type: str = "",
+                    truncated: bool = False, error: str = "") -> None:
+        """Attaches a bounded XHR/fetch body to the response entry it belongs to.
+
+        Called after the event, never inside it: reading a body is a protocol
+        round-trip, and doing that while Playwright dispatches events can stall
+        the page. The newest matching entry wins, so a duplicate id cannot
+        overwrite an older response.
+        """
+        body = "" if error else _one_line(text)[:BODY_MAX_CHARS]
+        with self._lock:
+            entry = None
+            for candidate in reversed(self._network):
+                if candidate.get("id") == entry_id:
+                    entry = candidate
+                    break
+            if entry is None:
+                return
+            entry["body"] = body
+            entry["body_type"] = _one_line(content_type)[:120]
+            entry["body_truncated"] = bool(truncated)
+            entry["body_error"] = _one_line(error)[:300]
+            if entry["body_error"]:
+                self._write_locked(
+                    f"  body: <unavailable: {entry['body_error']}>\n")
+            elif body:
+                suffix = " …" if truncated else ""
+                self._write_locked(f"  body: {body}{suffix}\n")
 
     @staticmethod
     def _network_line(entry: dict) -> str:
@@ -267,14 +311,26 @@ class BrowserEventLog:
         entries = entries[-max(1, int(limit)):]
         return _clipped("\n".join(self._console_line(e) for e in entries))
 
-    def render_network(self, limit: int = 40, only_problems: bool = False) -> str:
+    def render_network(self, limit: int = 40, only_problems: bool = False,
+                       include_body: bool = True) -> str:
         with self._lock:
             entries = list(self._network)
         if only_problems:
             entries = [e for e in entries
                        if e["failed"] or (e["status"] or 0) >= 400]
         entries = entries[-max(1, int(limit)):]
-        return _clipped("\n".join(self._network_line(e) for e in entries))
+        lines = []
+        for entry in entries:
+            lines.append(self._network_line(entry))
+            if include_body and entry.get("body_error"):
+                lines.append(f"    body: <unavailable: {entry['body_error']}>")
+            elif include_body and entry.get("body"):
+                body = entry["body"]
+                if len(body) > BODY_PREVIEW_CHARS:
+                    body = body[:BODY_PREVIEW_CHARS] + "…"
+                suffix = " (truncated)" if entry.get("body_truncated") else ""
+                lines.append(f"    body{suffix}: {body}")
+        return _clipped("\n".join(lines))
 
     def read_hint(self) -> str:
         if not self.path:

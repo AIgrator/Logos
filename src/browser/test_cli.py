@@ -5,6 +5,7 @@ Usage (from project root):
     .venv\\Scripts\\python.exe -m src.browser.test_cli form
     .venv\\Scripts\\python.exe -m src.browser.test_cli login --headless
     .venv\\Scripts\\python.exe -m src.browser.test_cli slice1 --headless
+    .venv\\Scripts\\python.exe -m src.browser.test_cli slice2 --headless
 
 Commands:
     open <url>   open a page, print title + interactive elements
@@ -12,6 +13,8 @@ Commands:
     verify       exercise goto/snapshot/click/fill/press/close end to end
     slice1       exercise screenshot scopes, reload, forward, scroll,
                  check/uncheck, eval by ref and set_files on a local page
+    slice2       exercise selector/clip screenshots, response bodies,
+                 downloads and drag on a local HTTP page
     login        open example login flow placeholder (manual check)
 """
 import sys
@@ -235,6 +238,109 @@ def cmd_slice1(headless: bool):
     print("SLICE1-OK")
 
 
+SLICE2_HTML = """<!doctype html><html><body>
+<h1>Slice 2 probe</h1>
+<div id="panel" style="width:240px;height:120px;background:#ddd">Panel text</div>
+<div id="drag" draggable="true" role="button" aria-label="drag source"
+     ondragstart="event.dataTransfer.setData('text/plain','x')">Drag me</div>
+<div id="drop" role="button" aria-label="drop target"
+     ondragover="event.preventDefault()"
+     ondrop="event.preventDefault(); this.textContent='dropped'">Drop here</div>
+<a id="dl" href="download.txt" download="probe.txt" aria-label="download file">Download</a>
+<p id="state">waiting</p>
+<script>
+fetch('api').then(r => r.json()).then(d => {
+  document.getElementById('state').textContent = 'loaded:' + d.message;
+}).catch(e => { document.getElementById('state').textContent = 'error:' + e; });
+</script>
+</body></html>"""
+
+
+def cmd_slice2(headless: bool):
+    """Verifies the slice-2 surface: selector/clip, bodies, downloads, drag."""
+    import json
+    import tempfile
+    import threading
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from pathlib import Path
+    from src.browser.manager import BrowserManager
+
+    root = Path(tempfile.mkdtemp(prefix="logos_slice2_"))
+    (root / "download.txt").write_text(
+        "downloaded by logos probe\n", encoding="utf-8")
+    (root / "page.html").write_text(SLICE2_HTML, encoding="utf-8")
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(root), **kwargs)
+
+        def do_GET(self):
+            if self.path.split("?")[0] == "/api":
+                payload = json.dumps({"message": "hello-body"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            super().do_GET()
+
+        def log_message(self, *args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    port = server.server_address[1]
+
+    mgr = BrowserManager(headless=headless)
+    mgr.screenshot_dir = str(root / "shots")
+    mgr.downloads_dir = str(root / "downloads")
+    try:
+        mgr.goto(f"http://127.0.0.1:{port}/page.html")
+        mgr.wait_for_text("loaded:hello-body", timeout=5000)
+        mgr.pump_events(300)
+        network = mgr.logs.render_network(limit=30)
+        assert "hello-body" in network, network
+        print("1. response body OK")
+
+        selector_shot = mgr.capture_screenshot("probe_selector", selector="#panel")
+        width, height = _png_size(selector_shot)
+        assert width == 240 and 100 <= height <= 140, (width, height)
+        print(f"2. selector screenshot OK: {width}x{height}")
+
+        clip_shot = mgr.capture_screenshot(
+            "probe_clip", clip={"x": 0, "y": 0, "width": 100, "height": 50})
+        width, height = _png_size(clip_shot)
+        assert (width, height) == (100, 50), (width, height)
+        print(f"3. clip screenshot OK: {width}x{height}")
+
+        refs = {e["name"]: e["ref"] for e in mgr.snapshot()}
+        mgr.click(refs["download file"])
+        mgr.pump_events(500)
+        downloads = mgr.downloads()
+        assert downloads and downloads[0]["path"], downloads
+        staged = Path(downloads[0]["path"])
+        assert staged.is_file()
+        assert "downloaded by logos probe" in staged.read_text(encoding="utf-8")
+        print("4. download staged:", downloads[0]["filename"])
+
+        saved = root / "saved-download.txt"
+        print("   save:", mgr.save_download(1, str(saved)))
+        assert saved.read_text(encoding="utf-8") == "downloaded by logos probe\n"
+        print("5. download save OK")
+
+        refs = {e["name"]: e["ref"] for e in mgr.snapshot()}
+        print("6. drag:", mgr.drag(refs["drag source"], refs["drop target"]))
+        mgr.wait_for_text("dropped", timeout=5000)
+        print("7. drag OK")
+    finally:
+        mgr.close()
+        server.shutdown()
+        server.server_close()
+    print("SLICE2-OK")
+
+
 def main(argv: list) -> int:
     headless = "--headless" in argv
     argv = [a for a in argv if a != "--headless"]
@@ -249,6 +355,8 @@ def main(argv: list) -> int:
         cmd_verify(headless)
     elif argv[0] == "slice1":
         cmd_slice1(headless)
+    elif argv[0] == "slice2":
+        cmd_slice2(headless)
     else:
         print(__doc__)
         return 2

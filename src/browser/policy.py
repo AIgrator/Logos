@@ -38,7 +38,7 @@ _SENSITIVE_FIELD_WORDS = {
 # Tool results that carry page-authored text (untrusted data, not orders).
 UNTRUSTED_RESULT_TOOLS = frozenset({
     "browser_read", "browser_snapshot", "browser_find", "browser_eval",
-    "browser_console", "browser_network",
+    "browser_console", "browser_network", "browser_downloads",
 })
 
 _dns_cache: dict[str, tuple[str, ...]] = {}
@@ -337,7 +337,8 @@ def classify_action(action_name: str, action_args: dict, element: dict | None = 
     args = action_args or {}
     element = element or {}
     checks: list[dict] = []
-    if action_name in ("browser_click", "browser_press", "browser_check"):
+    if action_name in ("browser_click", "browser_press", "browser_check",
+                       "browser_drag"):
         text = " ".join(str(v or "") for v in (
             args.get("description"), element.get("name"), element.get("role"),
         )).lower()

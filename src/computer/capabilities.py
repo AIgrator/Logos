@@ -97,6 +97,8 @@ BROWSER_TOOLS = (
     "browser_check",
     "browser_uncheck",
     "browser_set_files",
+    "browser_downloads",
+    "browser_drag",
     "browser_tabs",
     "browser_frames",
     "browser_eval",
@@ -172,6 +174,8 @@ CATALOG_TOOLS = frozenset({
     "browser_check",
     "browser_uncheck",
     "browser_set_files",
+    "browser_downloads",
+    "browser_drag",
 })
 
 #: Capabilities a mode grants today, and the shape the journal records.

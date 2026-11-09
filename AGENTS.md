@@ -660,7 +660,8 @@ grants.
 budget, not a permission: `native_tools_for_grants` keeps the common
 step-by-step tools, `catalog_tools_for_grants` the rest (the three MCP
 meta-tools and the browser edge cases — eval, console, network, frames, dialog,
-select, hover, find, back, forward, reload, scroll, check, uncheck, set_files),
+select, hover, find, back, forward, reload, scroll, check, uncheck, set_files,
+downloads, drag),
 which the prompt only *names* under a closing
 "Tools on demand" section. `search_tools` (a `base` control tool intercepted by
 `BaseAgentHandler._dispatch_action` like `update_plan`) matches a name or a
@@ -1045,8 +1046,17 @@ a click plus `aria-checked` for a custom `role=checkbox`, since a raw click can
 toggle such a control twice; `browser_check` shares the risky-action word list
 with `browser_click`. `browser_set_files` attaches local files to an
 `<input type=file>` and always asks first (`file_upload` in `classify_action`).
-`browser_screenshot` takes `full_page` and `ref`; ref badges are drawn only on a
-plain viewport capture, since they are fixed-position overlays. The first
+`browser_downloads` lists the files the page downloaded (each one is staged
+under `<project>/.logos/downloads`, newest 100 kept) and copies one to a path;
+the staging runs in `pump_events`, not inside the Playwright event handler,
+because saving a download is a protocol call. `browser_drag` drags one snapshot
+ref onto another (`locator.drag_to`), which is what kanban boards, sortable
+lists and sliders need. `browser_screenshot` takes `full_page`, `ref`,
+`selector` and `clip`; ref badges are drawn only on a plain viewport capture,
+since they are fixed-position overlays. `selector` is the way to capture a
+chart/table/card that has no ref (refs exist only for interactive elements),
+and `clip` is a rectangle in CSS pixels of the page; the action rejects more
+than one scope per call. The first
 navigation of a fresh browser gets twice the timeout and one retry
 (`_first_navigation`), because the cold start used to surface as a 30 s tool
 error that worked when repeated.
@@ -1061,16 +1071,22 @@ entries, 3 000 responses) and to one file per browser launch under
 50 files kept, `resolve_log_dir` returns nothing when no project is open, so
 the rings still work in the standalone harness). `browser_console` (arguments
 `limit`, `level` = all/error/warning) and `browser_network` (`limit`,
-`only_problems`) return the newest entries — newest last, clipped to 7 000
-characters with the tail kept — plus the log path, and the model reads the rest
-with `read_files` / `search_file_content`, which is why a noisy SPA never floods
-the transcript. Both are read-only for `classify_action` and both results are
-wrapped as untrusted page content, because console text and URLs are authored by
-the page. Network entries are recorded on the response (method, redacted URL,
-status, resource type, `request.timing` duration) and on `requestfailed`, so a
-blocked ad request shows up as `FAILED` rather than silently disappearing.
-Console text is stored as the page wrote it, so a page that prints a token puts
-it in that local log; URLs are always redacted with `redact_url`.
+`only_problems`, `include_body`) return the newest entries — newest last, clipped
+to 7 000 characters with the tail kept — plus the log path, and the model reads
+the rest with `read_files` / `search_file_content`, which is why a noisy SPA
+never floods the transcript. Both are read-only for `classify_action` and both
+results are wrapped as untrusted page content, because console text and URLs
+are authored by the page. Network entries are recorded on the response (method,
+redacted URL, status, resource type, `request.timing` duration) and on
+`requestfailed`, so a blocked ad request shows up as `FAILED` rather than
+silently disappearing. XHR/fetch responses also queue their `Response` object;
+`pump_events` reads the body after the event (a read inside the handler would
+block Playwright's dispatcher), keeps at most 4 000 characters in the ring and
+the log file, and skips a declared body over 256 KB. `browser_network` shows a
+600-character preview (`include_body=false` hides it), which is what explains a
+200 that rendered nothing. Console text is stored as the page wrote it, so a
+page that prints a token puts it in that local log; URLs are always redacted
+with `redact_url`.
 
 ## MCP servers
 
