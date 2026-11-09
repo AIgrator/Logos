@@ -91,6 +91,12 @@ BROWSER_TOOLS = (
     "browser_find",
     "browser_wait_for",
     "browser_navigate_back",
+    "browser_navigate_forward",
+    "browser_reload",
+    "browser_scroll",
+    "browser_check",
+    "browser_uncheck",
+    "browser_set_files",
     "browser_tabs",
     "browser_frames",
     "browser_eval",
@@ -160,6 +166,12 @@ CATALOG_TOOLS = frozenset({
     "browser_hover",
     "browser_find",
     "browser_navigate_back",
+    "browser_navigate_forward",
+    "browser_reload",
+    "browser_scroll",
+    "browser_check",
+    "browser_uncheck",
+    "browser_set_files",
 })
 
 #: Capabilities a mode grants today, and the shape the journal records.

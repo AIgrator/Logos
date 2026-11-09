@@ -8,6 +8,7 @@ later become the `dom` GroundingBackend without changing callers.
 """
 import json
 import logging
+import os
 import time
 from urllib.parse import urlsplit
 
@@ -101,6 +102,9 @@ class BrowserManager:
         self._guard_pages = set()  # id(page) with CDP Fetch enabled
         self._guard_sessions = {}  # id(page) -> CDPSession
         self.last_known_url = ""  # plain-string URL cache, safe to read from any thread
+        # A fresh browser pays for its cold start inside the first navigation;
+        # that one gets a wider budget and a single retry (see goto).
+        self._first_navigation = True
 
     # -- cancellation ---------------------------------------------------
 
@@ -563,7 +567,22 @@ class BrowserManager:
         self._refs = {}  # refs expire on every navigation
         self._last_snapshot = []
         self._last_screenshot_path = None
-        page.goto(url, wait_until="commit", timeout=self.timeout_ms)
+        # The first navigation of a fresh browser carries the cold start
+        # (process, profile, first request) on top of the page load, so it
+        # used to die at the 30 s limit and work when repeated. Give it twice
+        # the budget and one retry instead of reporting a failure that is
+        # only a slow start.
+        first = self._first_navigation
+        timeout = self.timeout_ms * 2 if first else self.timeout_ms
+        from playwright.sync_api import TimeoutError as PlaywrightTimeoutError
+        try:
+            page.goto(url, wait_until="commit", timeout=timeout)
+        except PlaywrightTimeoutError:
+            if not first:
+                raise
+            logger.warning("First browser navigation timed out; retrying once.")
+            page.goto(url, wait_until="commit", timeout=self.timeout_ms)
+        self._first_navigation = False
         self._check_cancel()
         if wait == "load":
             self._wait_ready(page, self.timeout_ms / 1000)
@@ -681,12 +700,14 @@ class BrowserManager:
             out.append({"index": index, "url": url, "name": name, "main": index == 0})
         return out
 
-    def eval_js(self, script: str, frame: int = 0) -> str:
+    def eval_js(self, script: str, frame: int = 0, ref: int | None = None) -> str:
         """Runs one JavaScript expression (or function) and returns its value.
 
         Needed where the DOM grounding cannot help: reading state a page
         keeps in JS, computing a layout point, or driving a widget that has
-        no clickable element at all.
+        no clickable element at all. With ``ref`` the script runs against
+        that one element (``el => el.value``), which removes the need to
+        guess a CSS selector for it.
         """
         self._check_cancel()
         script = (script or "").strip()
@@ -702,7 +723,10 @@ class BrowserManager:
         if not (0 <= index < len(frames)):
             raise ValueError(f"Frame {index} does not exist; this page has "
                              f"{len(frames)} frame(s) (0 = main).")
-        target = frames[index][1]
+        if ref is not None and str(ref).strip() != "":
+            target = self._ref(ref)
+        else:
+            target = frames[index][1]
         try:
             result = target.evaluate(script)
         except Exception as e:
@@ -1064,13 +1088,174 @@ class BrowserManager:
         logger.info(f"Browser hover ref={ref}")
         loc.hover(timeout=self.timeout_ms)
 
+    def scroll(self, dx: int = 0, dy: int = 0, ref: int | None = None) -> str:
+        """Wheels the page by dx/dy, or scrolls one element into view.
+
+        A real wheel event (not a JS jump) is what virtualised lists and lazy
+        image loaders react to, so the content a screenshot is supposed to
+        show actually exists by the time it is taken.
+        """
+        self._check_cancel()
+        page = self._require_page()
+        if ref is not None and str(ref).strip() != "":
+            loc = self._ref(ref)
+            logger.info(f"Browser scroll ref={ref} into view")
+            loc.scroll_into_view_if_needed(timeout=self.timeout_ms)
+            self._last_screenshot_path = None
+            return f"Scrolled element ref={ref} into view. {self._scroll_position(page)}"
+        try:
+            step_x, step_y = int(dx or 0), int(dy or 0)
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"browser_scroll needs integer dx/dy, got dx={dx!r}, dy={dy!r}.") from None
+        if not step_x and not step_y:
+            raise ValueError(
+                "browser_scroll needs a non-zero dy/dx, or a ref to scroll into view.")
+        width, height = self.viewport_size()
+        if width and height:
+            page.mouse.move(width / 2, height / 2)
+        logger.info(f"Browser scroll dx={step_x} dy={step_y}")
+        page.mouse.wheel(step_x, step_y)
+        self._sleep(0.2)  # let scroll-driven loading settle before the next step
+        self._last_screenshot_path = None
+        return f"Scrolled by ({step_x}, {step_y}). {self._scroll_position(page)}"
+
+    @staticmethod
+    def _scroll_position(page) -> str:
+        try:
+            pos = page.evaluate(
+                "() => ({x: Math.round(window.scrollX), y: Math.round(window.scrollY),"
+                " h: Math.round(document.documentElement.scrollHeight),"
+                " vh: Math.round(window.innerHeight)})")
+        except Exception:
+            return ""
+        at_bottom = pos["y"] + pos["vh"] >= pos["h"] - 2
+        return (f"Page position x={pos['x']} y={pos['y']} of {pos['h']} px"
+                f"{' (bottom)' if at_bottom else ''}.")
+
+    @staticmethod
+    def _checked_state(loc):
+        """Checked state of a control, or None when it has none."""
+        try:
+            return bool(loc.is_checked(timeout=1000))
+        except Exception:
+            pass
+        try:
+            aria = (loc.get_attribute("aria-checked") or "").strip().lower()
+        except Exception:
+            aria = ""
+        if aria in ("true", "false"):
+            return aria == "true"
+        return None
+
+    def set_checked(self, ref: int, checked: bool = True) -> str:
+        """Checks or unchecks a checkbox/switch and verifies the final state.
+
+        A plain click can toggle a custom control twice (label plus input), so
+        the native check()/uncheck() is preferred and a click is only the
+        fallback; the state is read back either way instead of assuming it.
+        """
+        self._check_cancel()
+        loc = self._ref(ref)
+        want = bool(checked)
+        state = self._checked_state(loc)
+        if state == want:
+            return f"Element ref={ref} is already {'checked' if want else 'unchecked'}."
+        page = self._require_page()
+        try:
+            opener_url = page.url
+        except Exception:
+            opener_url = ""
+        before_pages = {id(p) for p in self._browser.pages}
+        logger.info(f"Browser set_checked ref={ref} checked={want}")
+        try:
+            if want:
+                loc.check(timeout=self.timeout_ms)
+            else:
+                loc.uncheck(timeout=self.timeout_ms)
+        except Exception:
+            # Not a native checkbox (div role=checkbox, wrapped label input):
+            # click it and verify below instead of guessing.
+            loc.click(timeout=self.timeout_ms)
+        self._after_click(opener_url, before_pages)
+        state = self._checked_state(loc)
+        if state is None:
+            return (f"Toggled element ref={ref}, but it exposes no checked state "
+                    f"afterwards; verify the result with browser_snapshot or "
+                    f"browser_read.")
+        if state != want:
+            raise ValueError(
+                f"Element ref={ref} is still {'checked' if state else 'unchecked'} after "
+                f"trying to {'check' if want else 'uncheck'} it: the control may not be "
+                f"a checkbox or it rejects direct toggling. Take a fresh browser_snapshot.")
+        return f"Element ref={ref} is now {'checked' if want else 'unchecked'}."
+
+    def set_files(self, ref: int, paths) -> str:
+        """Attaches local files to an <input type=file> (the only way to test uploads)."""
+        self._check_cancel()
+        loc = self._ref(ref)
+        if isinstance(paths, str):
+            paths = [paths]
+        files = [str(p).strip() for p in (paths or []) if str(p or "").strip()]
+        if not files:
+            raise ValueError("browser_set_files needs at least one path.")
+        missing = [p for p in files if not os.path.isfile(p)]
+        if missing:
+            shown = ", ".join(missing[:5])
+            more = f" (+{len(missing) - 5} more)" if len(missing) > 5 else ""
+            raise ValueError(f"These files do not exist: {shown}{more}")
+        logger.info(f"Browser set_files ref={ref} files={len(files)}")
+        loc.set_input_files(files, timeout=self.timeout_ms)
+        names = ", ".join(os.path.basename(p) for p in files)
+        return f"Attached {len(files)} file(s) to element ref={ref}: {names}."
+
     def navigate_back(self) -> str:
         self._check_cancel()
         page = self._require_page()
         logger.info("Browser navigate back")
-        page.go_back(wait_until="commit")
+        response = page.go_back(wait_until="commit")
         self._check_cancel()
+        if response is None:
+            return "There is no previous page in history. Take a fresh browser_snapshot to see where you are."
         self._wait_ready(page, self.timeout_ms / 1000)
+        return self._after_history_navigation(page, "Went back")
+
+    def navigate_forward(self) -> str:
+        self._check_cancel()
+        page = self._require_page()
+        logger.info("Browser navigate forward")
+        response = page.go_forward(wait_until="commit")
+        self._check_cancel()
+        if response is None:
+            return "There is no next page in history. Take a fresh browser_snapshot to see where you are."
+        self._wait_ready(page, self.timeout_ms / 1000)
+        return self._after_history_navigation(page, "Went forward")
+
+    def reload(self, wait: str = "domcontentloaded") -> str:
+        """Reloads the current page, keeping its URL and history entry.
+
+        ``goto`` cannot do this: re-entering a URL that came from a form POST
+        loses the POST body (and the scroll position), while a reload repeats
+        the request the page actually made.
+        """
+        self._check_cancel()
+        page = self._require_page()
+        logger.info("Browser reload: %s", redact_url(page.url or ""))
+        page.reload(wait_until="commit")
+        self._check_cancel()
+        if wait == "load":
+            self._wait_ready(page, self.timeout_ms / 1000)
+        elif wait == "networkidle":
+            try:
+                page.wait_for_load_state("networkidle", timeout=self.timeout_ms)
+            except Exception:
+                pass
+        else:
+            self._wait_ready(page, self.timeout_ms / 1000)
+        return self._after_history_navigation(page, "Reloaded")
+
+    def _after_history_navigation(self, page, verb: str) -> str:
+        """Expires refs after back/forward/reload and names the new URL."""
         self._refs = {}
         self._last_snapshot = []
         self._last_screenshot_path = None
@@ -1079,7 +1264,7 @@ class BrowserManager:
             self.last_known_url = current
         except Exception:
             current = ""
-        return f"Went back. URL: {current}. Take a fresh browser_snapshot before acting."
+        return f"{verb}. URL: {current}. Take a fresh browser_snapshot before acting."
 
     def wait_for(self, seconds: float | None = None, text: str | None = None,
                  text_gone: str | None = None) -> str:
@@ -1296,27 +1481,36 @@ class BrowserManager:
         except Exception:
             pass
 
-    def screenshot(self, path: str) -> str:
+    def screenshot(self, path: str, full_page: bool = False, ref: int | None = None) -> str:
         self._check_cancel()
-        self._require_page()
+        page = self._require_page()
+        if ref is not None and str(ref).strip() != "":
+            # One element: badges of other refs would only add noise.
+            self._ref(ref).screenshot(path=path, timeout=self.timeout_ms)
+            return path
+        if full_page:
+            # Ref badges are fixed-position overlays; on a full-page capture
+            # they land in the wrong place, so only a viewport shot gets them.
+            page.screenshot(path=path, full_page=True)
+            return path
         self._overlay_ref_badges()
         try:
-            self._require_page().screenshot(path=path)
+            page.screenshot(path=path)
         finally:
             self._remove_ref_badges()
         return path
 
-    def capture_screenshot(self, prefix: str = "browser") -> str:
-        """Saves a viewport screenshot, remembered once for the next LLM request."""
+    def capture_screenshot(self, prefix: str = "browser", full_page: bool = False,
+                           ref: int | None = None) -> str:
+        """Saves a screenshot, remembered once for the next LLM request."""
         self._check_cancel()
-        import os
         from datetime import datetime
         self.ensure_launched()
         os.makedirs(self.screenshot_dir, exist_ok=True)
         path = os.path.join(
             self.screenshot_dir,
             f"{prefix}_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.png")
-        self.screenshot(path)
+        self.screenshot(path, full_page=full_page, ref=ref)
         self._prune_screenshots()
         self._last_screenshot_path = path
         logger.info(f"Browser screenshot saved: {path}")
@@ -1325,7 +1519,6 @@ class BrowserManager:
     def _prune_screenshots(self, keep: int = 200) -> None:
         """Keeps the newest N shots so a long project never grows forever."""
         try:
-            import os
             names = [name for name in os.listdir(self.screenshot_dir)
                      if name.lower().endswith(".png")]
             paths = [os.path.join(self.screenshot_dir, name) for name in names]

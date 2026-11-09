@@ -1,6 +1,7 @@
 from functools import wraps
 
 from src.computer.tools.browser.actions import (
+    browser_check,
     browser_click,
     browser_close,
     browser_console,
@@ -12,13 +13,18 @@ from src.computer.tools.browser.actions import (
     browser_handle_dialog,
     browser_hover,
     browser_navigate_back,
+    browser_navigate_forward,
     browser_network,
     browser_press,
     browser_read,
+    browser_reload,
     browser_screenshot,
+    browser_scroll,
     browser_select_option,
+    browser_set_files,
     browser_snapshot,
     browser_tabs,
+    browser_uncheck,
     browser_wait_for,
 )
 from src.computer.tools.common.communicate_to_user import communicate_to_user
@@ -87,6 +93,12 @@ TOOLS_METADATA = {
     "browser_find": browser_find,
     "browser_wait_for": browser_wait_for,
     "browser_navigate_back": browser_navigate_back,
+    "browser_navigate_forward": browser_navigate_forward,
+    "browser_reload": browser_reload,
+    "browser_scroll": browser_scroll,
+    "browser_check": browser_check,
+    "browser_uncheck": browser_uncheck,
+    "browser_set_files": browser_set_files,
     "browser_tabs": browser_tabs,
     "browser_frames": browser_frames,
     "browser_eval": browser_eval,

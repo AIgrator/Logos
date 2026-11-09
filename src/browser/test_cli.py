@@ -4,10 +4,14 @@ Usage (from project root):
     .venv\\Scripts\\python.exe -m src.browser.test_cli open https://example.com
     .venv\\Scripts\\python.exe -m src.browser.test_cli form
     .venv\\Scripts\\python.exe -m src.browser.test_cli login --headless
+    .venv\\Scripts\\python.exe -m src.browser.test_cli slice1 --headless
 
 Commands:
     open <url>   open a page, print title + interactive elements
     form         load a local test form, fill it, submit, verify result
+    verify       exercise goto/snapshot/click/fill/press/close end to end
+    slice1       exercise screenshot scopes, reload, forward, scroll,
+                 check/uncheck, eval by ref and set_files on a local page
     login        open example login flow placeholder (manual check)
 """
 import sys
@@ -44,13 +48,26 @@ document.getElementById('out').textContent =
 </body></html>"""
 
 
+def _local_page(name: str, html: str) -> str:
+    """Writes a probe page to a temp file and returns its file:// URL.
+
+    `data:` URLs are refused by the navigation policy (only http/https/file),
+    so the harness has to use a real local file like any other page.
+    """
+    import tempfile
+    from pathlib import Path
+    root = Path(tempfile.mkdtemp(prefix="logos_probe_"))
+    path = root / name
+    path.write_text(html, encoding="utf-8")
+    return path.as_uri()
+
+
 def cmd_form(headless: bool):
-    import urllib.parse
     from src.browser.manager import BrowserManager
     mgr = BrowserManager(headless=headless)
     try:
         mgr.launch()
-        mgr.goto("data:text/html," + urllib.parse.quote(FORM_HTML))
+        mgr.goto(_local_page("form.html", FORM_HTML))
         els = mgr.snapshot()
         login_ref = next(e["ref"] for e in els if "textbox" in e["role"] and "login" in (e["name"] or "").lower() or e["role"] == "textbox")
         print("login ref:", login_ref)
@@ -64,8 +81,7 @@ def cmd_form(headless: bool):
 
 
 def cmd_verify(headless: bool):
-    """Exercise all 6 tools, then a combined scenario. Deterministic, no LLM."""
-    import urllib.parse
+    """Exercise the core tools, then a combined scenario. Deterministic, no LLM."""
     from src.browser.manager import BrowserManager
     mgr = BrowserManager(headless=headless)
     try:
@@ -91,7 +107,7 @@ def cmd_verify(headless: bool):
         except Exception as e:
             print("   stale-ref guard OK:", str(e)[:60])
         # 4/5/6. fill + press + close on a local form
-        mgr.goto("data:text/html," + urllib.parse.quote(FORM_HTML))
+        mgr.goto(_local_page("form.html", FORM_HTML))
         els = mgr.snapshot()
         login_ref = next(e["ref"] for e in els if e["role"] == "textbox")
         mgr.fill(login_ref, "combo")
@@ -110,6 +126,115 @@ def cmd_verify(headless: bool):
     print("VERIFY-ALL-OK")
 
 
+SLICE1_HTML = """<!doctype html><html><body>
+<h1>Slice 1 probe</h1>
+<label>Name <input id="name" value="Alice" aria-label="name field"></label>
+<label><input type="checkbox" id="agree" aria-label="agree box"> Agree</label>
+<div role="checkbox" aria-checked="false" id="custom" aria-label="custom switch"
+     style="width:40px;height:40px;border:1px solid #333"
+     onclick="this.setAttribute('aria-checked', this.getAttribute('aria-checked')==='true'?'false':'true')">C</div>
+<input type="file" id="upload" aria-label="upload file">
+<p>Navigation type: <span id="navtype">?</span></p>
+<a href="page2.html" aria-label="go page two">Next page</a>
+<div style="height:2400px"></div>
+<button id="bottom" aria-label="bottom button"
+        onclick="document.title='bottom clicked'">Bottom</button>
+<script>
+document.getElementById('navtype').textContent =
+  (performance.getEntriesByType('navigation')[0] || {}).type || 'unknown';
+</script>
+</body></html>"""
+
+
+def _png_size(path: str) -> tuple[int, int]:
+    """Width/height straight from a PNG's IHDR chunk."""
+    with open(path, "rb") as handle:
+        head = handle.read(33)
+    if head[:8] != b"\x89PNG\r\n\x1a\n":
+        return 0, 0
+    return (int.from_bytes(head[16:20], "big"),
+            int.from_bytes(head[20:24], "big"))
+
+
+def cmd_slice1(headless: bool):
+    """Verifies the slice-1 browser surface against a deterministic local page."""
+    import tempfile
+    from pathlib import Path
+    from src.browser.manager import BrowserManager
+
+    root = Path(tempfile.mkdtemp(prefix="logos_slice1_"))
+    page1, page2 = root / "page1.html", root / "page2.html"
+    upload = root / "upload.txt"
+    upload.write_text("logos upload probe\n", encoding="utf-8")
+    page2.write_text("<html><body><h1>Page two</h1></body></html>", encoding="utf-8")
+    page1.write_text(SLICE1_HTML, encoding="utf-8")
+
+    mgr = BrowserManager(headless=headless)
+    mgr.screenshot_dir = str(root / "shots")
+    try:
+        mgr.goto(page1.as_uri())
+        print("1. goto OK:", mgr.title())
+        refs = {e["name"]: e["ref"] for e in mgr.snapshot()}
+
+        full = mgr.capture_screenshot("probe_full", full_page=True)
+        width, height = _png_size(full)
+        view_width, view_height = mgr.viewport_size()
+        assert height > view_height, (height, view_height)
+        print(f"2. full_page OK: {width}x{height} (viewport {view_width}x{view_height})")
+
+        bottom_ref = refs["bottom button"]
+        element = mgr.capture_screenshot("probe_element", ref=bottom_ref)
+        element_width, element_height = _png_size(element)
+        assert 0 < element_height < height, (element_height, height)
+        print(f"3. element screenshot OK: {element_width}x{element_height}")
+
+        print("4. scroll wheel:", mgr.scroll(0, 600))
+        assert float(mgr.eval_js("() => window.scrollY")) > 0
+        mgr.eval_js("() => window.scrollTo(0, 0)")
+        print("5. scroll into view:", mgr.scroll(ref=bottom_ref))
+        assert float(mgr.eval_js("() => window.scrollY")) > 0
+
+        mgr.reload()
+        nav_type = mgr.eval_js(
+            "() => document.getElementById('navtype').textContent")
+        assert nav_type == "reload", nav_type
+        print("6. reload OK:", nav_type)
+        refs = {e["name"]: e["ref"] for e in mgr.snapshot()}
+
+        agree_ref = refs["agree box"]
+        mgr.set_checked(agree_ref, True)
+        assert mgr.eval_js("el => el.checked", ref=agree_ref) == "true"
+        mgr.set_checked(agree_ref, False)
+        assert mgr.eval_js("el => el.checked", ref=agree_ref) == "false"
+        print("7. check/uncheck OK")
+
+        custom_ref = refs["custom switch"]
+        mgr.set_checked(custom_ref, True)
+        assert mgr.eval_js(
+            "el => el.getAttribute('aria-checked')", ref=custom_ref) == "true"
+        print("8. custom role=checkbox OK")
+
+        name_ref = refs["name field"]
+        assert mgr.eval_js("el => el.value", ref=name_ref) == "Alice"
+        print("9. eval by ref OK")
+
+        print("10. set_files:", mgr.set_files(refs["upload file"], [str(upload)]))
+        assert mgr.eval_js(
+            "el => el.files.length", ref=refs["upload file"]) == "1"
+
+        mgr.click(refs["go page two"])
+        mgr.wait_for_load()
+        assert "page2" in mgr.url(), mgr.url()
+        print("11. back:", mgr.navigate_back())
+        assert "page1" in mgr.url(), mgr.url()
+        print("    forward:", mgr.navigate_forward())
+        assert "page2" in mgr.url(), mgr.url()
+        print("12. history forward/back OK")
+    finally:
+        mgr.close()
+    print("SLICE1-OK")
+
+
 def main(argv: list) -> int:
     headless = "--headless" in argv
     argv = [a for a in argv if a != "--headless"]
@@ -122,6 +247,8 @@ def main(argv: list) -> int:
         cmd_form(headless)
     elif argv[0] == "verify":
         cmd_verify(headless)
+    elif argv[0] == "slice1":
+        cmd_slice1(headless)
     else:
         print(__doc__)
         return 2

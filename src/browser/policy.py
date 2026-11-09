@@ -337,7 +337,7 @@ def classify_action(action_name: str, action_args: dict, element: dict | None = 
     args = action_args or {}
     element = element or {}
     checks: list[dict] = []
-    if action_name in ("browser_click", "browser_press"):
+    if action_name in ("browser_click", "browser_press", "browser_check"):
         text = " ".join(str(v or "") for v in (
             args.get("description"), element.get("name"), element.get("role"),
         )).lower()
@@ -384,5 +384,18 @@ def classify_action(action_name: str, action_args: dict, element: dict | None = 
         checks.append({
             "code": "page_javascript",
             "message": f"Runs JavaScript inside the page: {script or '(empty)'}",
+        })
+    elif action_name == "browser_set_files":
+        # An upload hands real local bytes to whatever the page does with
+        # them, so it always asks, even when the field looks harmless.
+        paths = args.get("paths")
+        if isinstance(paths, str):
+            paths = [paths]
+        listed = [str(path) for path in (paths or []) if str(path).strip()]
+        shown = ", ".join(listed[:5]) or "(no files)"
+        more = f" (+{len(listed) - 5} more)" if len(listed) > 5 else ""
+        checks.append({
+            "code": "file_upload",
+            "message": f"These local files will be attached to the page: {shown}{more}",
         })
     return checks

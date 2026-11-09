@@ -1,3 +1,5 @@
+import json
+
 from src.browser.policy import redact_url
 from src.computer.computer import tool_meta
 
@@ -34,6 +36,38 @@ def _bool_arg(value, default: bool = False) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in ("1", "true", "yes", "on")
+
+
+def _ref_arg(value):
+    """Optional element ref: blank/None means 'no ref', anything else an int."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        raise ValueError(
+            f"Expected an element ref from browser_snapshot, got '{value}'.") from None
+
+
+def _list_arg(value) -> list:
+    """A list argument that may arrive as a real list or a JSON string."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return []
+        try:
+            decoded = json.loads(text)
+        except ValueError:
+            return [text]
+        value = decoded if isinstance(decoded, list) else [decoded]
+    if isinstance(value, (list, tuple, set)):
+        return [str(item) for item in value if str(item).strip()]
+    return [str(value)]
 
 
 @tool_meta(
@@ -185,11 +219,14 @@ def browser_frames(self, **kwargs):
             "driving a widget that has no clickable element. It cannot navigate the browser "
             "itself, and it must never be used to read credentials, cookies or storage, or "
             "to fetch another site with the page's session. Pass frame (see browser_frames) "
-            "to run inside an iframe; the default is the top document."),
+            "to run inside an iframe; the default is the top document. Pass ref to run the "
+            "script against one snapshot element (el => el.value) instead of guessing a "
+            "CSS selector."),
         "arguments": {
             "description": {"type": "STRING", "description": "What the script is for.", "required": True},
             "script": {"type": "STRING", "description": "JavaScript expression or function source, e.g. document.title or () => window.innerWidth.", "required": True},
             "frame": {"type": "INTEGER", "description": "Frame index from browser_frames; omit for the top document.", "required": False},
+            "ref": {"type": "INTEGER", "description": "Run against this element from browser_snapshot; the script receives it as its argument.", "required": False},
         },
     },
     flags={"platform": "any", "mode": "browser"},
@@ -199,7 +236,8 @@ def browser_eval(self, **kwargs):
     if not script:
         raise ValueError("Action 'browser_eval' failed: missing 'script' with the JavaScript to run.")
     mgr = _manager(self)
-    result = mgr.eval_js(script, frame=kwargs.get("frame") or 0)
+    result = mgr.eval_js(script, frame=kwargs.get("frame") or 0,
+                         ref=_ref_arg(kwargs.get("ref")))
     return _with_dialog_note(mgr, f"JavaScript returned: {result}")
 
 
@@ -308,6 +346,41 @@ def browser_navigate_back(self, **kwargs):
 
 @tool_meta(
     tool={
+        "name": "browser_navigate_forward",
+        "strategic": "Returns to the page you went back from.",
+        "description": "Goes forward in history, undoing browser_navigate_back. Refs expire: take a fresh browser_snapshot after.",
+        "arguments": {
+            "description": {"type": "STRING", "description": "Why to go forward.", "required": True},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_navigate_forward(self, **kwargs):
+    return _manager(self).navigate_forward()
+
+
+@tool_meta(
+    tool={
+        "name": "browser_reload",
+        "strategic": "Reloads the current page.",
+        "description": (
+            "Reloads the page you are on, repeating the request it made. Use it after "
+            "changing the code behind a dev server instead of browser_goto: re-entering "
+            "the URL loses a POST body and the scroll position, while a reload keeps "
+            "both. Refs expire: take a fresh browser_snapshot after."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "Why the page is reloaded.", "required": True},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_reload(self, **kwargs):
+    mgr = _manager(self)
+    return _with_dialog_note(mgr, mgr.reload())
+
+
+@tool_meta(
+    tool={
         "name": "browser_hover",
         "strategic": "Hovers over an element.",
         "description": "Hovers the mouse over the element with the given ref (reveals menus/tooltips).",
@@ -324,6 +397,104 @@ def browser_hover(self, **kwargs):
         raise ValueError("Action 'browser_hover' failed: Missing required 'ref' argument. Take browser_snapshot first.")
     _manager(self).hover(ref)
     return f"Hovered element ref={ref}."
+
+
+@tool_meta(
+    tool={
+        "name": "browser_scroll",
+        "strategic": "Scrolls the page or brings an element into view.",
+        "description": (
+            "Scrolls the page by dx/dy pixels with a real wheel event, which is what "
+            "virtualised lists and lazy images react to. Positive dy scrolls down, "
+            "positive dx scrolls right. Pass ref instead to scroll that element into "
+            "view (for example a field far below the fold). The result reports the new "
+            "page position, so you know whether the bottom was reached."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "What should become visible.", "required": True},
+            "dy": {"type": "INTEGER", "description": "Vertical pixels: positive scrolls down, negative up.", "required": False},
+            "dx": {"type": "INTEGER", "description": "Horizontal pixels: positive scrolls right.", "required": False},
+            "ref": {"type": "INTEGER", "description": "Scroll this element from browser_snapshot into view instead.", "required": False},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_scroll(self, **kwargs):
+    mgr = _manager(self)
+    ref = _ref_arg(kwargs.get("ref"))
+    dx = _int_arg(kwargs.get("dx"), 0, -20000, 20000)
+    dy = _int_arg(kwargs.get("dy"), 0, -20000, 20000)
+    return mgr.scroll(dx, dy, ref=ref)
+
+
+@tool_meta(
+    tool={
+        "name": "browser_check",
+        "strategic": "Checks a checkbox or switch.",
+        "description": (
+            "Checks the checkbox/switch with the given ref and verifies the final state. "
+            "Prefer this over browser_click: a custom control can toggle twice when it is "
+            "clicked, and this reports what the state actually is afterwards."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "What is being checked.", "required": True},
+            "ref": {"type": "INTEGER", "description": "Element ref from browser_snapshot. Required by tools that act on one element; omit it for tools that do not.", "required": False},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_check(self, **kwargs):
+    ref = _ref_arg(kwargs.get("ref"))
+    if ref is None:
+        raise ValueError("Action 'browser_check' failed: Missing required 'ref' argument. Take browser_snapshot first.")
+    mgr = _manager(self)
+    return _with_dialog_note(mgr, mgr.set_checked(ref, True))
+
+
+@tool_meta(
+    tool={
+        "name": "browser_uncheck",
+        "strategic": "Unchecks a checkbox or switch.",
+        "description": (
+            "Unchecks the checkbox/switch with the given ref and verifies the final state. "
+            "Prefer this over browser_click for the same reason as browser_check."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "What is being unchecked.", "required": True},
+            "ref": {"type": "INTEGER", "description": "Element ref from browser_snapshot (required for this tool).", "required": False},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_uncheck(self, **kwargs):
+    ref = _ref_arg(kwargs.get("ref"))
+    if ref is None:
+        raise ValueError("Action 'browser_uncheck' failed: Missing required 'ref' argument. Take browser_snapshot first.")
+    mgr = _manager(self)
+    return _with_dialog_note(mgr, mgr.set_checked(ref, False))
+
+
+@tool_meta(
+    tool={
+        "name": "browser_set_files",
+        "strategic": "Attaches local files to a file input.",
+        "description": (
+            "Attaches one or more local files to an <input type=file> with the given ref, "
+            "so an upload flow can actually be tested. The user is asked to approve it, "
+            "because the page receives the files. Use absolute paths inside the project."),
+        "arguments": {
+            "description": {"type": "STRING", "description": "What is being uploaded and why.", "required": True},
+            "ref": {"type": "INTEGER", "description": "Ref of the file input from browser_snapshot (required for this tool).", "required": False},
+            "paths": {"type": "LIST_OF_STRINGS", "description": "Local file paths to attach.", "required": True},
+        },
+    },
+    flags={"platform": "any", "mode": "browser"},
+)
+def browser_set_files(self, **kwargs):
+    ref = _ref_arg(kwargs.get("ref"))
+    if ref is None:
+        raise ValueError("Action 'browser_set_files' failed: Missing required 'ref' argument. Take browser_snapshot first.")
+    paths = _list_arg(kwargs.get("paths"))
+    if not paths:
+        raise ValueError("Action 'browser_set_files' failed: Missing required 'paths' argument (one or more file paths).")
+    return _manager(self).set_files(ref, paths)
 
 
 @tool_meta(
@@ -385,17 +556,31 @@ def browser_find(self, **kwargs):
     tool={
         "name": "browser_screenshot",
         "strategic": "Captures the page for visual understanding.",
-        "description": "Captures a viewport screenshot ONLY when the current step cannot be solved from text (visual puzzle, image options, layout that text cannot convey). The image is attached to your next request automatically, exactly once. Do NOT use routinely: every image costs extra tokens.",
+        "description": (
+            "Captures a screenshot ONLY when the current step cannot be solved from text "
+            "(visual puzzle, image options, layout that text cannot convey). The image is "
+            "attached to your next request automatically, exactly once. By default it is "
+            "the visible viewport; full_page=true captures the whole scrollable page, and "
+            "ref captures just that one element. Do NOT use routinely: every image costs "
+            "extra tokens."),
         "arguments": {
             "description": {"type": "STRING", "description": "Why the image is needed for this step.", "required": True},
+            "full_page": {"type": "BOOLEAN", "description": "Capture the whole scrollable page instead of the viewport.", "required": False},
+            "ref": {"type": "INTEGER", "description": "Capture only the element with this ref from the latest snapshot.", "required": False},
         },
     },
     flags={"platform": "any", "mode": "browser"},
 )
 def browser_screenshot(self, **kwargs):
     mgr = _manager(self)
-    path = mgr.capture_screenshot()
-    return f"Screenshot saved to {path}. It will be attached to your next request automatically (once)."
+    full_page = _bool_arg(kwargs.get("full_page"), False)
+    ref = _ref_arg(kwargs.get("ref"))
+    prefix = "browser_element" if ref is not None else ("browser_full" if full_page else "browser")
+    path = mgr.capture_screenshot(prefix=prefix, full_page=full_page, ref=ref)
+    scope = (f"element ref={ref}" if ref is not None
+             else ("full page" if full_page else "viewport"))
+    return (f"Screenshot of the {scope} saved to {path}. It will be attached to "
+            f"your next request automatically (once).")
 
 
 @tool_meta(

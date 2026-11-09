@@ -653,7 +653,8 @@ grants.
 budget, not a permission: `native_tools_for_grants` keeps the common
 step-by-step tools, `catalog_tools_for_grants` the rest (the three MCP
 meta-tools and the browser edge cases — eval, console, network, frames, dialog,
-select, hover, find, back), which the prompt only *names* under a closing
+select, hover, find, back, forward, reload, scroll, check, uncheck, set_files),
+which the prompt only *names* under a closing
 "Tools on demand" section. `search_tools` (a `base` control tool intercepted by
 `BaseAgentHandler._dispatch_action` like `update_plan`) matches a name or a
 description, returns the loaded schema and promotes the tool into
@@ -1012,6 +1013,25 @@ and no tool could reach it. The remaining failure on that page, "Popular
 Browser", comes from the `navigator.userAgentData` brand list of a plain
 Chromium build, not from automation signals, and closing it is stealth work
 (`patchright`/`rebrowser-patches`), deliberately not done yet.
+
+`browser_eval` also takes a `ref`, so a script runs against one snapshot element
+(`el => el.value`) instead of a guessed selector. The step tools around it are
+catalog-only and small: `browser_reload` repeats the request the page made
+(unlike `browser_goto`, which loses a POST body and the scroll position),
+`browser_navigate_forward` mirrors `browser_navigate_back`, and `browser_scroll`
+sends a real wheel event (positive `dy` scrolls down, or `ref` scrolls one
+element into view) and reports the new page position, because a JS jump does not
+make a virtualised list or a lazy image load. `browser_check`/`browser_uncheck`
+prefer the native `check()`/`uncheck()` and read the state back, falling back to
+a click plus `aria-checked` for a custom `role=checkbox`, since a raw click can
+toggle such a control twice; `browser_check` shares the risky-action word list
+with `browser_click`. `browser_set_files` attaches local files to an
+`<input type=file>` and always asks first (`file_upload` in `classify_action`).
+`browser_screenshot` takes `full_page` and `ref`; ref badges are drawn only on a
+plain viewport capture, since they are fixed-position overlays. The first
+navigation of a fresh browser gets twice the timeout and one retry
+(`_first_navigation`), because the cold start used to surface as a 30 s tool
+error that worked when repeated.
 
 Console and network traffic are captured passively (`src/browser/logs.py`), so
 the model can see why a page broke instead of guessing. `BrowserManager` hooks

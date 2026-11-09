@@ -528,19 +528,22 @@ part that said "one session runs one mode".
 
 ## Backlog: browser tool surface (2026-11-06)
 
-> Status: proposed, not started. Compared against the in-app browser tools of
-> OpenCode desktop. That tool list is used as a checklist only: their Review
-> pane, tab focus model and RPC file transfer are consequences of their
-> architecture (the browser lives in the desktop app, the agent is a server), and
-> porting or forking OpenCode stays a non-goal.
+> Status: slice 1 is implemented (see **Done: slice 1** at the end of this
+> section); slice 2 and the on-request items are still proposed. Compared
+> against the in-app browser tools of OpenCode desktop. That tool list is used
+> as a checklist only: their Review pane, tab focus model and RPC file transfer
+> are consequences of their architecture (the browser lives in the desktop app,
+> the agent is a server), and porting or forking OpenCode stays a non-goal.
 
 ### Already covered
 
-Our browser capability has 19 tools: `goto`, `snapshot` (walks every frame),
-`click` (ref or viewport coordinates), `fill`, `press`, `select_option`,
-`hover`, `tabs` (list/new/select/close), `navigate_back`, `wait_for` (time /
-text / text gone), `handle_dialog`, `find`, `screenshot`, `read`, `console`,
-`network`, `frames`, `eval`, `close`. These already match the bulk of the
+Our browser capability has 25 tools. The original 19: `goto`, `snapshot` (walks
+every frame), `click` (ref or viewport coordinates), `fill`, `press`,
+`select_option`, `hover`, `tabs` (list/new/select/close), `navigate_back`,
+`wait_for` (time / text / text gone), `handle_dialog`, `find`, `screenshot`,
+`read`, `console`, `network`, `frames`, `eval`, `close`. Slice 1 added `reload`,
+`navigate_forward`, `scroll`, `check`, `uncheck` and `set_files`, and gave
+`screenshot`/`eval` new arguments. These already match the bulk of the
 OpenCode list, and in three places we are ahead: console and network keep a
 bounded ring **plus** a session log file, so a noisy SPA does not flood the
 context; coordinate clicks reach canvas and widgets that have no ref; a
@@ -597,6 +600,28 @@ each including prompt text, journal/replay and a test.
   step.
 - Observed in `session-20261105-170804-a755b2`: the first `open_browser` after a
   cold launch timed out after 30 s (`navigating ... waiting until "commit"`) and
-  an immediate retry worked. Worth one retry on the first navigation, or a
-  launch-aware budget, rather than a tool error the model has to interpret.
+  an immediate retry worked. Fixed in slice 1: the first navigation of a fresh
+  browser gets twice the timeout and one retry.
+
+### Done: slice 1 (2026-11-09)
+
+- `browser_screenshot` takes `full_page` and `ref`. Ref badges are drawn only on
+  a plain viewport capture, because they are fixed-position overlays.
+- New catalog tools: `browser_reload`, `browser_navigate_forward`,
+  `browser_scroll` (`dx`/`dy`, or `ref` to scroll into view), `browser_check`,
+  `browser_uncheck`, `browser_set_files` (`paths`); `browser_eval` takes `ref`
+  and runs the script against that element. `browser_set_files` always asks for
+  approval (`file_upload`), and `browser_check` shares the risky-action word
+  list with `browser_click`.
+- `browser_scroll` sends a real wheel event and reports the page position, so
+  virtualised lists and lazy images load the way a user's scroll makes them.
+- `check`/`uncheck` prefer the native `check()`/`uncheck()` and read the state
+  back; a custom `role=checkbox` falls back to a click and is verified through
+  `aria-checked`.
+- The first navigation of a fresh browser gets twice the timeout and one retry,
+  which closes the cold-start timeout recorded above.
+- `src/browser/test_cli.py slice1 --headless` verifies the whole surface on a
+  local page: full-page and element screenshots, wheel and into-view scrolling,
+  reload, check/uncheck (native and `role=checkbox`), eval by ref, `set_files`,
+  and back/forward.
 
