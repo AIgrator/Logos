@@ -1,6 +1,6 @@
 [project]
 name = "logos"
-version = "1.0.0"
+version = "1.1.0"
 description = "A desktop AI assistant that sees your screen and clicks buttons for you. What could possibly go wrong?"
 readme = "README.md"
 license = { text = "MIT" }
