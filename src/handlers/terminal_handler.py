@@ -896,7 +896,11 @@ class TerminalHandler(BaseAgentHandler):
         approved = False
         if service is not None and ticket == self._exec_ticket:
             try:
-                approved = bool(self.controller.ask_safety_approval(checks))
+                ask = getattr(self.controller, "ask_browser_approval", None)
+                if callable(ask):
+                    approved = bool(ask(checks))
+                else:
+                    approved = bool(self.controller.ask_safety_approval(checks))
             except Exception as e:
                 logging.error(f"Browser approval dialog failed: {e}")
         if service is not None:

@@ -3170,6 +3170,26 @@ class AppController(QObject):
             logging.error(f"Safety approval dialog failed: {e}")
             return False
 
+    def ask_browser_approval(self, checks: list) -> bool:
+        """Modal approval for a risky browser step.
+
+        Uses the same dialog as a Terminal tool call (Deny default, the
+        reasons listed) instead of the old Yes/No ``QMessageBox``: the user
+        reads what will happen, not an internal check code, and every
+        approval in the app looks and behaves the same.
+        """
+        reasons = []
+        for check in (checks or []):
+            if not isinstance(check, dict):
+                continue
+            message = str(check.get("message") or "").strip()
+            if message:
+                reasons.append(message)
+        return self.ask_terminal_approval({
+            "summary": "run a browser action that needs your approval",
+            "reasons": reasons,
+        })
+
     def ask_terminal_approval(self, request: dict) -> bool:
         """Modal permission prompt for a Terminal tool call.
 
