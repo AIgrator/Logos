@@ -54,6 +54,23 @@ _COMMAND_HEADS = {
 _PATH_RE = re.compile(r"^(?:\./|/|~|[A-Za-z]:\\|[\w.-]+/)[\w./\\*-]*$")
 _FENCE_RE = re.compile(r"^\s*(```|~~~)")
 
+#: Words that turn a backticked span into prose. ``next`` is a real command
+#: head (Next.js), so ``next to exe`` needs this list to stay a path and not a
+#: build command.
+_PROSE_WORDS = {
+    "to", "the", "a", "an", "in", "of", "and", "or", "is", "are", "was", "were",
+    "on", "for", "with", "from", "by", "as", "at", "it", "this", "that", "these",
+    "those", "be", "been", "not", "no", "yes", "if", "then", "than", "so", "but",
+    "when", "where", "which", "who", "how", "why", "all", "any", "each", "every",
+    "its", "their", "our", "your", "my", "his", "her", "them", "we", "you", "they",
+}
+
+#: A prohibition names a command in order to forbid it. Running it is exactly
+#: what the line tells the reader not to do, so it is not checked as evidence.
+_PROHIBITION_RE = re.compile(
+    r"\b(do not|don't|never|avoid|refrain|не запуска|не использ|не делай|не стоит)\b",
+    re.IGNORECASE)
+
 
 @dataclass(frozen=True)
 class Fact:
@@ -147,6 +164,16 @@ def _is_command_line(line: str) -> bool:
     return head.lower().endswith(_SCRIPT_SUFFIXES)
 
 
+def commands_in_text(text: str) -> list[str]:
+    """Commands printed in the fenced blocks of one document.
+
+    Public because the research pass feeds it the files the model actually
+    read: a command shown by a file on disk is evidence, whichever reader
+    found it.
+    """
+    return _readme_commands(text)
+
+
 def _readme_commands(text: str) -> list[str]:
     """Commands the project's own README shows in fenced blocks.
 
@@ -212,6 +239,40 @@ def _stack(root: str) -> list[str]:
     return stack
 
 
+def _venv_dir(root: str) -> str:
+    """The project's own virtual environment, when it has one."""
+    for name in ("venv", ".venv", "env"):
+        base = os.path.join(root, name)
+        if os.name == "nt":
+            if os.path.isfile(os.path.join(base, "Scripts", "python.exe")):
+                return name
+        elif os.path.isfile(os.path.join(base, "bin", "python")):
+            return name
+    return ""
+
+
+def _python_command(root: str) -> str:
+    """How this project's own interpreter is invoked, not a guess."""
+    if os.path.isfile(os.path.join(root, "uv.lock")):
+        return "uv run python"
+    venv = _venv_dir(root)
+    if venv:
+        if os.name == "nt":
+            return f"{venv}\\Scripts\\python.exe"
+        return f"{venv}/bin/python"
+    return "python"
+
+
+def _tool_command(root: str, tool: str) -> str:
+    """``ruff`` / ``pytest`` / ... through the same environment as the app."""
+    if os.path.isfile(os.path.join(root, "uv.lock")):
+        return f"uv run {tool}"
+    python = _python_command(root)
+    if python != "python":
+        return f"{python} -m {tool}"
+    return tool
+
+
 def _node_runner(root: str, data: dict) -> str:
     manager = str(data.get("packageManager") or "").lower()
     if manager.startswith("pnpm") or os.path.isfile(os.path.join(root, "pnpm-lock.yaml")):
@@ -267,16 +328,71 @@ def _scan_pyproject(root: str, facts: list[Fact]) -> None:
 
     tool = data.get("tool") or {}
     if "pytest" in tool or os.path.isdir(os.path.join(root, "tests")):
-        facts.append(Fact(f"`{runner}pytest -q`", "pyproject.toml [tool.pytest]", "command"))
+        facts.append(Fact(f"`{_tool_command(root, 'pytest')} -q`", "pyproject.toml [tool.pytest]", "command"))
     if "ruff" in tool:
-        facts.append(Fact(f"`{runner}ruff check .`", "pyproject.toml [tool.ruff]", "command"))
+        facts.append(Fact(f"`{_tool_command(root, 'ruff')} check .`", "pyproject.toml [tool.ruff]", "command"))
         line_length = (tool.get("ruff") or {}).get("line-length")
         if isinstance(line_length, int):
             facts.append(Fact(f"ruff line length is {line_length}.", "pyproject.toml [tool.ruff]", "convention"))
     if "mypy" in tool:
-        facts.append(Fact(f"`{runner}mypy .`", "pyproject.toml [tool.mypy]", "command"))
+        facts.append(Fact(f"`{_tool_command(root, 'mypy')} .`", "pyproject.toml [tool.mypy]", "command"))
     if "black" in tool:
-        facts.append(Fact(f"`{runner}black .`", "pyproject.toml [tool.black]", "command"))
+        facts.append(Fact(f"`{_tool_command(root, 'black')} .`", "pyproject.toml [tool.black]", "command"))
+
+
+def _scan_standalone_configs(root: str, facts: list[Fact]) -> None:
+    """Tool configs that live outside ``pyproject.toml`` (``.ruff.toml``, ...)."""
+    for name in ("ruff.toml", ".ruff.toml"):
+        path = os.path.join(root, name)
+        if not os.path.isfile(path):
+            continue
+        facts.append(Fact(f"`{_tool_command(root, 'ruff')} check .`", name, "command"))
+        try:
+            data = tomllib.loads(_read_text(path))
+        except (ValueError, TypeError):
+            data = {}
+        line_length = data.get("line-length") if isinstance(data, dict) else None
+        if isinstance(line_length, int):
+            facts.append(Fact(f"ruff line length is {line_length}.", name, "convention"))
+        break
+    for name in ("pytest.ini", "tox.ini"):
+        if os.path.isfile(os.path.join(root, name)):
+            facts.append(Fact(f"`{_tool_command(root, 'pytest')} -q`", name, "command"))
+            break
+
+
+def _scan_requirements(root: str, facts: list[Fact]) -> None:
+    if not os.path.isfile(os.path.join(root, "requirements.txt")):
+        return
+    if os.path.isfile(os.path.join(root, "pyproject.toml")):
+        # A PEP 621 project installs through its own tool (uv, pip install .),
+        # and pyproject or the README already names that step; a pip line here
+        # would be a second, competing instruction.
+        return
+    facts.append(Fact(
+        f"`{_python_command(root)} -m pip install -r requirements.txt`",
+        "requirements.txt", "command"))
+
+
+def _scan_builders(root: str, facts: list[Fact], readme_commands: list[str]) -> None:
+    """Packaging entry points: a PyInstaller spec and an Inno Setup script."""
+    for name in sorted(os.listdir(root)) if os.path.isdir(root) else []:
+        if name.endswith(".spec") and os.path.isfile(os.path.join(root, name)):
+            if any("pyinstaller" in command.lower() for command in readme_commands):
+                break  # the README already states how the exe is built
+            if os.path.isfile(os.path.join(root, "uv.lock")):
+                command = f"uv run --with pyinstaller pyinstaller {name} --noconfirm"
+            else:
+                command = f"{_python_command(root)} -m PyInstaller {name} --noconfirm"
+            facts.append(Fact(f"`{command}`", name, "command"))
+            break
+    installer_dir = os.path.join(root, "installer")
+    if os.path.isdir(installer_dir):
+        scripts = sorted(item for item in os.listdir(installer_dir) if item.endswith(".iss"))
+        if scripts:
+            facts.append(Fact(
+                f"`installer/{scripts[0]}` builds the Windows installer with Inno Setup.",
+                "installer/", "structure"))
 
 
 def _scan_makefile(root: str, facts: list[Fact], filename: str, runner: str) -> None:
@@ -353,14 +469,55 @@ def _scan_conventions(root: str, facts: list[Fact]) -> None:
         facts.append(Fact("pre-commit hooks are configured.", ".pre-commit-config.yaml", "convention"))
 
 
+def _has_test_files(root: str) -> bool:
+    """A test folder is only a test suite when it actually holds tests.
+
+    ``scribe/tests`` exists but carries a manual scanner script, and counting
+    the folder alone hid the "no test suite" pitfall that the file needs.
+    """
+    import glob
+
+    patterns = ("**/test_*.py", "**/*_test.py", "**/*.test.ts", "**/*.test.js",
+                "**/*.spec.ts", "**/*.spec.js", "**/*.test.tsx", "**/*.test.jsx")
+    candidates: list[str] = []
+    for base in ("tests", "test", "__tests__"):
+        path = os.path.join(root, base)
+        if not os.path.isdir(path):
+            continue
+        for pattern in patterns:
+            candidates.extend(glob.glob(os.path.join(path, pattern), recursive=True))
+    candidates.extend(glob.glob(os.path.join(root, "test_*.py")))
+    # A file named like a test is not a test suite: `scribe/tests` holds a
+    # manual scanner script, so the content has to show a real test.
+    test_marker = re.compile(r"(?m)^\s*(?:async\s+)?def test_|@pytest|describe\(|\bit\(|test\(")
+    for path in candidates[:20]:
+        if test_marker.search(_read_text(path, 20_000)):
+            return True
+    return False
+
+
+_TEST_COMMAND_RE = re.compile(
+    r"(?<![\w.])(pytest|vitest|jest|tox|nox|unittest|test|spec)(?![\w.])", re.IGNORECASE)
+
+
 def _scan_pitfalls(root: str, facts: list[Fact]) -> None:
-    has_test_command = any(
-        fact.kind == "command" and re.search(r"\b(test|spec|vitest|jest|pytest)\b", fact.command)
-        for fact in facts)
-    if not has_test_command and not _exists(root, "tests", "test", "spec", "__tests__"):
+    venv = _venv_dir(root)
+    if venv and not os.path.isfile(os.path.join(root, "uv.lock")):
         facts.append(Fact(
-            "There is no test suite in this project; verify changes by running the project.",
-            "top-level scan", "pitfall"))
+            f"`{venv}/` is the project's own environment; run tools from it instead of creating another one.",
+            "top-level scan", "convention"))
+    # ``scribe.spec`` is a PyInstaller spec, not a test: the dot in front of
+    # "spec" is what separates a build file from a test command.
+    has_test_command = any(
+        fact.kind == "command" and _TEST_COMMAND_RE.search(fact.command)
+        for fact in facts)
+    if not has_test_command and not _has_test_files(root):
+        if _exists(root, "tests", "test", "__tests__"):
+            text = ("No test suite is configured: the test folder holds no test files and no "
+                    "manifest defines a test command.")
+        else:
+            text = "There is no test suite in this project; verify changes by running the project."
+        facts.append(Fact(text, "top-level scan", "pitfall"))
     generated = [name for name in ("dist", "build", "out", "target", "coverage") if os.path.isdir(os.path.join(root, name))]
     if generated:
         listing = ", ".join(f"`{name}/`" for name in generated)
@@ -383,11 +540,18 @@ def _scan_pitfalls(root: str, facts: list[Fact]) -> None:
             facts.append(Fact(f"Configuration is read from `.env` ({listing}); never commit real values.", env_example, "env"))
     if os.path.isdir(os.path.join(root, ".logos")):
         facts.append(Fact("`.logos/` holds Logos session data; do not edit or commit it.", "top-level scan", "pitfall"))
+    copilot = ".github/copilot-instructions.md"
+    if os.path.isfile(os.path.join(root, copilot)):
+        facts.append(Fact(
+            f"`{copilot}` also carries instructions; keep it in sync with AGENTS.md.",
+            copilot, "convention"))
 
 
 def _entry_points(root: str) -> list[str]:
     found = []
-    for name in ("main.py", "app.py", "manage.py", "src/main.py", "src/index.ts", "src/main.ts", "index.js", "src/main.rs", "cmd"):
+    for name in ("run.py", "main.py", "app.py", "cli.py", "bot.py", "manage.py",
+                 "src/main.py", "src/run.py", "src/index.ts", "src/main.ts",
+                 "index.js", "src/main.rs", "cmd"):
         if os.path.exists(os.path.join(root, name)):
             found.append(name)
     return found
@@ -398,8 +562,9 @@ def _entry_commands(root: str, entries: list[str], facts: list[Fact]) -> None:
     for name in entries:
         if not name.endswith(".py"):
             continue
-        runner = "uv run " if os.path.isfile(os.path.join(root, "uv.lock")) else ""
-        facts.append(Fact(f"`{runner}python {name}`", f"top-level scan: {name}", "command"))
+        facts.append(Fact(
+            f"`{_python_command(root)} {name}`",
+            f"top-level scan: {name}", "command"))
         return
 
 
@@ -411,8 +576,12 @@ def scan(project_root: str) -> Scan:
     result.tree = _top_level(root)[:_MAX_TREE]
     result.language = _detect_language(root)
     result.readme = _read_text(os.path.join(root, "README.md"), _README_LIMIT).strip()
-    result.readme_commands = _readme_commands(
-        _read_text(os.path.join(root, "README.md"), 200_000))
+    result.readme_commands = []
+    for name in ("README.md", "BUILDING.md", "CONTRIBUTING.md", "DEVELOPMENT.md"):
+        path = os.path.join(root, name)
+        if os.path.isfile(path):
+            result.readme_commands.extend(_readme_commands(_read_text(path, 200_000)))
+    result.readme_commands = list(dict.fromkeys(result.readme_commands))[:24]
 
     facts = result.facts
     if result.stack:
@@ -424,6 +593,9 @@ def scan(project_root: str) -> Scan:
         _entry_commands(root, entries, facts)
     _scan_package_json(root, facts)
     _scan_pyproject(root, facts)
+    _scan_standalone_configs(root, facts)
+    _scan_requirements(root, facts)
+    _scan_builders(root, facts, result.readme_commands)
     _scan_makefile(root, facts, "Makefile", "make")
     _scan_makefile(root, facts, "justfile", "just")
     _scan_other_stacks(root, facts)
@@ -481,42 +653,6 @@ def render_template(scan_result: Scan) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-def draft_prompts(scan_result: Scan) -> tuple[str, str]:
-    """System and user prompts for the model-written draft."""
-    language = "Russian" if scan_result.language == "ru" else "English"
-    evidence = "\n".join(f"- {fact.text}  [source: {fact.source}]" for fact in scan_result.facts)
-    tree = ", ".join(scan_result.tree) or "(nothing detected)"
-    readme = scan_result.readme[:1200] or "(no README)"
-    readme_commands = "\n".join(f"- `{item}`" for item in scan_result.readme_commands) or "(none)"
-    system = (
-        "You write a project's AGENTS.md: the short instruction file an AI coding agent reads at the start "
-        "of every session. Write it for an agent, not for a human reader.\n"
-        "Hard rules:\n"
-        "1. Use ONLY the facts listed under EVIDENCE. Never invent a command, path, URL, version or tool.\n"
-        "2. Every command you write must appear verbatim in EVIDENCE or in the README commands list. If a step has "
-        "no command, describe it in words or omit it.\n"
-        "3. No generic advice ('write clean code', 'follow best practices', 'test your changes'): a line that is true of "
-        "every project is noise. Every line must name something specific to THIS project.\n"
-        "4. No absolute paths, no usernames, no secrets, no API keys.\n"
-        "5. Prefer short imperative lines. Skip a section entirely rather than filling it with guesses.\n"
-        "6. If EVIDENCE has no 'Stack:' fact, do not name a language, framework or runtime: the stack is "
-        "unknown, and a guess is worse than a gap.\n"
-        f"7. Write the file in {language}.\n"
-        "8. At most 60 lines. Return only the Markdown file, with no preamble and no code fence around it.\n"
-        "Sections, in this order, only when you have facts for them: '# AGENTS.md', '## What this is', '## Run', "
-        "'## Test', '## Lint', '## Build', '## Conventions', '## Do not touch'."
-    )
-    user = (
-        f"Project: {scan_result.name}\n"
-        f"Detected stack: {', '.join(scan_result.stack) or 'unknown'}\n"
-        f"Top-level entries: {tree}\n\n"
-        f"EVIDENCE\n{evidence}\n\n"
-        f"README commands (fenced blocks of the project's own README)\n{readme_commands}\n\n"
-        f"README excerpt\n{readme}\n"
-    )
-    return system, user
-
-
 def _normalize_command(text: str) -> str:
     return " ".join(text.replace("\u00a0", " ").split()).strip().strip("`")
 
@@ -525,8 +661,10 @@ def _looks_like_command(span: str) -> bool:
     span = _normalize_command(span)
     if not span or _PATH_RE.match(span):
         return False
-    head = span.split()[0]
-    return head in _COMMAND_HEADS
+    words = span.split()
+    if len(words) > 1 and any(word.lower().strip(",.;:") in _PROSE_WORDS for word in words[1:]):
+        return False
+    return words[0] in _COMMAND_HEADS
 
 
 def _command_supported(span: str, commands: list[str]) -> bool:
@@ -710,6 +848,12 @@ def clean_draft(text: str, scan_result: Scan) -> tuple[str, list[str]]:
         if _is_generic(line):
             dropped.append(line.strip())
             continue
+        if _PROHIBITION_RE.search(line):
+            # "Do not run `ruff format` repo-wide" is a warning, not an
+            # instruction: the command it names is not evidence and must not be
+            # checked as if the reader were told to run it.
+            kept.append(line)
+            continue
         spans = re.findall(r"`([^`]+)`", line)
         bad = [span for span in spans if _looks_like_command(span) and not _command_supported(span, commands)]
         if bad:
@@ -741,6 +885,8 @@ def audit(text: str, scan_result: Scan) -> list[str]:
         if in_fence:
             if _is_command_line(raw) and not _command_supported(raw, commands):
                 unknown.append(_normalize_command(raw.lstrip("$>").strip()))
+            continue
+        if _PROHIBITION_RE.search(raw):
             continue
         for span in re.findall(r"`([^`]+)`", raw):
             if _looks_like_command(span) and not _command_supported(span, commands):
