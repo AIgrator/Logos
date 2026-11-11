@@ -305,12 +305,12 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   The window Stop itself is one action for both panels
   (`BaseAgentHandler.stop_turn`, called from `AppController.handle_cancel_request`):
   it closes the live block as `Stopped`, journals the in-flight call as a
-  `stopped` result, drops the batch behind it and idles the handler, while
-  history, background jobs and Chromium survive - the dev server keeps running
-  until a project switch or the application exits. `BaseAgentHandler.stop` is
-  the hard variant (`_release_resources` kills the jobs and quits the exec
-  thread, history is dropped) for a caller that releases the session itself; it
-  is not on the Stop path.
+  `stopped` result, drops the batch behind it, clears the title-bar pause mark
+  and idles the handler, while history, background jobs and Chromium survive -
+  the dev server keeps running until a project switch or the application exits.
+  `BaseAgentHandler.stop` is the hard variant (`_release_resources` kills the
+  jobs and quits the exec thread, history is dropped) for a caller that releases
+  the session itself; it is not on the Stop path.
   A command still waiting in the foreground can be handed to the background by
   the user instead of the tail of the turn: a running `execute_shell` step row
   offers `Move to background` (anchor

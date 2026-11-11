@@ -563,6 +563,13 @@ class BaseAgentHandler:
             logging.warning(f"{type(self).__name__} in-flight abort failed: {e}")
         self._set_state(VisionState.IDLE)
         self._stop_thinking_timer()
+        # A turn that was frozen in PAUSED leaves the title-bar pause mark on;
+        # Stop (and a slash command, which ends the turn the same way) means
+        # nothing is left to resume.
+        try:
+            self.ui.set_paused(False)
+        except Exception as e:
+            logging.warning(f"{type(self).__name__} pause mark reset failed: {e}")
         self.original_user_request = None
 
     def handle_fatal_error(self, error_message: str):
