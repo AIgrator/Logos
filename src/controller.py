@@ -36,6 +36,7 @@ from states import ControllerState, VisionState
 from hotkey_manager import HotkeyManager
 from src.computer.computer import Computer
 from src.computer import capabilities
+from src import commands
 from indexer import Indexer
 # Heavy imports are deferred to background threads
 
@@ -290,8 +291,6 @@ class AppController(QObject):
         self.ui.context_compact_requested.connect(
             self._request_manual_summary_refresh)
         self.ui.session_journal_requested.connect(self._show_session_journal)
-        self.ui.project_instructions_requested.connect(
-            self._show_project_instructions)
         self.ui.home_requested.connect(self.ui.show_home)
 
         # Thinking timer and settings change hook
@@ -2722,6 +2721,43 @@ class AppController(QObject):
             self._schedule_auto_compact_check()
         self._consume_theme_replay()
 
+    def _restore_user_input(self, text: str):
+        """Puts a refused command back into the composer instead of dropping it."""
+        try:
+            if not self.ui.user_input.toPlainText().strip():
+                self.ui.user_input.setPlainText(text)
+                self.ui.user_input.setFocus()
+        except Exception:
+            pass
+
+    def _prepare_command(self, command, text: str):
+        """Builds a slash command's prompt, or shows why it cannot run."""
+        root = self.project_root or (
+            self.project_manager.get_active_root()
+            if self.project_manager else "")
+        try:
+            return command.build(root or "", commands.arguments(text))
+        except commands.CommandError as exc:
+            self.ui.add_message(f"<i>{exc}</i>", force_scroll=True)
+            self._restore_user_input(text)
+            return None
+
+    def _ensure_command_capability(self, capability: str):
+        """Attaches what a command needs and shows the matching panel.
+
+        ``/init`` writes a file, so a Chat session gains the terminal
+        capability and the terminal presentation first; the command then runs
+        through the ordinary agent path, exactly like a typed request.
+        """
+        if not capability:
+            return
+        self.attach_capability(capability)
+        if (capability == capabilities.TERMINAL
+                and self.state != ControllerState.TERMINAL):
+            # The same path the capability bar takes, so the mode chip, the
+            # MCP servers, the indexer and the notice match a manual switch.
+            self._activate_terminal_mode()
+
     def handle_user_input(self, user_text):
         if not self.llm_worker.provider:
             active = (self.settings.get("active_provider") or "")
@@ -2742,6 +2778,26 @@ class AppController(QObject):
         if not user_text and not self.pending_attachments:
             return
 
+        # A slash command is a prepared prompt, not a dialog: it expands into
+        # one ordinary user message below, so the agent's steps appear in the
+        # transcript like any other turn.
+        command = commands.find(user_text)
+        objective_text = user_text
+        if command is not None:
+            run = self._prepare_command(command, user_text)
+            if run is None:
+                return
+            self._ensure_command_capability(run.capability)
+            user_text = run.prompt
+            objective_text = run.objective or user_text
+        elif commands.looks_like_command(user_text):
+            self.ui.add_message(
+                f"<i>Unknown command <code>{commands.command_name(user_text)}</code>. "
+                "Type <code>/</code> to see the available commands.</i>",
+                force_scroll=True)
+            self._restore_user_input(user_text)
+            return
+
         # Set the assistant name in the UI at the beginning of the interaction
         model_name = self._get_current_model_name()
         self.ui.set_assistant_name(model_name)
@@ -2758,7 +2814,7 @@ class AppController(QObject):
         turn_msg = self.ui.add_user_message(user_text, attachments=attachment_records)
         self.conversation_history.append({'role': 'user', 'content': user_text})
         self._persist_session(attachments=attachment_records)
-        self._ensure_session_objective(user_text)
+        self._ensure_session_objective(objective_text)
 
         # Process attachments based on the current mode. Agent modes get a
         # reference block and read the file on demand; Chat has no tools, so
@@ -4561,23 +4617,6 @@ class AppController(QObject):
         close_button.clicked.connect(dialog.accept)
         layout.addWidget(close_button)
         dialog.exec()
-
-    def _show_project_instructions(self, path: str = ""):
-        """Open the AGENTS.md dialog for a project from its context menu."""
-        root = os.path.abspath(path) if path else self.project_root
-        if not root or not os.path.isdir(root):
-            QMessageBox.information(
-                self.ui.main_window, "Project instructions",
-                "The project folder no longer exists.")
-            return
-        from src.ui.project_instructions_dialog import ProjectInstructionsDialog
-
-        dialog = ProjectInstructionsDialog(
-            root, self.settings_manager, self.settings, self.ui.main_window)
-        if dialog.exec():
-            self.ui.add_notice(
-                "Project instructions saved to <b>AGENTS.md</b>; "
-                "the next request in this project includes them.")
 
     def _is_active_session(self, path: str) -> bool:
         if not path or not self.session_file:

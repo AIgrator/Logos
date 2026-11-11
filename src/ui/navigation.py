@@ -174,7 +174,6 @@ class _ProjectMenuMixin:
         menu = QMenu(self)
         rename_action = menu.addAction("Rename...")
         reveal_action = menu.addAction("Show in Explorer")
-        instructions_action = menu.addAction("Project instructions...")
         menu.addSeparator()
         remove_action = menu.addAction("Remove Project...")
         chosen = menu.exec(self.project_list.viewport().mapToGlobal(pos))
@@ -184,8 +183,6 @@ class _ProjectMenuMixin:
                 self.project_renamed.emit(path, name)
         elif chosen is reveal_action:
             _reveal_in_explorer(path)
-        elif chosen is instructions_action:
-            self.project_instructions_requested.emit(path)
         elif chosen is remove_action:
             confirmed, delete_data = _confirm_project_removal(
                 self, self._project_name(path))
@@ -225,7 +222,6 @@ class HomePage(_ProjectMenuMixin, QWidget):
     settings_requested = Signal()
     project_renamed = Signal(str, str)   # project path, new name
     project_removed = Signal(str, bool)  # project path, delete .logos data
-    project_instructions_requested = Signal(str)  # project path
     session_renamed = Signal(str, str)   # session path, new title
     session_deleted = Signal(str)        # session path
     session_journal_requested = Signal(str)  # session path
@@ -483,7 +479,6 @@ class ProjectSidebar(_ProjectMenuMixin, QWidget):
     settings_requested = Signal()
     project_renamed = Signal(str, str)   # project path, new name
     project_removed = Signal(str, bool)  # project path, delete .logos data
-    project_instructions_requested = Signal(str)  # project path
     session_renamed = Signal(str, str)   # session path, new title
     session_deleted = Signal(str)        # session path
     session_journal_requested = Signal(str)  # session path

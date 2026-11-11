@@ -27,6 +27,7 @@ from llm.reasoning_effort import effective as effective_effort
 from llm.reasoning_effort import label as effort_label
 from llm.reasoning_effort import levels as effort_levels
 from states import ControllerState
+from src import commands
 from src.suggestions import normalize_suggestions
 from src.computer.terminal_policy import ACCESS_MODE_LABELS, normalize_mode as normalize_access_mode
 
@@ -35,6 +36,7 @@ from .provider_icons import provider_icon
 from .utils import CustomToolTipManager, IconHoverFilter
 from .widgets.attachment_chip import AttachmentChip
 from .widgets.capability_bar import CapabilityBar
+from .widgets.command_palette import CommandPalette
 from .widgets.image_preview_dialog import ImagePreviewDialog
 from .text_render import render_reasoning, render_text, render_user_message
 from .widgets.chat_widget import ChatWidget
@@ -123,6 +125,7 @@ class ExpandingTextEdit(QTextEdit):
         super().__init__(parent)
         self._is_compact_mode = False
         self.file_search_popup = None
+        self.command_palette = None
         font_metrics = self.fontMetrics()
         self.line_height = font_metrics.height()
         self.max_height = int(self.line_height * 5.5)
@@ -133,6 +136,9 @@ class ExpandingTextEdit(QTextEdit):
 
     def set_file_search_popup(self, popup):
         self.file_search_popup = popup
+
+    def set_command_palette(self, palette):
+        self.command_palette = palette
 
     def insertFromMimeData(self, source: QMimeData):
         """
@@ -186,7 +192,9 @@ class ExpandingTextEdit(QTextEdit):
 
     def keyPressEvent(self, event):
         key = event.key()
-        is_popup_visible = self.file_search_popup and self.file_search_popup.isVisible()
+        is_popup_visible = (
+            (self.file_search_popup and self.file_search_popup.isVisible())
+            or (self.command_palette and self.command_palette.isVisible()))
 
         if key == Qt.Key_Escape:
             self.escape_pressed.emit()
@@ -304,7 +312,6 @@ class UIManager(QWidget):
     project_open_requested = Signal()
     project_renamed = Signal(str, str)
     project_removed = Signal(str, bool)
-    project_instructions_requested = Signal(str)
     session_open_requested = Signal(str)
     session_renamed = Signal(str, str)
     session_deleted = Signal(str)
@@ -408,8 +415,6 @@ class UIManager(QWidget):
         self.home_page.settings_requested.connect(self.settings_button_clicked.emit)
         self.home_page.project_renamed.connect(self.project_renamed.emit)
         self.home_page.project_removed.connect(self.project_removed.emit)
-        self.home_page.project_instructions_requested.connect(
-            self.project_instructions_requested.emit)
         self.home_page.session_renamed.connect(self.session_renamed.emit)
         self.home_page.session_deleted.connect(self.session_deleted.emit)
         self.home_page.session_journal_requested.connect(
@@ -421,8 +426,6 @@ class UIManager(QWidget):
         self.sidebar.settings_requested.connect(self.settings_button_clicked.emit)
         self.sidebar.project_renamed.connect(self.project_renamed.emit)
         self.sidebar.project_removed.connect(self.project_removed.emit)
-        self.sidebar.project_instructions_requested.connect(
-            self.project_instructions_requested.emit)
         self.sidebar.session_renamed.connect(self.session_renamed.emit)
         self.sidebar.session_deleted.connect(self.session_deleted.emit)
         self.sidebar.session_journal_requested.connect(
@@ -478,12 +481,23 @@ class UIManager(QWidget):
         self.file_search_popup.itemClicked.connect(self._on_file_suggestion_selected)
         # -------------------------
 
+        # --- Slash-command palette ---
+        # Typing "/" at the start of the input opens it; it sits above the
+        # composer like the file search popup and never takes focus, so the
+        # caret stays where the user is typing.
+        self._suppress_command_palette = False
+        self.command_palette = CommandPalette(self.central_widget)
+        self.command_palette.set_theme(self.controller.theme_manager)
+        self.command_palette.itemClicked.connect(self._on_command_clicked)
+        # -----------------------------
+
         self.input_container = QWidget()
         self.input_layout = QHBoxLayout(self.input_container)
         self.input_layout.setContentsMargins(0, 8, 0, 0)
         self.user_input = ExpandingTextEdit(target_height=36)
         self.user_input.set_file_search_popup(self.file_search_popup)
-        self.user_input.setPlaceholderText("Type your message here...")
+        self.user_input.set_command_palette(self.command_palette)
+        self.user_input.setPlaceholderText("Type your message... (/ for commands)")
         self.input_layout.addWidget(self.user_input)
 
         self.bottom_toolbar_container = QWidget()
@@ -696,7 +710,7 @@ class UIManager(QWidget):
 
         self.send_button.clicked.connect(self._on_send_clicked)
         self.user_input.return_pressed.connect(self._on_send_clicked)
-        self.user_input.escape_pressed.connect(self._hide_file_search_popup)
+        self.user_input.escape_pressed.connect(self._on_escape_pressed)
         self.user_input.up_arrow_pressed.connect(self._select_previous_suggestion)
         self.user_input.down_arrow_pressed.connect(self._select_next_suggestion)
         self.user_input.tab_pressed.connect(self._on_tab_pressed)
@@ -717,6 +731,7 @@ class UIManager(QWidget):
 
         self.user_input.textChanged.connect(self._update_send_button_state)
         self.user_input.textChanged.connect(self._handle_text_changed_for_file_search)
+        self.user_input.textChanged.connect(self._handle_text_changed_for_commands)
         self._update_send_button_state()
 
         self.controller.vision_module_ready.connect(self.on_vision_module_ready)
@@ -788,6 +803,81 @@ class UIManager(QWidget):
         else:
             self.current_search_context = None
             self.file_search_popup.setVisible(False)
+
+    def _slash_query(self):
+        """The command token being typed, or None when the palette is closed.
+
+        Only the first word is a command: ``/`` alone lists everything, and a
+        space (``/init now``) closes the palette so the rest is ordinary text.
+        """
+        text = self.user_input.toPlainText()
+        if not text.startswith("/") or any(ch.isspace() for ch in text):
+            return None
+        return text[1:]
+
+    def _handle_text_changed_for_commands(self):
+        if self._suppress_command_palette:
+            return
+        query = self._slash_query()
+        if query is None:
+            self.command_palette.setVisible(False)
+            return
+        matches = commands.suggestions(query)
+        if not matches:
+            self.command_palette.setVisible(False)
+            return
+        self.command_palette.set_commands(matches)
+        self._show_command_palette()
+
+    def _show_command_palette(self):
+        self.command_palette.setVisible(True)
+        self._update_command_palette_geometry()
+        self.command_palette.raise_()
+
+    def _update_command_palette_geometry(self):
+        """Places the palette above the input, the same way as file search."""
+        if not self.command_palette.isVisible():
+            return
+        height = self.command_palette.preferred_height()
+        input_top_left = self.user_input.mapTo(
+            self.central_widget, self.user_input.rect().topLeft())
+        width = max(240, min(self.user_input.width(), 560))
+        self.command_palette.setGeometry(
+            input_top_left.x(), input_top_left.y() - height - 6, width, height)
+
+    def _on_command_clicked(self, item):
+        if item is None:
+            return
+        self.command_palette.setCurrentItem(item)
+        self._accept_command(send=True)
+
+    def _accept_command(self, send: bool = False):
+        """Completes the highlighted command; Enter/click also runs it.
+
+        Tab fills the input (a command with arguments waits for them), Enter
+        and a click send it at once, like the palette of any other agent.
+        """
+        command = self.command_palette.current_command()
+        self.command_palette.setVisible(False)
+        if command is None:
+            return
+        text = command.slash + (" " if command.takes_arguments else "")
+        self._suppress_command_palette = True
+        try:
+            self.user_input.setPlainText(text)
+            cursor = self.user_input.textCursor()
+            cursor.movePosition(QTextCursor.End)
+            self.user_input.setTextCursor(cursor)
+        finally:
+            self._suppress_command_palette = False
+        self.user_input.setFocus()
+        if send and not command.takes_arguments:
+            self.user_input.clear()
+            self.user_command_submitted.emit(command.slash)
+
+    def _on_escape_pressed(self):
+        self._hide_file_search_popup()
+        self.command_palette.setVisible(False)
 
     @Slot(list)
     def _on_files_found(self, files: list):
@@ -886,6 +976,7 @@ class UIManager(QWidget):
         """Handle the resize event for the UIManager widget."""
         super().resizeEvent(event)
         self._update_file_search_popup_geometry()
+        self._update_command_palette_geometry()
         # Schedule the height update. This allows the layout to settle first.
         QTimer.singleShot(0, self._update_attachment_area_height)
 
@@ -963,10 +1054,16 @@ class UIManager(QWidget):
         self._handle_suggestion_selection(item)
 
     def _on_tab_pressed(self):
+        if self.command_palette.isVisible():
+            self._accept_command(send=False)
+            return
         if self.file_search_popup.isVisible():
             self._handle_suggestion_selection(self.file_search_popup.currentItem())
 
     def _select_previous_suggestion(self):
+        if self.command_palette.isVisible():
+            self.command_palette.step(-1)
+            return
         if not self.file_search_popup.isVisible() or self.file_search_popup.count() == 0:
             return
         current = self.file_search_popup.currentRow()
@@ -974,6 +1071,9 @@ class UIManager(QWidget):
         self.file_search_popup.setCurrentRow(current)
 
     def _select_next_suggestion(self):
+        if self.command_palette.isVisible():
+            self.command_palette.step(1)
+            return
         if not self.file_search_popup.isVisible() or self.file_search_popup.count() == 0:
             return
         current = self.file_search_popup.currentRow()
@@ -1016,6 +1116,7 @@ class UIManager(QWidget):
         self.play_icon = qta.icon('fa5s.play', color=icon_color)
         current_toggle_icon = self.toggle_icon_maximize if self.is_compact else self.toggle_icon_minimize
         self.toggle_button.setIcon(current_toggle_icon)
+        self.command_palette.set_theme(self.controller.theme_manager)
         self._style_context_indicator()
 
     def set_context_indicator(self, stats: dict | None):
@@ -1654,6 +1755,10 @@ class UIManager(QWidget):
                 self.tooltip_manager.install(self.send_button, "Send (will be queued after the current reply)")
 
     def _on_send_clicked(self):
+        if self.command_palette.isVisible() and self.command_palette.count():
+            self._accept_command(send=True)
+            return
+
         if self.file_search_popup.isVisible():
             self._handle_suggestion_selection(self.file_search_popup.currentItem())
             return

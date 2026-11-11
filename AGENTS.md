@@ -583,95 +583,74 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
 - `<project>/AGENTS.md` - optional stable project instructions read from the
   project root only. Capped at 32 KB, redacted and cached by mtime; injected as
   a separate block in every mode before the session handoff. The application
-  never rewrites it on its own: the user writes it, or accepts a draft from the
-  "Project instructions" dialog below.
+  never rewrites it on its own: the user writes it, or runs `/init` in the
+  composer (below).
 - `attachments/<session-id>/` - copies of pasted images (and other bytes with no
   stable source path), deduplicated by SHA-256. Files with a real path are
   referenced in the journal instead of copied; replay marks referenced files
   `changed` or `missing`. Deleting a session removes its attachment folder.
 
-`<project>/AGENTS.md` is also the one file the app helps *write*, without ever
-touching it silently. The project context menu ("Project instructions…", in the
-sidebar and on the home screen) opens
-`src/ui/project_instructions_dialog.py::ProjectInstructionsDialog`, which shows
-the current file (or an empty editor) and **one** button: "Generate AGENTS.md"
-("Regenerate" once there is text). That button is the whole feature - there is
-no separate scan step and no second "draft with model" action, because what the
-user wants is the one thing an `init` command does. Nothing reaches the disk
-until the user presses "Create AGENTS.md" / "Save changes".
+`<project>/AGENTS.md` is also the one file the app helps *write*, and it does
+that through an ordinary slash command, not a dialog. `/init` is the first
+entry of the composer's command registry (`src/commands.py::COMMANDS`): typing
+`/` at the start of the input opens a palette above the composer with every
+command and its one-line summary; Up/Down move the highlight, Tab fills `/init`
+into the input, Enter or a click runs it, and Esc closes the palette without
+touching the text. The palette (`src/ui/widgets/command_palette.py`) never
+takes focus - `ExpandingTextEdit` forwards the keys, the same way the `@` file
+search popup works - so the caret stays in the composer. Only the first word is
+a command: a space (`/init now`) closes the palette and the rest is ordinary
+text, while a leading one-word token that matches no command is answered with
+an "Unknown command" notice instead of being sent, so a typo cannot look like a
+request.
 
-`src/context/instructions_research.py` is the pass behind that button: a bounded
-read-only agent loop built on the app's own machinery, not a second agent
-framework. It creates
-`Computer(settings_manager, mode="terminal", working_directory=<project>)` and
-an `Executor(computer, ui=None)`, offers only five read-only tools
-(`list_directory`, `read_files`, `search_file_content`, `find_files`,
-`path_exists`) - so the pass cannot write, delete or run anything even if the
-model asks - and makes one request per step: the model replies either with
-`{"name": "<tool>", "arguments": {...}}` or with the finished Markdown starting
-at `# AGENTS.md`, which ends the loop. The system prompt asks for the work a
-careful newcomer does (manifests, tool configs, CI, existing instruction files,
-the real entry point, then the file), forbids generic advice and invented
-commands, and asks for 2-6 KB in the README's language. `MIN_TOOLS` (3) sends a
-first answer that skipped the project back with "do not write the file yet",
-because the seed facts are enough to sound convincing and the pass exists to read
-the code; `MAX_STEPS` (14) bounds the cost, and when the budget runs out one last
-request asks for the file with no tools. Every step is reported through
-`on_progress(tool, detail)` and drawn in the dialog's tree, so the user sees what
-was read instead of a spinner. The dialog builds the provider on its own
-`QThread` through `llm.llm_worker.create_llm_provider`, and Cancel disconnects
-the signals and lets the pass end in the background (`_RETIRED_TASKS`), because
-destroying a running `QThread` aborts the process.
+`AppController.handle_user_input` resolves the command before anything else.
+`/init` needs the terminal capability (it writes a file), so a Chat session
+attaches it and switches the presentation to Terminal first
+(`_ensure_command_capability`); the expanded prompt then travels the ordinary
+agent path, so the user bubble, the journal and the transcript show what the
+model received, and the agent's steps appear as activity blocks like any other
+turn. A command with no project open is refused with one italic line and its
+text stays in the composer, and a command run while a chat answer streams
+cancels that answer the way a manual panel switch does. Adding `/memory` later
+is one `SlashCommand` entry: the registry is the only place a command exists,
+and the palette, the routing and the journal need no change.
 
-`src/context/project_instructions.py` is the stdlib-only scanner that seeds the
-pass and audits its result: it reads top-level entries, `package.json` scripts
-(runner from `packageManager` and the lockfile: pnpm, yarn, bun or npm),
-`pyproject.toml` scripts and `[tool.*]` sections, standalone `ruff.toml` /
-`.ruff.toml` (and its `line-length`), `requirements.txt` (only when there is no
-`pyproject.toml`, which installs through its own tool), `Makefile` / `justfile`
-targets, `Cargo.toml` / `go.mod` / `composer.json`, the `run:` lines of
-`.github/workflows/*.yml`, `.editorconfig` / prettier / eslint / `tsconfig.json`
-strict mode / pre-commit, a PyInstaller `*.spec` and an `installer/*.iss`, and
-the pitfalls it can prove (a test folder that holds no test - a file merely
-*named* like a test is checked for `def test_` / `@pytest` / `describe(` - a
-generated `dist/` or `build/`, `node_modules/`, vendored folders, `.env.example`
-keys, `.logos/`, a `.github/copilot-instructions.md` to keep in sync). It never
-walks the tree recursively and never invents a command: a Python entry point
-becomes `uv run python main.py` (`python main.py` without `uv.lock`, the
-project's own `venv\Scripts\python.exe` or `.venv/bin/python` when it has one),
-everything else comes from a manifest line. The fenced blocks of `README.md`,
-`BUILDING.md`, `CONTRIBUTING.md` and `DEVELOPMENT.md` are evidence too
-(`Scan.readme_commands`, capped at 24, `git clone` dropped): for a script-style
-project the run command exists only there, and a command printed by the project's
-own documentation is as verifiable as a manifest line. `commands_in_text` exposes
-the same extraction, so a command printed by a file the pass actually read
-(`read_files` output) counts as evidence in `clean_draft` and `audit` - which is
-what keeps a real `BUILDING.md` command from being dropped as invented.
+`src/commands.py::_init_run` builds the prompt from the scanner's facts and asks
+for the four passes a careful newcomer does: investigate the manifests, tool
+configs, CI and existing instruction files; extract the real entry point, the
+exact install/run/test/lint/build commands, the non-obvious layout, the enforced
+conventions and the pitfalls; write `AGENTS.md` with `write_file` in 2-6 KB and
+under 90 lines, with commands in backticks and no generic advice or invented
+commands; finish by naming the path and what the file covers. The prompt also
+states the language the README uses, so the file matches the project rather than
+the UI. Nothing reaches the disk unless the model itself calls `write_file`:
+there is no post-processing, no second request and no fallback template.
 
-`render_template` turns the facts into a sectioned scaffold, and it is the
-offline fallback: with no provider configured the dialog fills the editor with it
-and says so, so the one button still produces something. `clean_draft` then drops
-every line the facts cannot support - a backticked command matching no manifest,
-README or read file, a command line inside a fenced block (the first version
-checked only backticks, and a model happily wrapped `docker build` in ``` and
-kept it), a sentence from the generic-advice list ("follow best practices",
-"write clean code"), a fenced block left empty, the lead-in line of a removed
-command ("Deploy with:"), and a `## Run` / `## Test` / `## Lint` / `## Build`
-section that ends up with no command at all - while the rejected lines are listed
-in the dialog as "Not included", so the user sees what the model tried to slip
-in. Two shapes are deliberately *not* treated as commands: a line that merely
-forbids one ("do not run `ruff format` repo-wide") is advice and is kept, and a
-backticked span whose later words are ordinary prose ("next to exe") is a path,
-not a Next.js command (`_PROHIBITION_RE`, `_PROSE_WORDS`). One blank line around
-every heading is enforced afterwards, because models drift between "heading
-immediately followed by text" and "heading, empty line, text", and a missing
-`# AGENTS.md` title is prepended. `audit` is the same check run against the
-editor and reads "N commands in the file are not in any project manifest - keep
-them only if they really work": a check, not a verdict, because `git status` in a
-hand-written file is legitimate. The draft is capped at 90 lines and 8 KB, the
-dialog shows the live size and warns past 8 KB because every byte of the file is
-sent with every request. The file is written as UTF-8 with `\n`, and the next
-request picks it up because `context/project_rules.py` caches by mtime.
+`src/context/project_instructions.py` is the stdlib-only scanner behind those
+facts: it reads top-level entries, `package.json` scripts (runner from
+`packageManager` and the lockfile: pnpm, yarn, bun or npm), `pyproject.toml`
+scripts and `[tool.*]` sections, standalone `ruff.toml` / `.ruff.toml` (and its
+`line-length`), `requirements.txt` (only when there is no `pyproject.toml`),
+`Makefile` / `justfile` targets, `Cargo.toml` / `go.mod` / `composer.json`, the
+`run:` lines of `.github/workflows/*.yml`, `.editorconfig` / prettier / eslint /
+`tsconfig.json` strict mode / pre-commit, a PyInstaller `*.spec` and an
+`installer/*.iss`, and the pitfalls it can prove (a test folder that holds no
+test - a file merely *named* like a test is checked for `def test_` / `@pytest`
+/ `describe(` - a generated `dist/` or `build/`, `node_modules/`, vendored
+folders, `.env.example` keys, `.logos/`, a `.github/copilot-instructions.md` to
+keep in sync). It never walks the tree recursively and never invents a command:
+a Python entry point becomes `uv run python main.py` (`python main.py` without
+`uv.lock`, the project's own `venv\Scripts\python.exe` or `.venv/bin/python`
+when it has one), everything else comes from a manifest line. The fenced blocks
+of `README.md`, `BUILDING.md`, `CONTRIBUTING.md` and `DEVELOPMENT.md` are
+evidence too (`Scan.readme_commands`, capped at 24, `git clone` dropped): for a
+script-style project the run command exists only there, and a command printed by
+the project's own documentation is as verifiable as a manifest line. The prompt
+presents the scan as leads to verify, not as the answer, and caps the list (32
+facts, 10 documented commands) so it cannot crowd out the code. The file is
+written by the agent as UTF-8, and the next request picks it up because
+`context/project_rules.py` caches by mtime.
 
 Attachment contents are not re-sent on every agent step. Terminal and Browser
 receive a reference block (name, kind, size, path, status) and read the file on
