@@ -63,6 +63,7 @@ from src.ui.utils import CustomToolTipManager
 CONTEXT_SETTINGS_DOC_URL = (
     "https://github.com/AIgrator/Logos/blob/main/docs/context_settings.md")
 PROJECT_URL = "https://github.com/AIgrator/Logos"
+SITE_URL = "https://aigrator.github.io/logos/"
 ISSUES_URL = f"{PROJECT_URL}/issues"
 LICENSE_FILE = os.path.join(
     getattr(sys, "_MEIPASS", None) or os.path.dirname(
@@ -1389,6 +1390,8 @@ class SettingsPage(QWidget):
             ("Author", QLabel("Yaroslav Litvinchenko")),
             ("Email", self._create_about_link(
                 "aigrator@gmail.com", "mailto:aigrator@gmail.com")),
+            ("Website", self._create_about_link(
+                "aigrator.github.io/logos", SITE_URL)),
             ("GitHub", self._create_about_link(
                 "github.com/AIgrator/Logos", PROJECT_URL)),
             ("Issue Tracker", self._create_about_link(

@@ -31,7 +31,8 @@
 #define AppExePath AddBackslash(SourcePath) + "..\dist\Logos.exe"
 #define AppVersion GetStringFileInfo(AppExePath, "ProductVersion")
 #define AppPublisher "AIgrator"
-#define AppURL "https://github.com/AIgrator/Logos"
+#define AppURL "https://aigrator.github.io/logos/"
+#define AppUpdatesURL "https://github.com/AIgrator/Logos/releases"
 #define AppExeName "Logos.exe"
 
 [Setup]
@@ -43,7 +44,7 @@ AppVerName={#AppName} {#AppVersion}
 AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
-AppUpdatesURL={#AppURL}
+AppUpdatesURL={#AppUpdatesURL}
 ; The file version string is the same three-part number: GetFileVersion() would
 ; pad it to four (0.3.1.0) and that trailing zero is what Explorer shows.
 VersionInfoVersion={#AppVersion}
