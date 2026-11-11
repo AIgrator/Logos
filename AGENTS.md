@@ -583,11 +583,62 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
 - `<project>/AGENTS.md` - optional stable project instructions read from the
   project root only. Capped at 32 KB, redacted and cached by mtime; injected as
   a separate block in every mode before the session handoff. The application
-  never generates or rewrites it.
+  never rewrites it on its own: the user writes it, or accepts a draft from the
+  "Project instructions" dialog below.
 - `attachments/<session-id>/` - copies of pasted images (and other bytes with no
   stable source path), deduplicated by SHA-256. Files with a real path are
   referenced in the journal instead of copied; replay marks referenced files
   `changed` or `missing`. Deleting a session removes its attachment folder.
+
+`<project>/AGENTS.md` is also the one file the app helps *write*, without ever
+touching it silently. The project context menu ("Project instructions…", in the
+sidebar and on the home screen) opens
+`src/ui/project_instructions_dialog.py::ProjectInstructionsDialog`, which shows
+the current file (or an empty editor), a "Scan project" button and a "Draft with
+model" button; nothing reaches the disk until the user presses "Create
+AGENTS.md" / "Save changes". `src/context/project_instructions.py` is the
+stdlib-only scanner behind it: it reads top-level entries, `package.json`
+scripts (runner from `packageManager` and the lockfile: pnpm, yarn, bun or npm),
+`pyproject.toml` scripts and `[tool.*]` sections, `Makefile` / `justfile`
+targets, `Cargo.toml` / `go.mod` / `composer.json`, the `run:` lines of
+`.github/workflows/*.yml`, `.editorconfig` / prettier / eslint / `tsconfig.json`
+strict mode / pre-commit, and the pitfalls it can prove (no test suite and no
+test command, a generated `dist/` or `build/`, `node_modules/`, vendored
+folders, `.env.example` keys, `.logos/`). It never walks the tree recursively and
+never invents a command: a Python entry point becomes `uv run python main.py`
+(`python main.py` without `uv.lock`), everything else comes from a manifest
+line. The README's fenced blocks are evidence too (`Scan.readme_commands`,
+capped at 24): for a script-style project the run command exists only there, and
+a command printed by the project's own documentation is as verifiable as a
+manifest line. `render_template` turns those facts into a sectioned scaffold for
+a project with no model configured; `draft_prompts` asks the active provider for
+prose instead (it receives the README commands as their own list, and is told not
+to name a stack when no `Stack:` fact exists), and `clean_draft` then drops every
+line the facts cannot support - a backticked command matching no manifest or
+README line, a command line inside a fenced block (the first version checked only
+backticks, and a model happily wrapped `docker build` in ``` and kept it), a
+sentence from the generic-advice list ("follow best practices", "write clean
+code"), a fenced block left empty, the lead-in line of a removed command
+("Deploy with:"), and a `## Run` / `## Test` / `## Lint` / `## Build` section
+that ends up with no command at all - while the rejected lines are listed in the
+dialog as "Not included", so the user sees what the model tried to slip in. One
+blank line around every heading is enforced afterwards, because models drift
+between "heading immediately followed by text" and "heading, empty line, text",
+and a missing `# AGENTS.md` title is prepended. `audit` is the same check run
+against the editor and reads "N commands in the file are not in any project
+manifest - keep them only if they really work": a check, not a verdict, because
+`git status` in a hand-written file is legitimate. A project with no manifest, no
+command and no README command refuses the model draft outright ("Nothing to base
+a draft on"), because every sentence would be a guess. The draft is capped at 90
+lines and 8 KB, the dialog shows the live size and warns past 8 KB because every
+byte of the file is sent with every request, and the model prompt asks for at
+most 60 lines. A model draft follows the README's language (Russian when the
+README is mostly Cyrillic); the scan template is a fixed English scaffold. The
+dialog builds its provider on its own `QThread` through
+`llm.llm_worker.create_llm_provider`, so a draft never touches the worker's
+long-lived instance; with no provider configured it says so and the scan
+template still works. The file is written as UTF-8 with `\n`, and the next
+request picks it up because `context/project_rules.py` caches by mtime.
 
 Attachment contents are not re-sent on every agent step. Terminal and Browser
 receive a reference block (name, kind, size, path, status) and read the file on

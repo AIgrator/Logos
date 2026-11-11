@@ -290,6 +290,8 @@ class AppController(QObject):
         self.ui.context_compact_requested.connect(
             self._request_manual_summary_refresh)
         self.ui.session_journal_requested.connect(self._show_session_journal)
+        self.ui.project_instructions_requested.connect(
+            self._show_project_instructions)
         self.ui.home_requested.connect(self.ui.show_home)
 
         # Thinking timer and settings change hook
@@ -4559,6 +4561,23 @@ class AppController(QObject):
         close_button.clicked.connect(dialog.accept)
         layout.addWidget(close_button)
         dialog.exec()
+
+    def _show_project_instructions(self, path: str = ""):
+        """Open the AGENTS.md dialog for a project from its context menu."""
+        root = os.path.abspath(path) if path else self.project_root
+        if not root or not os.path.isdir(root):
+            QMessageBox.information(
+                self.ui.main_window, "Project instructions",
+                "The project folder no longer exists.")
+            return
+        from src.ui.project_instructions_dialog import ProjectInstructionsDialog
+
+        dialog = ProjectInstructionsDialog(
+            root, self.settings_manager, self.settings, self.ui.main_window)
+        if dialog.exec():
+            self.ui.add_notice(
+                "Project instructions saved to <b>AGENTS.md</b>; "
+                "the next request in this project includes them.")
 
     def _is_active_session(self, path: str) -> bool:
         if not path or not self.session_file:

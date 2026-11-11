@@ -304,6 +304,7 @@ class UIManager(QWidget):
     project_open_requested = Signal()
     project_renamed = Signal(str, str)
     project_removed = Signal(str, bool)
+    project_instructions_requested = Signal(str)
     session_open_requested = Signal(str)
     session_renamed = Signal(str, str)
     session_deleted = Signal(str)
@@ -407,6 +408,8 @@ class UIManager(QWidget):
         self.home_page.settings_requested.connect(self.settings_button_clicked.emit)
         self.home_page.project_renamed.connect(self.project_renamed.emit)
         self.home_page.project_removed.connect(self.project_removed.emit)
+        self.home_page.project_instructions_requested.connect(
+            self.project_instructions_requested.emit)
         self.home_page.session_renamed.connect(self.session_renamed.emit)
         self.home_page.session_deleted.connect(self.session_deleted.emit)
         self.home_page.session_journal_requested.connect(
@@ -418,6 +421,8 @@ class UIManager(QWidget):
         self.sidebar.settings_requested.connect(self.settings_button_clicked.emit)
         self.sidebar.project_renamed.connect(self.project_renamed.emit)
         self.sidebar.project_removed.connect(self.project_removed.emit)
+        self.sidebar.project_instructions_requested.connect(
+            self.project_instructions_requested.emit)
         self.sidebar.session_renamed.connect(self.session_renamed.emit)
         self.sidebar.session_deleted.connect(self.session_deleted.emit)
         self.sidebar.session_journal_requested.connect(

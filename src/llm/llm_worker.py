@@ -53,63 +53,7 @@ class LLMWorker(QObject):
 
     def _create_llm_provider(self, settings, provider_name=None, model_id=None):
         """Factory function to create an LLM provider instance based on current settings."""
-        active_provider_name = provider_name or settings.get("active_provider")
-        if not active_provider_name:
-            logging.warning("No active LLM provider selected in settings.")
-            return None
-
-        providers_dict = settings.get("llm_providers", {})
-        user_provider_config = providers_dict.get(active_provider_name)
-
-        if not user_provider_config:
-            logging.error(f"Configuration for active provider '{active_provider_name}' not found.")
-            return None
-
-        # Built-in providers need an API key; custom providers may be
-        # keyless local servers, so let the definition decide.
-        from llm.custom_providers import provider_is_configured
-        if not provider_is_configured(settings, active_provider_name):
-            logging.warning(f"Provider '{active_provider_name}' is not configured. Cannot create provider.")
-            return None
-
-        from llm import get_provider_class
-        provider_class = get_provider_class(active_provider_name)
-        if not provider_class:
-            logging.error(f"Provider class for '{active_provider_name}' not found in PROVIDERS mapping.")
-            return None
-
-        # Static provider config (api_url, cancellation/streaming flags, ...)
-        # lives on the provider class. SettingsManager keeps only a lightweight
-        # copy that omits it for fast startup, so merge it in here. Without this
-        # providers that rely on 'api_url' (e.g. x-ai) fall back to the SDK's
-        # default endpoint and send requests (with the wrong key) to
-        # api.openai.com.
-        static_provider_config = dict(provider_class.get_provider_config() or {})
-        static_provider_config.update(self.settings_manager.PROVIDER_CONFIG.get(active_provider_name, {}))
-
-        full_config = static_provider_config
-        full_config.update(user_provider_config)
-        full_config['name'] = active_provider_name
-        if model_id:
-            full_config["model"] = model_id
-
-        # Resolve the reasoning effort for this exact model: the saved choice
-        # when still valid, otherwise the catalogue default. Empty means the
-        # model (or provider) has no effort control and no parameter is sent.
-        from llm.reasoning_effort import effective as effective_effort
-        saved_efforts = user_provider_config.get("reasoning_efforts")
-        selected_effort = ""
-        if isinstance(saved_efforts, dict):
-            selected_effort = str(saved_efforts.get(full_config.get("model")) or "")
-        full_config["reasoning_effort"] = effective_effort(
-            active_provider_name, full_config.get("model"), selected_effort)
-
-        logging.info(f"Instantiating provider '{active_provider_name}' with model '{full_config.get('model')}'.")
-        inst_start = perf_counter()
-        instance = provider_class(full_config)
-        inst_duration = perf_counter() - inst_start
-        logging.info(f"Provider '{active_provider_name}' __init__ completed in {inst_duration:.3f}s")
-        return instance
+        return create_llm_provider(self.settings_manager, settings, provider_name, model_id)
 
     def _emit_usage(self, purpose: str = "completion", provider=None) -> None:
         provider = provider or self.provider
@@ -880,3 +824,68 @@ class LLMWorker(QObject):
     def cancel(self):
         self.cancel_current_stream()
         self.is_cancelled = True
+
+
+def create_llm_provider(settings_manager, settings, provider_name=None, model_id=None):
+    """Builds a provider from the saved settings, for callers outside the worker.
+
+    The worker keeps one long-lived instance on its own thread. A one-off
+    request (a project-instructions draft, for example) builds a fresh provider
+    on the thread that asked for it instead of touching the worker's state.
+    """
+    active_provider_name = provider_name or settings.get("active_provider")
+    if not active_provider_name:
+        logging.warning("No active LLM provider selected in settings.")
+        return None
+
+    providers_dict = settings.get("llm_providers", {})
+    user_provider_config = providers_dict.get(active_provider_name)
+
+    if not user_provider_config:
+        logging.error(f"Configuration for active provider '{active_provider_name}' not found.")
+        return None
+
+    # Built-in providers need an API key; custom providers may be keyless
+    # local servers, so let the definition decide.
+    from llm.custom_providers import provider_is_configured
+    if not provider_is_configured(settings, active_provider_name):
+        logging.warning(f"Provider '{active_provider_name}' is not configured. Cannot create provider.")
+        return None
+
+    from llm import get_provider_class
+    provider_class = get_provider_class(active_provider_name)
+    if not provider_class:
+        logging.error(f"Provider class for '{active_provider_name}' not found in PROVIDERS mapping.")
+        return None
+
+    # Static provider config (api_url, cancellation/streaming flags, ...) lives
+    # on the provider class. SettingsManager keeps only a lightweight copy that
+    # omits it for fast startup, so merge it in here: providers that rely on
+    # 'api_url' (e.g. x-ai) otherwise fall back to the SDK default endpoint and
+    # send requests (with the wrong key) to api.openai.com.
+    static_provider_config = dict(provider_class.get_provider_config() or {})
+    static_provider_config.update(settings_manager.PROVIDER_CONFIG.get(active_provider_name, {}))
+
+    full_config = static_provider_config
+    full_config.update(user_provider_config)
+    full_config['name'] = active_provider_name
+    if model_id:
+        full_config["model"] = model_id
+
+    # Resolve the reasoning effort for this exact model: the saved choice when
+    # still valid, otherwise the catalogue default. Empty means the model (or
+    # provider) has no effort control and no parameter is sent.
+    from llm.reasoning_effort import effective as effective_effort
+    saved_efforts = user_provider_config.get("reasoning_efforts")
+    selected_effort = ""
+    if isinstance(saved_efforts, dict):
+        selected_effort = str(saved_efforts.get(full_config.get("model")) or "")
+    full_config["reasoning_effort"] = effective_effort(
+        active_provider_name, full_config.get("model"), selected_effort)
+
+    logging.info(f"Instantiating provider '{active_provider_name}' with model '{full_config.get('model')}'.")
+    inst_start = perf_counter()
+    instance = provider_class(full_config)
+    inst_duration = perf_counter() - inst_start
+    logging.info(f"Provider '{active_provider_name}' __init__ completed in {inst_duration:.3f}s")
+    return instance
