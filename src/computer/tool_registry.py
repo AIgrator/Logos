@@ -37,7 +37,8 @@ if project_root not in sys.path:
 # stale caches (which are otherwise only invalidated by manifest changes) are
 # rebuilt. v2: added `strict_schema`. v3: added `strict_schema_flat` (browser).
 # v4: payload.commentary narration + update_plan. v5: payload.actions[] batch.
-SCHEMA_GEN_VERSION = 5
+# v6: find_files skips vendor folders and is recursive by default.
+SCHEMA_GEN_VERSION = 6
 
 
 class ToolRegistry:

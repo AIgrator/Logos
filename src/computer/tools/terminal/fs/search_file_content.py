@@ -3,12 +3,8 @@ import os
 import re
 
 from src.computer.computer import tool_meta
+from src.computer.tools.terminal.fs._walk import SKIP_DIRS
 
-_SKIP_DIRS = {
-    '__pycache__', '.git', '.hg', '.svn', '.venv', 'venv', 'env',
-    'node_modules', '.idea', '.vscode', '.mypy_cache', '.pytest_cache',
-    '.ruff_cache', 'build', 'dist', '.tox', '.eggs',
-}
 _SKIP_EXTENSIONS = {
     '.pyc', '.pyo', '.pyd', '.dll', '.exe', '.bin', '.so', '.dylib',
     '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.tiff',
@@ -59,7 +55,7 @@ def search_file_content(self, pattern: str, path: str = '.', directory: str | No
         absolute_directory = self._resolve_path(target)
         logging.info(f"Searching for pattern '{pattern}' in directory '{absolute_directory}'")
         for root, dirs, files in os.walk(absolute_directory):
-            dirs[:] = [d for d in dirs if d.lower() not in _SKIP_DIRS]
+            dirs[:] = [d for d in dirs if d.lower() not in SKIP_DIRS]
             for file in files:
                 if os.path.splitext(file)[1].lower() in _SKIP_EXTENSIONS:
                     continue

@@ -526,7 +526,14 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `path` while the function accepted `directory`, so a live run died with
   `find_files() got an unexpected keyword argument 'path'`. It now takes `path`
   and keeps `directory` as a compatibility alias, the same way
-  `search_file_content` does. The argument *names* are checked before the call
+  `search_file_content` does. Both crawl through
+  `tools/terminal/fs/_walk.py`, which skips vendor folders (`.git`, `venv`,
+  `node_modules`, `build`, `dist`, `__pycache__`, `site-packages`, ...) and caps
+  `find_files` at 500 entries: a live `/init` run asked for `**/*.toml` and got
+  a venv's `site-packages` back, and the next request pruned that result
+  together with the file reads the model still needed. `find_files` is
+  recursive (`*.py` matches at any depth, `**` spans folders) and returns
+  folders as well as files. The argument *names* are checked before the call
   too (`src/computer/tool_args.py`, used by `ToolExecWorker` and the Vision
   `Executor`): a missing or extra keyword becomes one readable tool error that
   names the accepted arguments instead of a Python `TypeError` the model
