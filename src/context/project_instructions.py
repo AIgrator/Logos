@@ -503,8 +503,12 @@ def _scan_pitfalls(root: str, facts: list[Fact]) -> None:
         facts.append(Fact("`.logos/` holds Logos session data; do not edit or commit it.", "top-level scan", "pitfall"))
     copilot = ".github/copilot-instructions.md"
     if os.path.isfile(os.path.join(root, copilot)):
+        # The scanner reports the file; the agent is told to leave its content
+        # alone (a rewrite of a file it only partly read cost a live /init run
+        # ten turns), so the fact must not read like an instruction to edit it.
         facts.append(Fact(
-            f"`{copilot}` also carries instructions; keep it in sync with AGENTS.md.",
+            f"`{copilot}` carries instructions for another tool; mention it in "
+            "AGENTS.md, do not rewrite it.",
             copilot, "convention"))
 
 

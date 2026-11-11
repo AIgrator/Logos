@@ -2758,6 +2758,29 @@ class AppController(QObject):
             # MCP servers, the indexer and the notice match a manual switch.
             self._activate_terminal_mode()
 
+    def _end_running_turn_for_command(self):
+        """A command is a new task, not guidance for the one in flight.
+
+        A plain message typed mid-turn steers the running task, which is what
+        the user means by it. A slash command asks for a fresh run: folded into
+        a running, paused or failed turn it would be applied as a steer, a
+        paused note or a chat question, so the turn is ended first (the same
+        ``stop_turn`` the window Stop uses; history, background jobs and the
+        browser survive).
+        """
+        if self.state not in (ControllerState.TERMINAL, ControllerState.BROWSER):
+            return
+        handler = self.current_handler
+        stop_turn = getattr(handler, "stop_turn", None)
+        if not callable(stop_turn):
+            return
+        state = getattr(handler, "state", None)
+        if state not in (VisionState.EXECUTING, VisionState.PAUSED,
+                         VisionState.PAUSED_ON_ERROR):
+            return
+        logging.info("Ending the running turn before starting a slash command.")
+        stop_turn()
+
     def handle_user_input(self, user_text):
         if not self.llm_worker.provider:
             active = (self.settings.get("active_provider") or "")
@@ -2788,6 +2811,10 @@ class AppController(QObject):
             if run is None:
                 return
             self._ensure_command_capability(run.capability)
+            # A command starts a fresh turn: a running (or failed) one would
+            # otherwise swallow it as a steer, which is what a live /init run
+            # hit after a fatal LLM error left the handler in EXECUTING.
+            self._end_running_turn_for_command()
             user_text = run.prompt
             objective_text = run.objective or user_text
         elif commands.looks_like_command(user_text):

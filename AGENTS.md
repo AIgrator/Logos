@@ -612,9 +612,14 @@ agent path, so the user bubble, the journal and the transcript show what the
 model received, and the agent's steps appear as activity blocks like any other
 turn. A command with no project open is refused with one italic line and its
 text stays in the composer, and a command run while a chat answer streams
-cancels that answer the way a manual panel switch does. Adding `/memory` later
-is one `SlashCommand` entry: the registry is the only place a command exists,
-and the palette, the routing and the journal need no change.
+cancels that answer the way a manual panel switch does. A command is a new
+task, not guidance: `_end_running_turn_for_command` ends a running, paused or
+failed Terminal/Browser turn through the window's own `stop_turn` before the
+prompt is sent, because otherwise `start_task` folded it into the old turn as a
+steer - a live `/init` run after a fatal LLM error was swallowed that way and
+never ran. Adding `/memory` later is one `SlashCommand` entry: the registry is
+the only place a command exists, and the palette, the routing and the journal
+need no change.
 
 `src/commands.py::_init_run` builds the prompt from the scanner's facts and asks
 for the four passes a careful newcomer does: investigate the manifests, tool
@@ -624,8 +629,14 @@ conventions and the pitfalls; write `AGENTS.md` with `write_file` in 2-6 KB and
 under 90 lines, with commands in backticks and no generic advice or invented
 commands; finish by naming the path and what the file covers. The prompt also
 states the language the README uses, so the file matches the project rather than
-the UI. Nothing reaches the disk unless the model itself calls `write_file`:
-there is no post-processing, no second request and no fallback template.
+the UI. `AGENTS.md` is the only file the run may touch: the prompt tells the
+model to mention another instruction file (`.github/copilot-instructions.md`,
+`CLAUDE.md`, `.cursor/rules`) instead of rewriting it, because a live run
+rewrote `copilot-instructions.md` from partial reads and then spent ten turns
+looking for the middle its own pruning had dropped - the same reason it is told
+to read each file once and note what matters as it goes. Nothing reaches the
+disk unless the model itself calls `write_file`: there is no post-processing, no
+second request and no fallback template.
 
 `src/context/project_instructions.py` is the stdlib-only scanner behind those
 facts: it reads top-level entries, `package.json` scripts (runner from
@@ -639,10 +650,11 @@ scripts and `[tool.*]` sections, standalone `ruff.toml` / `.ruff.toml` (and its
 test - a file merely *named* like a test is checked for `def test_` / `@pytest`
 / `describe(` - a generated `dist/` or `build/`, `node_modules/`, vendored
 folders, `.env.example` keys, `.logos/`, a `.github/copilot-instructions.md` to
-keep in sync). It never walks the tree recursively and never invents a command:
-a Python entry point becomes `uv run python main.py` (`python main.py` without
-`uv.lock`, the project's own `venv\Scripts\python.exe` or `.venv/bin/python`
-when it has one), everything else comes from a manifest line. The fenced blocks
+name in `AGENTS.md` and leave alone). It never walks the tree recursively and
+never invents a command: a Python entry point becomes `uv run python main.py`
+(`python main.py` without `uv.lock`, or the project's own
+`venv\Scripts\python.exe` / `.venv/bin/python` when it has one), everything
+else comes from a manifest line. The fenced blocks
 of `README.md`, `BUILDING.md`, `CONTRIBUTING.md` and `DEVELOPMENT.md` are
 evidence too (`Scan.readme_commands`, capped at 24, `git clone` dropped): for a
 script-style project the run command exists only there, and a command printed by

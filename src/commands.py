@@ -175,7 +175,9 @@ tested, linted, built and released: dependency manifests and lockfiles, tool \
 configs (ruff, eslint, prettier, tsconfig, pytest, Makefile), CI workflows, the \
 packaging or installer spec, README/BUILDING/CONTRIBUTING, and any existing \
 instruction file. Use `list_directory`, `read_files`, `search_file_content` and \
-`find_files`. Never describe a file you have not read.
+`find_files`. Never describe a file you have not read, and read each one once: \
+old tool output can be dropped from your history, so note what matters as you go \
+instead of reading the same range again.
 
 2. Extract. Collect only what changes a decision:
 - the real entry point and how the app starts;
@@ -193,7 +195,11 @@ with short `##` sections and commands in backticks. Prefer a concrete line \
 engineering advice ("write clean code", "follow best practices") and never \
 invent a command: if the project does not show one, omit it. If `{FILENAME}` \
 already exists, read it first and keep every rule that is still true. Write the \
-file in the language the README uses.
+file in the language the README uses. `{FILENAME}` is the only file you touch: \
+do not edit, rewrite or reformat another instruction file \
+(`.github/copilot-instructions.md`, `CLAUDE.md`, `.cursor/rules`, ...) even when \
+one exists and looks stale - mention it in `{FILENAME}` as the other file to \
+keep in sync and leave its content to the user.
 
 4. Finish. Reply with the path you wrote and a short list of what the file now \
 covers."""
