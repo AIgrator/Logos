@@ -371,7 +371,8 @@ class TerminalHandler(BaseAgentHandler):
             logging.warning(f"{type(self).__name__} MCP servers lookup failed: {error}")
             return "No MCP servers are configured."
 
-    def start_task(self, user_text: str, attachment_context: str | None = None):
+    def start_task(self, user_text: str, attachment_context: str | None = None,
+                   expects_write: str = ""):
         """A fresh task never inherits captures of an abandoned one."""
         if self.state == VisionState.IDLE:
             clear = getattr(self.computer, "clear_pending_screenshots", None)
@@ -388,7 +389,7 @@ class TerminalHandler(BaseAgentHandler):
             self._step_count = 0
         if attachment_context:
             self.command_history.append(attachment_context)
-        super().start_task(user_text)
+        super().start_task(user_text, expects_write=expects_write)
 
     def _continue_loop(self, last_command_output=None, from_job_wait=False):
         """Adds the Browser task budget on top of the shared loop."""

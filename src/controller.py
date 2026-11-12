@@ -2806,6 +2806,7 @@ class AppController(QObject):
         # transcript like any other turn.
         command = commands.find(user_text)
         objective_text = user_text
+        expects_write = ""
         if command is not None:
             run = self._prepare_command(command, user_text)
             if run is None:
@@ -2817,6 +2818,10 @@ class AppController(QObject):
             self._end_running_turn_for_command()
             user_text = run.prompt
             objective_text = run.objective or user_text
+            # The file the command promises. A re-run in a session whose
+            # history already says "written" answered with that claim and no
+            # tool call at all, so the handler checks the file at `finish`.
+            expects_write = getattr(run, "expects_write", "") or ""
         elif commands.looks_like_command(user_text):
             self.ui.add_message(
                 f"<i>Unknown command <code>{commands.command_name(user_text)}</code>. "
@@ -2900,12 +2905,13 @@ class AppController(QObject):
             self._refresh_agent_context()
             self.consume_handoff_seed()
             self._mark_pending_user_message(turn_msg, self.terminal_handler)
-            self.terminal_handler.start_task(user_text)
+            self.terminal_handler.start_task(user_text, expects_write=expects_write)
         elif self.state == ControllerState.BROWSER:
             self._refresh_agent_context()
             self.consume_handoff_seed()
             self._mark_pending_user_message(turn_msg, self.browser_handler)
-            self.browser_handler.start_task(user_text, attachment_context)
+            self.browser_handler.start_task(user_text, attachment_context,
+                                            expects_write=expects_write)
         else:
             self.chat_handler.start_chat(
                 self._chat_prompt(user_text, attachment_records),

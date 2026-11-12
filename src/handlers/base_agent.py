@@ -39,6 +39,17 @@ from src.suggestions import normalize_suggestions
 # from what actually failed.
 MAX_CONSECUTIVE_ERRORS = 3
 
+# Tools that write a file. A command that promises one (``/init``) counts a
+# successful call of these as the write; the file's own mtime and size are the
+# second signal, so a write through the shell, or a rewrite of identical
+# content, is still visible in the state on disk.
+WRITE_TOOLS = frozenset({"write_file", "replace", "replace_many"})
+
+# How many times a `finish` without the promised write is sent back to the
+# model before the turn is accepted with an honest notice. Two is enough to
+# recover from a model that forgot the step; more would turn into a loop.
+MAX_WRITE_NUDGES = 2
+
 
 def _plan_steps(steps) -> list:
     """Unwraps a plan a weak model stringified ("[{...}]" as text).
@@ -347,6 +358,16 @@ class BaseAgentHandler:
         # the model is asked again; asking the model ends the batch.
         self._batch_queue = []
         self._job_steps = {}  # job_id -> (activity msg, step row)
+        # The file a command promised to write (``/init`` -> AGENTS.md), the
+        # state it had when the task started, and what this task did to it.
+        # ``finish`` compares them: a re-run in a session whose history already
+        # says "written" answered with that claim and no tool call at all, so a
+        # model that reports a write it never made is sent back to do the work
+        # instead of being believed.
+        self._expects_write = ""
+        self._expected_write_state = None
+        self._writes_this_task = 0
+        self._write_nudges = 0
         # Catalog tools the model loaded with search_tools. They join the
         # declared set from the next request on; a new task starts empty so the
         # prompt does not grow with tools an old task needed.
@@ -384,8 +405,13 @@ class BaseAgentHandler:
 
     # -- task lifecycle (shared) ----------------------------------------
 
-    def start_task(self, user_text: str):
-        """Starts a new task, resumes a paused one, or steers a running one."""
+    def start_task(self, user_text: str, expects_write: str = ""):
+        """Starts a new task, resumes a paused one, or steers a running one.
+
+        ``expects_write`` is the absolute path a slash command promised to
+        write; ``finish`` refuses to accept a claim about it before the file
+        actually changes (see ``_expected_write_missing``).
+        """
         if self.state == VisionState.PAUSED_ON_ERROR:
             self._set_state(VisionState.EXECUTING)
             self.controller._reenter_agent_mode(self)
@@ -410,6 +436,13 @@ class BaseAgentHandler:
         self._task_tag = f"{type(self).__name__}_{_time.strftime('%H%M%S')}"
         self._turn_seq = 0
         self.original_user_request = user_text
+        # What this task promises to write, and what the file looked like
+        # before the first step. Both reset here: the check belongs to the run,
+        # not to the session.
+        self._expects_write = str(expects_write or "")
+        self._expected_write_state = self._file_state(self._expects_write)
+        self._writes_this_task = 0
+        self._write_nudges = 0
         # On-demand tools loaded for an earlier task are not declared again.
         self._promoted_tools.clear()
         # Do not wipe history if already populated (e.g. attachments).
@@ -420,6 +453,33 @@ class BaseAgentHandler:
             self.command_history.append(jobs_note)
         self._set_state(VisionState.EXECUTING)
         self._continue_loop()
+
+    @staticmethod
+    def _file_state(path: str):
+        """``(mtime_ns, size)`` of *path*, or None when it does not exist."""
+        if not path:
+            return None
+        try:
+            stat = os.stat(path)
+        except OSError:
+            return None
+        return (stat.st_mtime_ns, stat.st_size)
+
+    def _expected_write_missing(self) -> bool:
+        """Whether the file a command promised is still exactly as it was.
+
+        Two independent signals, both required: no file-writing tool ran in
+        this task, and the file on disk did not change. A model that re-runs
+        ``/init`` in a session whose history already says "written" answered
+        with that claim and zero tool calls, and the user saw a success report
+        for a file nobody touched.
+        """
+        path = self._expects_write
+        if not path:
+            return False
+        if self._writes_this_task:
+            return False
+        return self._file_state(path) == self._expected_write_state
 
     def _step_in_flight(self) -> bool:
         """Whether a tool or a background-job wait is currently running.
@@ -1046,6 +1106,25 @@ class BaseAgentHandler:
             self._batch_queue = []
             arguments = action.get('arguments') or {}
             message = arguments.get('message', 'Task completed successfully.')
+            missing_write = self._expected_write_missing()
+            if missing_write and self._write_nudges < MAX_WRITE_NUDGES:
+                # A command promised a file and nothing touched it. Do not
+                # accept the claim: hand the model the fact and keep the turn
+                # open, because the transcript must not show "Wrote ..." for a
+                # file nobody wrote.
+                self._write_nudges += 1
+                logging.warning(
+                    "%s finish rejected: %s is unchanged on disk "
+                    "(nudge %d/%d).", type(self).__name__, self._expects_write,
+                    self._write_nudges, MAX_WRITE_NUDGES)
+                self._after_action_result(
+                    "**Tool Result:** No file was written in this run. "
+                    f"`{self._expects_write}` is unchanged on disk, so the task "
+                    "is not finished. Earlier turns of this conversation are "
+                    "background, not proof: do the work now - write the file with "
+                    "`write_file` (or `replace` for a correction), read the result, "
+                    "and only then finish.")
+                return
             # The result is in: fold the work away. finish_activity keeps it
             # open when the user opened it by hand, when a failure was never
             # followed by a success, or while a background job still runs.
@@ -1053,6 +1132,13 @@ class BaseAgentHandler:
             self._record_assistant_message(message)
             self.ui.add_formatted_message(message, copyable=True)
             self._publish_suggestions(arguments.get('suggestions'))
+            if missing_write:
+                # Nudges spent and still nothing on disk: the turn ends, but the
+                # report above must not stand unqualified.
+                logging.warning("%s finished without writing %s.",
+                                type(self).__name__, self._expects_write)
+                self.ui.add_message("<i>No file was written in this run.</i>",
+                                    force_scroll=True)
             self.stop()
             return
 
@@ -1669,6 +1755,8 @@ class BaseAgentHandler:
         if result_text is None:
             return  # async heir continues the loop itself on completion
         failed = result_text.startswith("**Tool Result:** Error:")
+        if not failed and action_name in WRITE_TOOLS:
+            self._writes_this_task += 1
         if step is not None:
             self._finish_active_step(
                 status="error" if failed else "ok",

@@ -41,6 +41,10 @@ class CommandRun:
     prompt: str
     objective: str = ""
     capability: str = ""
+    #: Absolute path this command promises to write. The handler compares it
+    #: before a ``finish``: a model that answers "Wrote ..." without writing
+    #: anything is sent back to do the work instead of being believed.
+    expects_write: str = ""
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,7 @@ def _init_run(project_root: str, arguments: str = "") -> CommandRun:
         prompt=prompt,
         objective=f"Write {FILENAME} for {scan.name}",
         capability="terminal",
+        expects_write=os.path.join(os.path.abspath(project_root), FILENAME),
     )
 
 
@@ -168,6 +173,11 @@ contributor - human or AI - reads before changing the code, so it must describe 
 this project specifically: its real commands, its layout, the rules the code \
 enforces, and the traps a newcomer hits.
 
+This run is the one that counts. Earlier turns of this conversation are \
+background, not evidence: an earlier answer that reports the file as written \
+proves nothing, and a file that already exists is not a finished task. Check the \
+file and the sources now, and write the file yourself in this run.
+
 Work in four passes.
 
 1. Investigate. Read the files that decide how this project is installed, run, \
@@ -189,7 +199,8 @@ vendored folders);
 - pitfalls: a test folder with no tests, a build artifact that must not be \
 edited, a server that has to run first.
 
-3. Write. Use `write_file` on `{FILENAME}`. Keep it 2-6 KB and under 90 lines, \
+3. Write. Use `write_file` on `{FILENAME}` in this run and read its result - \
+nothing else writes the file for you. Keep it 2-6 KB and under 90 lines, \
 with short `##` sections and commands in backticks. Prefer a concrete line \
 ("Run `uv run python main.py`") over advice ("run the app"). Leave out generic \
 engineering advice ("write clean code", "follow best practices") and never \
@@ -202,4 +213,6 @@ one exists and looks stale - mention it in `{FILENAME}` as the other file to \
 keep in sync and leave its content to the user.
 
 4. Finish. Reply with the path you wrote and a short list of what the file now \
-covers."""
+covers. Report only what this run did: never claim a write you did not perform, \
+and if something blocked the write, say what it was instead of describing a \
+file that does not exist."""

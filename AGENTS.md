@@ -645,6 +645,26 @@ to read each file once and note what matters as it goes. Nothing reaches the
 disk unless the model itself calls `write_file`: there is no post-processing, no
 second request and no fallback template.
 
+A re-run of `/init` in the same session found the last hole: the history already
+held a finished `/init` whose answer reported the file as written, so the model
+answered with the same claim in one turn and zero tool calls, and the
+transcript showed "Wrote AGENTS.md (5,792 bytes)" for a file nobody had
+touched. Two changes close it. The prompt now opens with "this run is the one
+that counts": earlier turns are background, not evidence, an existing file is
+not a finished task, and the reply reports only what the run did. The loop also
+checks it: `CommandRun.expects_write` carries the absolute path a command
+promises (`/init` -> `<project>/AGENTS.md`), `start_task(expects_write=...)`
+snapshots its `(mtime_ns, size)`, and `finish` refuses the claim while the file
+is unchanged and no `write_file` / `replace` / `replace_many` succeeded in this
+task (`BaseAgentHandler._expected_write_missing`, `WRITE_TOOLS`). A refused
+finish hands the model a `**Tool Result:** No file was written in this run...`
+and keeps the turn open, at most twice (`MAX_WRITE_NUDGES`); after that the turn
+ends with the honest `<i>No file was written in this run.</i>` line under the
+answer instead of leaving the false report unqualified. Both signals are
+required, so a write through the shell or a rewrite of identical content still
+counts, and an ordinary typed task - which promises nothing - never meets the
+check.
+
 `src/context/project_instructions.py` is the stdlib-only scanner behind those
 facts: it reads top-level entries, `package.json` scripts (runner from
 `packageManager` and the lockfile: pnpm, yarn, bun or npm), `pyproject.toml`
