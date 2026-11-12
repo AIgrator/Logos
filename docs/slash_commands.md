@@ -5,7 +5,7 @@ A status and design note for the composer's command registry
 Code, Codex CLI and Gemini CLI ship, and which of those are worth porting to
 Logos, split by how much machinery each one needs.
 
-**Status (1.1.0).** `/compact`, `/memory` and `/help` are implemented, together
+**Status (1.2.0).** `/compact`, `/memory` and `/help` are implemented, together
 with the user-level memory layer `/memory` writes to; `/init` is unchanged.
 Sections 3, 5 and 6 describe what was built. Everything else below is a backlog,
 ordered in section 7.
@@ -361,7 +361,7 @@ Two follow-ups found on a real session:
 
 | Priority | Commands | Reason |
 | --- | --- | --- |
-| **done** | `/init`, `/compact`, `/memory` (+ user-level injection), `/help` | The registry, its two kinds, and the help that explains them; built in 1.1.0 |
+| **done** | `/init`, `/compact`, `/memory` (+ user-level injection), `/help` | The registry, its two kinds, and the help that explains them; built in 1.1.0, tightened in 1.2.0 |
 | P0 | `/status`, `/context`, `/clear` | The rest of what makes a growing registry usable |
 | P1 | `/review`, `/remember`, `/model`, `/permissions`, `/settings`, `/rename`, `/stop`, `/copy`, `/mcp`, `/skills` | Cheap, and each replaces a trip to a panel or a menu |
 | P2 | `/test`, `/fix`, `/explain`, `/commit`, `/pr`, `/simplify`, `/security-review`, `/docs`, `/plan`, `/export` | Prompt commands: valuable but each needs its own prompt quality bar |
