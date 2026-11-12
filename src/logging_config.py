@@ -24,6 +24,10 @@ def setup_logging(log_to_file=False, logs_dir=None, log_level="DEBUG"):
     logging.getLogger('httpcore').setLevel(logging.INFO)
     logging.getLogger('openai').setLevel(logging.INFO)
     logging.getLogger('anthropic').setLevel(logging.INFO)
+    # Python-Markdown logs three DEBUG lines every time it builds a Markdown
+    # instance, and the chat builds one per streamed frame: a single long
+    # answer wrote 10,677 lines (1.7 MB) of "Successfully loaded extension".
+    logging.getLogger('MARKDOWN').setLevel(logging.INFO)
     # -----------------------------------------
 
     # Clear existing handlers to avoid duplication

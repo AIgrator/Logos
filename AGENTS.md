@@ -410,6 +410,20 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   turn and an interim `display_message` note never grow one. The same strip
   dates a `queued` message, which keeps its own dimmed HTML in
   `msg['queued_content']`.
+  A live answer is painted at most ten times a second
+  (`ChatWidget.STREAM_RENDER_INTERVAL_MS`, 100 ms), not once per chunk:
+  `append_to_stream` only appends to `msg['plain']` and arms one single-shot
+  timer, and `_render_stream` rebuilds the markdown document from what has
+  arrived so far. Every paint converts the markdown and lays out the whole
+  answer, so a paint per chunk was O(n²): an 18 KB story arrived as 3,559
+  chunks, the GUI thread managed ~14 a second, the queued chunks outlived the
+  network stream by 80 s, and Windows showed the window as "(Not responding)"
+  until that queue drained. A chunk that arrives inside the last interval is
+  painted by `_flush_stream_paint` before `add_message` drops the stream state,
+  so a cancelled answer keeps its last words, and `finalize_stream` stops the
+  timer and paints the authoritative final HTML. Python-Markdown logs three
+  DEBUG lines per `Markdown` instance, and every paint builds one, so
+  `logging_config` raises the `MARKDOWN` logger to INFO.
   The strip is chrome, not message text: `_render_message` stores where it
   starts (`msg['meta_start']`) and `_selectable_end` keeps selection endpoints
   out of it, so dragging across a message never highlights or copies the

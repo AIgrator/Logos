@@ -231,6 +231,14 @@ class ChatWidget(QAbstractScrollArea):
     # Below this the column stops shrinking and the gutter gives way instead,
     # so a narrow window keeps a readable line length.
     MIN_CONTENT_WIDTH = 560
+    # A streamed answer is one QTextDocument that is rebuilt as a whole, so a
+    # paint per chunk is O(n^2) in the answer length. A long story arrived as
+    # ~3,500 chunks of a text growing to 18 KB; the GUI thread could paint only
+    # ~14 a second, the queued chunks fell 80 s behind the model, and Windows
+    # showed the window as "(Not responding)" for the whole drain. Chunks now
+    # only mark the message dirty: one timer paints at most ten frames a
+    # second, and `finalize_stream` paints the authoritative last one.
+    STREAM_RENDER_INTERVAL_MS = 100
 
     @classmethod
     def content_max_width(cls, window_width: int, screen_width=None) -> int:
@@ -288,6 +296,13 @@ class ChatWidget(QAbstractScrollArea):
         # instead of ``messages[-1]`` so queued user messages appended below the
         # in-flight answer never become the stream target.
         self._streaming_msg = None
+        # Coalesced live painting of the streaming answer: chunks accumulate
+        # in the message and one single-shot timer paints what has arrived so
+        # far, instead of one full re-render per chunk.
+        self._stream_timer = QTimer(self)
+        self._stream_timer.setSingleShot(True)
+        self._stream_timer.setInterval(self.STREAM_RENDER_INTERVAL_MS)
+        self._stream_timer.timeout.connect(self._render_stream)
         self.selection_start = None
         self.selection_end = None
         self.is_selecting = False
@@ -1144,6 +1159,7 @@ class ChatWidget(QAbstractScrollArea):
         self.messages = []
         self.is_streaming = False
         self._streaming_msg = None
+        self._stream_timer.stop()
         self._hover_msg = None
         self._live_step_key = None
         self._retry_countdown_msg_idx = -1
@@ -1286,6 +1302,10 @@ class ChatWidget(QAbstractScrollArea):
         was_at_bottom = self._is_at_bottom()
         streaming_msg = self._streaming_msg
         if not keep_stream:
+            # A chunk that arrived inside the last timer interval has not been
+            # painted yet; paint it before the stream state is dropped so a
+            # cancelled answer keeps its last words.
+            self._flush_stream_paint()
             if streaming_msg is not None and streaming_msg.get('is_status'):
                 # A placeholder "Thinking…" line must not linger as a stale
                 # line once real content arrives; drop it instead of leaving
@@ -2242,7 +2262,6 @@ class ChatWidget(QAbstractScrollArea):
             self._follow_if_at_bottom(was_at_bottom)
 
     def append_to_stream(self, text_chunk: str):
-        was_at_bottom = self._is_at_bottom()
         if self.is_streaming and self._streaming_msg is not None:
             actor_name = self._streaming_msg.get('actor') or self.current_assistant_name
         else:
@@ -2272,18 +2291,36 @@ class ChatWidget(QAbstractScrollArea):
         plain += text_chunk
         last_message['plain'] = plain
         # Render Markdown live so headings/lists/bold show while streaming
-        # instead of raw ### / ** syntax.
-        rendered = render_text(plain, markdown_ok=True)
-        last_message['raw_content'] = rendered
-        last_message['doc'].setHtml(rendered)
+        # instead of raw ### / ** syntax - but only once per timer tick. A
+        # chunk can arrive every 20 ms while the whole answer is rebuilt on
+        # each paint, and the queue of pending chunks then outlives the stream
+        # by minutes (a frozen window).
+        if not self._stream_timer.isActive():
+            self._stream_timer.start()
 
+    def _render_stream(self):
+        """Paints the text the streaming answer has accumulated so far."""
+        msg = self._streaming_msg
+        if not self.is_streaming or msg is None or not self._has_message(msg):
+            return
+        was_at_bottom = self._is_at_bottom()
+        rendered = render_text(msg.get('plain') or '', markdown_ok=True)
+        msg['raw_content'] = rendered
+        msg['doc'].setHtml(rendered)
         self._update_scroll_bar()
         self._follow_if_at_bottom(was_at_bottom)
+
+    def _flush_stream_paint(self):
+        """Paints a frame the coalescing timer still owes, before it is dropped."""
+        if self._stream_timer.isActive():
+            self._stream_timer.stop()
+            self._render_stream()
 
     def finalize_stream(self, final_html_content: str):
         """
         Finalizes a streaming message by replacing its content with the final version.
         """
+        self._stream_timer.stop()
         was_at_bottom = self._is_at_bottom()
         last_message = self._streaming_msg
         if last_message is not None:
