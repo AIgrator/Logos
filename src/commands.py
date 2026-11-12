@@ -65,15 +65,31 @@ class SlashCommand:
 def _init_run(project_root: str, arguments: str = "") -> CommandRun:
     if not project_root or not os.path.isdir(project_root):
         raise CommandError("Open a project folder before running /init.")
-    scan = project_instructions.scan(project_root)
-    existing = project_instructions.read_raw(project_root)
-    prompt = _INIT_PROMPT + "\n\n" + _facts_block(scan, existing)
+    root = os.path.abspath(project_root)
+    scan = project_instructions.scan(root)
+    existing = project_instructions.read_raw(root)
+    template = _INIT_PROMPT.replace("${path}", root)
+    prompt = _append_arguments(template, arguments) + "\n\n" + _facts_block(scan, existing)
     return CommandRun(
         prompt=prompt,
         objective=f"Write {FILENAME} for {scan.name}",
         capability="terminal",
-        expects_write=os.path.join(os.path.abspath(project_root), FILENAME),
+        expects_write=os.path.join(root, FILENAME),
     )
+
+
+def _append_arguments(template: str, text: str) -> str:
+    """Puts the user's tail into the prompt the way OpenCode's ``append`` does.
+
+    A template with a ``$ARGUMENTS`` placeholder fills it where it stands
+    (``/init focus on the test setup``); one without keeps the text as a
+    closing paragraph. An empty tail adds nothing, so a bare ``/init`` sends
+    the template alone.
+    """
+    value = str(text or "").strip()
+    if "$ARGUMENTS" in template:
+        return template.replace("$ARGUMENTS", value)
+    return "\n\n".join(part for part in (template, value) if part)
 
 
 COMMANDS: tuple[SlashCommand, ...] = (
@@ -158,61 +174,106 @@ def _facts_block(scan: project_instructions.Scan, existing: str) -> str:
         ]
     if existing.strip():
         size = len(existing.encode("utf-8"))
-        lines += [
-            "",
-            (f"`{FILENAME}` already exists ({size} bytes). Read it before writing, "
-             "keep every rule that is still true, and change only what the "
-             "project has outgrown."),
-        ]
+        lines += ["", f"- `{FILENAME}` already exists ({size} bytes)"]
     return "\n".join(lines)
 
 
-_INIT_PROMPT = f"""\
-Create or update `{FILENAME}` at the root of this project. It is the file a new \
-contributor - human or AI - reads before changing the code, so it must describe \
-this project specifically: its real commands, its layout, the rules the code \
-enforces, and the traps a newcomer hits.
+#: The prompt `/init` sends, ported from OpenCode's ``initialize.txt`` (the
+#: ``init`` entry of its command plugin): same structure, same quality bar, same
+#: handling of an existing file. ``$ARGUMENTS`` is filled with whatever the user
+#: typed after ``/init`` and ``${path}`` is the project root, exactly like
+#: OpenCode's ``append``/``replace`` pair. The scanner's facts are appended below
+#: it, because this app can prove more than the template asks the model to find.
+_INIT_TEMPLATE = """\
+Create or update `{file}` for this repository.
 
-This run is the one that counts. Earlier turns of this conversation are \
-background, not evidence: an earlier answer that reports the file as written \
-proves nothing, and a file that already exists is not a finished task. Check the \
-file and the sources now, and write the file yourself in this run.
+The goal is a compact instruction file that helps future sessions avoid \
+mistakes and ramp up quickly. Every line should answer: "Would an agent likely \
+miss this without help?" If not, leave it out.
 
-Work in four passes.
+User-provided focus or constraints (honor these):
+$ARGUMENTS
 
-1. Investigate. Read the files that decide how this project is installed, run, \
-tested, linted, built and released: dependency manifests and lockfiles, tool \
-configs (ruff, eslint, prettier, tsconfig, pytest, Makefile), CI workflows, the \
-packaging or installer spec, README/BUILDING/CONTRIBUTING, and any existing \
-instruction file. Use `list_directory`, `read_files`, `search_file_content` and \
-`find_files`. Never describe a file you have not read, and read each one once: \
-old tool output can be dropped from your history, so note what matters as you go \
-instead of reading the same range again.
+## How to investigate
 
-2. Extract. Collect only what changes a decision:
-- the real entry point and how the app starts;
-- the exact install/run/test/lint/build commands, with the package manager or \
-interpreter the project actually uses (uv, pnpm, a venv, ...);
-- the architecture and directories that are not obvious from their names;
-- conventions the tooling enforces (line length, formatter, generated or \
-vendored folders);
-- pitfalls: a test folder with no tests, a build artifact that must not be \
-edited, a server that has to run first.
+Read the highest-value sources first:
+- `README*`, root manifests, workspace config, lockfiles
+- build, test, lint, formatter, typecheck, and codegen config
+- CI workflows and pre-commit / task runner config
+- existing instruction files (`{file}`, `CLAUDE.md`, `.cursor/rules/`, \
+`.cursorrules`, `.github/copilot-instructions.md`)
 
-3. Write. Use `write_file` on `{FILENAME}` in this run and read its result - \
-nothing else writes the file for you. Keep it 2-6 KB and under 90 lines, \
-with short `##` sections and commands in backticks. Prefer a concrete line \
-("Run `uv run python main.py`") over advice ("run the app"). Leave out generic \
-engineering advice ("write clean code", "follow best practices") and never \
-invent a command: if the project does not show one, omit it. If `{FILENAME}` \
-already exists, read it first and keep every rule that is still true. Write the \
-file in the language the README uses. `{FILENAME}` is the only file you touch: \
-do not edit, rewrite or reformat another instruction file \
-(`.github/copilot-instructions.md`, `CLAUDE.md`, `.cursor/rules`, ...) even when \
-one exists and looks stale - mention it in `{FILENAME}` as the other file to \
-keep in sync and leave its content to the user.
+If architecture is still unclear after reading config and docs, inspect a small \
+number of representative code files to find the real entrypoints, package \
+boundaries, and execution flow. Prefer reading the files that explain how the \
+system is wired together over random leaf files.
 
-4. Finish. Reply with the path you wrote and a short list of what the file now \
-covers. Report only what this run did: never claim a write you did not perform, \
-and if something blocked the write, say what it was instead of describing a \
-file that does not exist."""
+Prefer executable sources of truth over prose. If docs conflict with config or \
+scripts, trust the executable source and only keep what you can verify.
+
+Use `list_directory`, `read_files`, `search_file_content` and `find_files` to \
+look around, and read each file once: old tool output can drop out of your \
+history, so note what matters as you go instead of reading the same range again.
+
+## What to extract
+
+Look for the highest-signal facts for an agent working in this repo:
+- exact developer commands, especially non-obvious ones
+- how to run a single test, a single package, or a focused verification step
+- required command order when it matters, such as `lint -> typecheck -> test`
+- monorepo or multi-package boundaries, ownership of major directories, and the \
+real app/library entrypoints
+- framework or toolchain quirks: generated code, migrations, codegen, build \
+artifacts, special env loading, dev servers, infra deploy flow
+- testing quirks: fixtures, integration test prerequisites, snapshot workflows, \
+required services, flaky or expensive suites
+- important constraints from existing instruction files worth preserving
+
+Good `{file}` content is usually hard-earned context that took reading multiple \
+files to infer.
+
+## Questions
+
+Only ask the user questions if the repo cannot answer something important, and \
+only once, with `communicate_to_user` (type `question`). Good questions:
+- undocumented team conventions
+- branch / PR / release expectations
+- missing setup or test prerequisites that are known but not written down
+
+Do not ask about anything the repo already makes clear.
+
+## Writing rules
+
+Include only high-signal, repo-specific guidance such as:
+- exact commands and shortcuts the agent would otherwise guess wrong
+- architecture notes that are not obvious from filenames
+- conventions that differ from language or framework defaults
+- setup requirements, environment quirks, and operational gotchas
+- references to existing instruction sources that matter
+
+Exclude:
+- generic software advice
+- long tutorials or exhaustive file trees
+- obvious language conventions
+- speculative claims or anything you could not verify
+- content better stored in another file referenced from `{file}`
+
+When in doubt, omit.
+
+Prefer short sections and bullets. If the repo is simple, keep the file simple. \
+If the repo is large, summarize the few structural facts that actually change \
+how an agent should work.
+
+Keep the file between 2 and 6 KB and under 90 lines, with commands in backticks, \
+and write it in the language the README uses.
+
+`{file}` is the only file you write. Do not edit, rewrite or reformat another \
+instruction file (`.github/copilot-instructions.md`, `CLAUDE.md`, \
+`.cursor/rules`, ...) even when one exists and looks stale: mention it in \
+`{file}` as the other file to keep in sync and leave its content to the user.
+
+If `{file}` already exists in ${path}, improve it in place rather than rewriting \
+blindly. Preserve verified useful guidance, delete fluff or stale claims, and \
+reconcile it with the current codebase."""
+
+_INIT_PROMPT = _INIT_TEMPLATE.replace("{file}", FILENAME)

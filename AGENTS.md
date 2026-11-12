@@ -628,16 +628,18 @@ never ran. Adding `/memory` later is one `SlashCommand` entry: the registry is
 the only place a command exists, and the palette, the routing and the journal
 need no change.
 
-`src/commands.py::_init_run` builds the prompt from the scanner's facts and asks
-for the four passes a careful newcomer does: investigate the manifests, tool
-configs, CI and existing instruction files; extract the real entry point, the
-exact install/run/test/lint/build commands, the non-obvious layout, the enforced
-conventions and the pitfalls; write `AGENTS.md` with `write_file` in 2-6 KB and
-under 90 lines, with commands in backticks and no generic advice or invented
-commands; finish by naming the path and what the file covers. The prompt also
-states the language the README uses, so the file matches the project rather than
-the UI. `AGENTS.md` is the only file the run may touch: the prompt tells the
-model to mention another instruction file (`.github/copilot-instructions.md`,
+`src/commands.py::_init_run` builds the prompt from OpenCode's own `/init`
+(`initialize.txt` in its command plugin), so the two commands behave the same:
+the same "would an agent likely miss this without help?" quality bar, the same
+How to investigate / What to extract / Questions / Writing rules sections, the
+same 2-6 KB and under-90-lines limits, and the same closing rule for a second
+run. `$ARGUMENTS` is filled with whatever the user typed after `/init` and
+`${path}` is the project root, mirroring OpenCode's `append`/`replace` pair; a
+template without a placeholder keeps the tail as a closing paragraph. On top of
+the template the app appends the scanner's facts as leads, and states the
+language the README uses, so the file matches the project rather than the UI.
+`AGENTS.md` is the only file the run may touch: the prompt tells the model to
+mention another instruction file (`.github/copilot-instructions.md`,
 `CLAUDE.md`, `.cursor/rules`) instead of rewriting it, because a live run
 rewrote `copilot-instructions.md` from partial reads and then spent ten turns
 looking for the middle its own pruning had dropped - the same reason it is told
@@ -645,25 +647,25 @@ to read each file once and note what matters as it goes. Nothing reaches the
 disk unless the model itself calls `write_file`: there is no post-processing, no
 second request and no fallback template.
 
-A re-run of `/init` in the same session found the last hole: the history already
-held a finished `/init` whose answer reported the file as written, so the model
-answered with the same claim in one turn and zero tool calls, and the
-transcript showed "Wrote AGENTS.md (5,792 bytes)" for a file nobody had
-touched. Two changes close it. The prompt now opens with "this run is the one
-that counts": earlier turns are background, not evidence, an existing file is
-not a finished task, and the reply reports only what the run did. The loop also
-checks it: `CommandRun.expects_write` carries the absolute path a command
-promises (`/init` -> `<project>/AGENTS.md`), `start_task(expects_write=...)`
-snapshots its `(mtime_ns, size)`, and `finish` refuses the claim while the file
-is unchanged and no `write_file` / `replace` / `replace_many` succeeded in this
-task (`BaseAgentHandler._expected_write_missing`, `WRITE_TOOLS`). A refused
-finish hands the model a `**Tool Result:** No file was written in this run...`
-and keeps the turn open, at most twice (`MAX_WRITE_NUDGES`); after that the turn
-ends with the honest `<i>No file was written in this run.</i>` line under the
-answer instead of leaving the false report unqualified. Both signals are
-required, so a write through the shell or a rewrite of identical content still
-counts, and an ordinary typed task - which promises nothing - never meets the
-check.
+A second `/init` has no code path of its own, exactly as in OpenCode: the same
+template is sent again, and its closing line - "If `AGENTS.md` already exists in
+<project>, improve it in place rather than rewriting blindly. Preserve verified
+useful guidance, delete fluff or stale claims, and reconcile it with the current
+codebase." - is the whole handling. That was not enough once: a re-run in a
+session whose history already held a finished `/init` answered with the same
+"Wrote AGENTS.md (5,792 bytes)" claim in one turn and zero tool calls, for a file
+nobody had touched. The loop therefore checks it: `CommandRun.expects_write`
+carries the absolute path a command promises (`/init` -> `<project>/AGENTS.md`),
+`start_task(expects_write=...)` snapshots its `(mtime_ns, size)`, and `finish`
+refuses the claim while the file is unchanged and no `write_file` / `replace` /
+`replace_many` succeeded in this task
+(`BaseAgentHandler._expected_write_missing`, `WRITE_TOOLS`). A refused finish
+hands the model a `**Tool Result:** No file was written in this run...` and
+keeps the turn open, at most twice (`MAX_WRITE_NUDGES`); after that the turn ends
+with the honest `<i>No file was written in this run.</i>` line under the answer
+instead of leaving the false report unqualified. Both signals are required, so a
+write through the shell or a rewrite of identical content still counts, and an
+ordinary typed task - which promises nothing - never meets the check.
 
 `src/context/project_instructions.py` is the stdlib-only scanner behind those
 facts: it reads top-level entries, `package.json` scripts (runner from
