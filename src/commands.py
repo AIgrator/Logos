@@ -1,14 +1,21 @@
-"""Slash commands typed into the composer (``/init``, later ``/memory``).
+"""Slash commands typed into the composer (``/init``, ``/compact``, ``/memory``).
 
-A command is a prepared prompt, not a dialog: pressing Enter sends one ordinary
-user message, so the agent's steps appear in the transcript like any other
-turn. The registry below is the only place a command exists; adding ``/memory``
-later means one entry here.
+The registry below is the only place a command exists: the palette, the routing
+and the journal all follow from it. There are two kinds, and they differ in
+what pressing Enter does.
 
-``/init`` writes ``AGENTS.md``. The scanner in
-``context/project_instructions.py`` supplies the facts the prompt starts from,
+A **prompt command** (``build``) is a prepared prompt, not a dialog: pressing
+Enter sends one ordinary user message, so the agent's steps appear in the
+transcript like any other turn. ``/init`` is one. The scanner in
+``context/project_instructions.py`` supplies the facts its prompt starts from,
 so the agent spends its steps reading the code instead of discovering the same
 manifests, and every command it prints can be traced to a real file.
+
+An **app action** (``action``) sends nothing to the model. It names a method on
+``AppController`` (``_command_compact``, ``_command_memory``) that does the
+work in the UI: summarizing the session, opening a memory file. An action
+creates no turn, writes no journal event, and runs even when no provider is
+configured, because there is no request to make.
 """
 from __future__ import annotations
 
@@ -53,7 +60,11 @@ class SlashCommand:
 
     name: str
     summary: str
-    build: Callable[[str, str], CommandRun]
+    #: Prompt commands: build the message that is sent to the model.
+    build: Callable[[str, str], CommandRun] | None = None
+    #: App actions: the name of the ``AppController`` method that runs it.
+    #: A command has one of the two, never both.
+    action: str = ""
     capability: str = ""
     takes_arguments: bool = False
 
@@ -93,11 +104,24 @@ def _append_arguments(template: str, text: str) -> str:
 
 
 COMMANDS: tuple[SlashCommand, ...] = (
+    # `/init` stays first: a bare `/` plus Enter runs the highlighted row, and
+    # that gesture has meant `/init` since the palette existed. An action that
+    # rewrites session context should never be the accidental default.
     SlashCommand(
         name="init",
         summary=f"Generate or update {FILENAME} for this project",
         build=_init_run,
         capability="terminal",
+    ),
+    SlashCommand(
+        name="compact",
+        summary="Summarize this session to free context",
+        action="_command_compact",
+    ),
+    SlashCommand(
+        name="memory",
+        summary="Open the user or project memory file",
+        action="_command_memory",
     ),
 )
 

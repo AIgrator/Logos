@@ -25,6 +25,7 @@ from app_paths import resource_path
 from context import context_stats, handoff, model_context, project_rules, skills
 from context.tokens import ModelMetadata
 from settings_manager import SettingsManager
+from ui import editor_launcher
 from ui.manager import UIManager
 from ui.text_render import render_text
 from ui.theme_manager import ThemeManager
@@ -1000,7 +1001,11 @@ class AppController(QObject):
         return self._handoff_summary
 
     def project_baseline_prompt(self) -> str:
-        """Stable AGENTS.md rules for the active project (empty when absent)."""
+        """Stable instruction blocks for this project (empty when none exist).
+
+        Two layers: the user's own ``~/.logos/AGENTS.md`` first, then the
+        project's ``AGENTS.md``, so a project rule overrides a personal default.
+        """
         if not self.project_root:
             return ""
         return project_rules.injection_block(self.project_root)
@@ -1977,7 +1982,7 @@ class AppController(QObject):
         history = [
             item for item in (handler.command_history or [])
             if not (str(item).startswith(handoff_prefix)
-                    or str(item).startswith(project_rules.BLOCK_PREFIX))
+                    or project_rules.is_generated_block(item))
         ]
         blocks = [
             block for block in (
@@ -2732,6 +2737,11 @@ class AppController(QObject):
 
     def _prepare_command(self, command, text: str):
         """Builds a slash command's prompt, or shows why it cannot run."""
+        if not callable(command.build):
+            # App actions are routed before this point; a prompt command with
+            # no builder is a registry mistake, not a user error.
+            logging.error(f"Command {command.slash} has no builder.")
+            return None
         root = self.project_root or (
             self.project_manager.get_active_root()
             if self.project_manager else "")
@@ -2741,6 +2751,29 @@ class AppController(QObject):
             self.ui.add_message(f"<i>{exc}</i>", force_scroll=True)
             self._restore_user_input(text)
             return None
+
+    def _run_command_action(self, command, text: str):
+        """Runs a command that needs no model turn (``/compact``, ``/memory``).
+
+        The registry names the controller method (``SlashCommand.action``), so
+        the behaviour lives here while the palette, the routing and the summary
+        line stay data in ``src/commands.py``. An action creates no turn and no
+        journal event: its whole output is the notice it adds to the chat.
+        """
+        handler = getattr(self, command.action, None)
+        if not callable(handler):
+            logging.error(
+                f"Command {command.slash} names a missing action: {command.action}")
+            self.ui.add_message(
+                f"<i>Command <code>{command.slash}</code> is unavailable.</i>",
+                force_scroll=True)
+            return
+        try:
+            handler(commands.arguments(text))
+        except Exception as exc:
+            logging.error(f"Command {command.slash} failed: {exc}", exc_info=True)
+            self.ui.add_message(
+                f"<i>{command.slash} failed: {exc}</i>", force_scroll=True)
 
     def _ensure_command_capability(self, capability: str):
         """Attaches what a command needs and shows the matching panel.
@@ -2759,6 +2792,14 @@ class AppController(QObject):
             self._activate_terminal_mode()
 
     def handle_user_input(self, user_text):
+        # An app action (``/compact``, ``/memory``) makes no request, so it runs
+        # before the provider check: a fresh install with no key must still be
+        # able to open its memory file, and nothing here may start a turn.
+        command = commands.find(user_text)
+        if command is not None and command.action:
+            self._run_command_action(command, user_text)
+            return
+
         if not self.llm_worker.provider:
             active = (self.settings.get("active_provider") or "")
             configured = provider_is_configured(self.settings, active)
@@ -2778,10 +2819,9 @@ class AppController(QObject):
         if not user_text and not self.pending_attachments:
             return
 
-        # A slash command is a prepared prompt, not a dialog: it expands into
+        # A prompt command is a prepared prompt, not a dialog: it expands into
         # one ordinary user message below, so the agent's steps appear in the
         # transcript like any other turn.
-        command = commands.find(user_text)
         objective_text = user_text
         expects_write = ""
         if command is not None:
@@ -4560,14 +4600,13 @@ class AppController(QObject):
     def _request_manual_summary_refresh(self, focus: str = ""):
         focus = (focus or "").strip()[:handoff.FOCUS_MAX_CHARS]
         if not self.session_events or not self.session_file:
-            QMessageBox.information(
-                self.ui.main_window, "Session context",
-                "There are no session events to summarize yet.")
+            self.ui.add_message(
+                "<i>There is nothing to compact yet: this session has no "
+                "events.</i>", force_scroll=True)
             return
         busy = self._compaction_busy_reason()
         if busy:
-            QMessageBox.information(
-                self.ui.main_window, "Session context", busy)
+            self.ui.add_message(f"<i>{busy}</i>", force_scroll=True)
             return
         if self._summary_pending:
             # Compaction will follow once the in-flight summary lands.
@@ -4583,10 +4622,9 @@ class AppController(QObject):
             self._compaction_trigger = "manual"
             if not self._apply_compaction(
                     covered, self._history_cut_key()):
-                QMessageBox.warning(
-                    self.ui.main_window, "Session context",
-                    "Could not record the compaction boundary. "
-                    "The session is unchanged.")
+                self.ui.add_message(
+                    "<i>Could not record the compaction boundary. "
+                    "The session is unchanged.</i>", force_scroll=True)
             return
         self._manual_compact_pending = True
         self._compaction_trigger = "manual"
@@ -4594,6 +4632,71 @@ class AppController(QObject):
         self._request_summary_update(
             force=True, advance_boundary=True, trigger="manual", focus=focus)
         self.ui.add_message("<i>Compacting the session context…</i>")
+
+    def _command_compact(self, arguments: str = ""):
+        """``/compact [focus]`` - manual compaction, the same path the popover runs.
+
+        The optional tail is what the summary should keep in detail, exactly
+        like the focus field of the Session context dialog.
+        """
+        self._request_manual_summary_refresh(focus=arguments)
+
+    def _command_memory(self, arguments: str = ""):
+        """``/memory [project]`` - opens a memory file in the user's editor.
+
+        No argument opens the user's own file (``~/.logos/AGENTS.md``), created
+        from a template when it does not exist yet. ``project`` opens this
+        project's ``AGENTS.md`` and never creates it: that file belongs to the
+        user and to ``/init``. The notice always names the path, so the
+        transcript still says what was opened when no editor is installed.
+        """
+        target = str(arguments or "").strip().lower()
+        if target in ("", "user", "global"):
+            path = project_rules.ensure_user_memory()
+            label = "User memory"
+            cap = project_rules.USER_MAX_BYTES
+        elif target in ("project", "repo"):
+            if not self.project_root:
+                self.ui.add_message(
+                    "<i>Open a project folder before "
+                    "<code>/memory project</code>.</i>", force_scroll=True)
+                return
+            path = os.path.join(self.project_root, project_rules.FILENAME)
+            label = "Project memory"
+            cap = project_rules.MAX_BYTES
+            if not os.path.isfile(path):
+                self.ui.add_message(
+                    f"<i>This project has no "
+                    f"<code>{project_rules.FILENAME}</code> yet. Run "
+                    "<code>/init</code> to create it, or write the file "
+                    "yourself.</i>", force_scroll=True)
+                return
+        else:
+            self.ui.add_message(
+                "<i>Usage: <code>/memory</code> for your own file, "
+                "<code>/memory project</code> for this project's "
+                f"<code>{project_rules.FILENAME}</code>.</i>",
+                force_scroll=True)
+            return
+
+        size = self._memory_size_text(path, cap)
+        opened = editor_launcher.open_path(path)
+        note = "" if opened else " It could not be opened in an editor."
+        self.ui.add_message(
+            f"<i>{label}: <code>{path}</code>{size}.{note}</i>",
+            force_scroll=True)
+
+    @staticmethod
+    def _memory_size_text(path: str, cap_bytes: int) -> str:
+        """``(1.2 KB)``, or a note when the file is missing or over the cap."""
+        try:
+            size = os.path.getsize(path)
+        except OSError:
+            return " (not created)"
+        if size > cap_bytes:
+            return (f" ({size / 1024:.1f} KB, injected up to "
+                    f"{cap_bytes // 1024} KB)")
+        return f" ({size / 1024:.1f} KB)"
 
     def _show_session_journal(self, path: str = ""):
         """Show the raw journal of the clicked session (or the open one)."""

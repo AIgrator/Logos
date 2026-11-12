@@ -134,7 +134,11 @@ its trigger and clamped to the screen. It shows the percentage,
 `used / window tokens · source`, a segmented bar and the rows `System prompt`,
 `System tools`, `Skills (N)`, `Messages`, `Other`, plus `Compress context`
 (emits `Manager.context_compact_requested`, handled by the same manual
-compaction as Compact now) and `Session context…` (opens the existing dialog).
+compaction as Compact now and as `/compact [focus]`) and `Session context…`
+(opens the existing dialog). A refused compaction - no events yet, a summary or
+a tool call still in flight - answers with one italic line in the chat rather
+than a modal, because the command path and the popover both run from the
+composer.
 Row shares are estimates from the next request scaled to the provider-reported
 total (`context_stats.payload_breakdown`), so they add up to the shown
 percentage; Vision, whose request is assembled elsewhere, gets one
@@ -599,26 +603,43 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   a separate block in every mode before the session handoff. The application
   never rewrites it on its own: the user writes it, or runs `/init` in the
   composer (below).
+- `~/.logos/AGENTS.md` - the user's own standing preferences, injected before
+  the project block in every project (8 KB cap, same mtime cache and
+  redaction), so a project rule overrides a personal default. Both layers come
+  from `context/project_rules.py::injection_block`, which returns one string
+  starting with the user block; `project_rules.is_generated_block` is the
+  filter that lets `_refresh_generated_context` replace either layer on a
+  project switch. The app never creates it on its own either - `/memory` does,
+  from a template whose every line is a comment, so creating the file changes
+  nothing the model sees until the user writes a rule.
 - `attachments/<session-id>/` - copies of pasted images (and other bytes with no
   stable source path), deduplicated by SHA-256. Files with a real path are
   referenced in the journal instead of copied; replay marks referenced files
   `changed` or `missing`. Deleting a session removes its attachment folder.
 
 `<project>/AGENTS.md` is also the one file the app helps *write*, and it does
-that through an ordinary slash command, not a dialog. `/init` is the first
-entry of the composer's command registry (`src/commands.py::COMMANDS`): typing
-`/` at the start of the input opens a palette above the composer with every
-command and its one-line summary; Up/Down move the highlight, Tab fills `/init`
-into the input, Enter or a click runs it, and Esc closes the palette without
-touching the text. The palette (`src/ui/widgets/command_palette.py`) never
-takes focus - `ExpandingTextEdit` forwards the keys, the same way the `@` file
-search popup works - so the caret stays in the composer. Only the first word is
-a command: a space (`/init now`) closes the palette and the rest is ordinary
-text, while a leading one-word token that matches no command is answered with
-an "Unknown command" notice instead of being sent, so a typo cannot look like a
-request.
+that through an ordinary slash command, not a dialog. The composer's command
+registry (`src/commands.py::COMMANDS`) holds two kinds. A **prompt command**
+(`build`) expands into one ordinary user message; `/init` is one. An **app
+action** (`action`, the name of an `AppController` method) sends nothing to the
+model and does the work in the UI: `/compact [focus]` runs the same manual
+compaction as the context popover, and `/memory [project]` opens a memory file
+in the detected editor. An action runs before the provider check (a fresh
+install without a key must still open its memory file), creates no turn and no
+journal event, and reports through `ui.add_message` rather than a modal.
+Typing `/` at the start of the input opens a palette above the composer with
+every command and its one-line summary; Up/Down move the highlight, Tab fills
+`/init` into the input, Enter or a click runs it, and Esc closes the palette
+without touching the text. The palette
+(`src/ui/widgets/command_palette.py`) never takes focus - `ExpandingTextEdit`
+forwards the keys, the same way the `@` file search popup works - so the caret
+stays in the composer. Only the first word is a command: a space (`/init now`)
+closes the palette and the rest is ordinary text, while a leading one-word token
+that matches no command is answered with an "Unknown command" notice instead of
+being sent, so a typo cannot look like a request.
 
-`AppController.handle_user_input` resolves the command before anything else.
+`AppController.handle_user_input` resolves the command before anything else,
+and an action leaves through `_run_command_action` before any request is built.
 `/init` needs the terminal capability (it writes a file), so a Chat session
 attaches it and switches the presentation to Terminal first
 (`_ensure_command_capability`); the expanded prompt then travels the ordinary
@@ -626,15 +647,15 @@ agent path, so the user bubble, the journal and the transcript show what the
 model received, and the agent's steps appear as activity blocks like any other
 turn. A command with no project open is refused with one italic line and its
 text stays in the composer, and a command run while a chat answer streams
-cancels that answer the way a manual panel switch does. A command is an
+cancels that answer the way a manual panel switch does. A prompt command is an
 ordinary prompt with OpenCode's delivery semantics: `/init` calls
 `session.prompt(..., delivery: "steer")` there, so a running Terminal/Browser
 turn is never interrupted - `start_task` folds the prompt into it as guidance
 at the next step boundary, and idle it starts a fresh task. That is also why
 pressing `/init` ten times works: each press is a user message of the same or a
-new turn, never a blocked or queued command. Adding `/memory` later is one
-`SlashCommand` entry: the registry is the only place a command exists, and the
-palette, the routing and the journal need no change.
+new turn, never a blocked or queued command. Adding the next prompt command is
+one `SlashCommand` entry, and adding the next app action is one entry plus one
+controller method; the palette, the routing and the journal need no change.
 
 `src/commands.py::_init_run` builds the prompt from OpenCode's own `/init`
 (`initialize.txt` in its command plugin), so the two commands behave the same:
