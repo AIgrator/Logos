@@ -311,6 +311,13 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   `BaseAgentHandler.stop` is the hard variant (`_release_resources` kills the
   jobs and quits the exec thread, history is dropped) for a caller that releases
   the session itself; it is not on the Stop path.
+  A request already handed to the LLM worker outlives the turn it belonged to,
+  so `llm_worker.structured_response_received` carries the task tag and turn
+  number and `BaseAgentHandler._stale_response_reason` drops an answer of
+  another task or of an idled handler. Without it a stopped turn's `finish`
+  landed in the next task (it once accepted three such answers and kept
+  looping on a request still queued in the worker). A steered command does not
+  create a task, so it cannot orphan an answer this way.
   A command still waiting in the foreground can be handed to the background by
   the user instead of the tail of the turn: a running `execute_shell` step row
   offers `Move to background` (anchor
@@ -619,14 +626,15 @@ agent path, so the user bubble, the journal and the transcript show what the
 model received, and the agent's steps appear as activity blocks like any other
 turn. A command with no project open is refused with one italic line and its
 text stays in the composer, and a command run while a chat answer streams
-cancels that answer the way a manual panel switch does. A command is a new
-task, not guidance: `_end_running_turn_for_command` ends a running, paused or
-failed Terminal/Browser turn through the window's own `stop_turn` before the
-prompt is sent, because otherwise `start_task` folded it into the old turn as a
-steer - a live `/init` run after a fatal LLM error was swallowed that way and
-never ran. Adding `/memory` later is one `SlashCommand` entry: the registry is
-the only place a command exists, and the palette, the routing and the journal
-need no change.
+cancels that answer the way a manual panel switch does. A command is an
+ordinary prompt with OpenCode's delivery semantics: `/init` calls
+`session.prompt(..., delivery: "steer")` there, so a running Terminal/Browser
+turn is never interrupted - `start_task` folds the prompt into it as guidance
+at the next step boundary, and idle it starts a fresh task. That is also why
+pressing `/init` ten times works: each press is a user message of the same or a
+new turn, never a blocked or queued command. Adding `/memory` later is one
+`SlashCommand` entry: the registry is the only place a command exists, and the
+palette, the routing and the journal need no change.
 
 `src/commands.py::_init_run` builds the prompt from OpenCode's own `/init`
 (`initialize.txt` in its command plugin), so the two commands behave the same:
@@ -665,7 +673,14 @@ keeps the turn open, at most twice (`MAX_WRITE_NUDGES`); after that the turn end
 with the honest `<i>No file was written in this run.</i>` line under the answer
 instead of leaving the false report unqualified. Both signals are required, so a
 write through the shell or a rewrite of identical content still counts, and an
-ordinary typed task - which promises nothing - never meets the check.
+ordinary typed task - which promises nothing - never meets the check. A
+successful write also retires the guard's own notes
+(`BaseAgentHandler.note_write_done`, called from the synchronous loop and from
+`TerminalHandler._on_tool_finished`, whose write runs on the exec thread):
+a nudge is a statement about the moment it was written, and leaving it in the
+history is what made a live run rewrite `AGENTS.md` four times. The guard is
+armed by `start_task`, so a command steered into a running turn has no separate
+task and no promise to verify; the running turn's own writes still count.
 
 `src/context/project_instructions.py` is the stdlib-only scanner behind those
 facts: it reads top-level entries, `package.json` scripts (runner from

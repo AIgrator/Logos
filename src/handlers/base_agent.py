@@ -50,6 +50,10 @@ WRITE_TOOLS = frozenset({"write_file", "replace", "replace_many"})
 # recover from a model that forgot the step; more would turn into a loop.
 MAX_WRITE_NUDGES = 2
 
+# The line the guard hands the model when `finish` claims a write that never
+# happened. It is matched by this marker when a later write resolves it.
+WRITE_NUDGE_MARKER = "No file was written in this run."
+
 
 def _plan_steps(steps) -> list:
     """Unwraps a plan a weak model stringified ("[{...}]" as text).
@@ -368,6 +372,9 @@ class BaseAgentHandler:
         self._expected_write_state = None
         self._writes_this_task = 0
         self._write_nudges = 0
+        # Bumped by every start_task so two tasks started within the same
+        # second still get distinct tags (a response is matched by its tag).
+        self._task_seq = 0
         # Catalog tools the model loaded with search_tools. They join the
         # declared set from the next request on; a new task starts empty so the
         # prompt does not grow with tools an old task needed.
@@ -433,7 +440,9 @@ class BaseAgentHandler:
 
         logging.info(f"{type(self).__name__} starting task: {user_text}")
         import time as _time
-        self._task_tag = f"{type(self).__name__}_{_time.strftime('%H%M%S')}"
+        self._task_seq += 1
+        self._task_tag = (f"{type(self).__name__}_{_time.strftime('%H%M%S')}"
+                          f"_{self._task_seq}")
         self._turn_seq = 0
         self.original_user_request = user_text
         # What this task promises to write, and what the file looked like
@@ -480,6 +489,33 @@ class BaseAgentHandler:
         if self._writes_this_task:
             return False
         return self._file_state(path) == self._expected_write_state
+
+    def note_write_done(self, action_name: str):
+        """Records a successful write of this task and retires the guard's nudges.
+
+        A terminal write runs on the exec thread, so ``execute_action`` returns
+        None and the synchronous branch in ``_run_action`` never sees it; the
+        run's write count stayed 0 and only the file's mtime could satisfy the
+        guard. The nudge is a statement about the moment it was written: once
+        the file is on disk it must stop reading as the current state, or the
+        model rewrites the same file again - one live /init run wrote
+        AGENTS.md four times because the stale line stayed in its history.
+        """
+        if action_name not in WRITE_TOOLS:
+            return
+        self._writes_this_task += 1
+        kept = [line for line in self.command_history
+                if WRITE_NUDGE_MARKER not in line]
+        dropped = len(self.command_history) - len(kept)
+        if not dropped:
+            return
+        kept.append(
+            "**Tool Result:** The file the task promised is on disk now; the "
+            "earlier notes saying it was not written are resolved and no "
+            "longer apply.")
+        self.command_history = kept
+        logging.info("%s: write done, %d stale write-guard note(s) retired.",
+                     type(self).__name__, dropped)
 
     def _step_in_flight(self) -> bool:
         """Whether a tool or a background-job wait is currently running.
@@ -624,8 +660,7 @@ class BaseAgentHandler:
         self._set_state(VisionState.IDLE)
         self._stop_thinking_timer()
         # A turn that was frozen in PAUSED leaves the title-bar pause mark on;
-        # Stop (and a slash command, which ends the turn the same way) means
-        # nothing is left to resume.
+        # Stop means nothing is left to resume.
         try:
             self.ui.set_paused(False)
         except Exception as e:
@@ -1324,9 +1359,34 @@ class BaseAgentHandler:
         self._batch_queue = []
         self._continue_loop(output, from_job_wait=from_job_wait)
 
+    def _stale_response_reason(self, tag: str, turn: int) -> str:
+        """Why an incoming response cannot belong to the running task, or "".
+
+        A request already handed to the worker keeps running after Stop and
+        after the turn finished. Its answer used to be applied to whatever task
+        was running by then: a live /init run accepted a `finish` answer of a
+        turn the user had already stopped, and kept looping because one more
+        request was already queued. A slash command is no longer a turn of its
+        own (it steers the running one, as in OpenCode), so it cannot orphan an
+        answer this way.
+        """
+        if tag and tag != self._task_tag:
+            return f"it answers task {tag}, the running task is {self._task_tag}"
+        if self.state == VisionState.IDLE:
+            return "no task is running"
+        if turn:
+            logging.info(f"{type(self).__name__} accepting response of turn {turn} "
+                         f"(latest request was turn {self._turn_seq}).")
+        return ""
+
     def handle_llm_response(self, reasoning: str, payload: any, schema_name: str,
-                            commentary: str = ""):
+                            commentary: str = "", tag: str = "", turn: int = 0):
         """Handles the response from the LLM, which should be a tool call."""
+        stale = self._stale_response_reason(tag, turn)
+        if stale:
+            logging.info(f"{type(self).__name__} dropping LLM response: {stale}.")
+            self._stop_thinking_timer()
+            return
         if self.state == VisionState.PAUSED:
             logging.info(f"{type(self).__name__} LLM response arrived while paused; stashing.")
             self._stashed_response = (reasoning, payload, schema_name, commentary)
@@ -1755,8 +1815,8 @@ class BaseAgentHandler:
         if result_text is None:
             return  # async heir continues the loop itself on completion
         failed = result_text.startswith("**Tool Result:** Error:")
-        if not failed and action_name in WRITE_TOOLS:
-            self._writes_this_task += 1
+        if not failed:
+            self.note_write_done(action_name)
         if step is not None:
             self._finish_active_step(
                 status="error" if failed else "ok",

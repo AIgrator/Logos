@@ -20,7 +20,12 @@ class LLMWorker(QObject):
 
     response_chunk = Signal(str)
     response_finished = Signal(str)
-    structured_response_received = Signal(str, object, str, str)  # reasoning, tool_calls (object), schema_name, commentary
+    # reasoning, tool_calls (object), schema_name, commentary, task tag, turn.
+    # The tag/turn travel back so the handler can tell which task a response
+    # answers: a request already handed to the worker keeps running after the
+    # turn was stopped or superseded, and its answer must not be applied to
+    # whatever task happens to run when it arrives.
+    structured_response_received = Signal(str, object, str, str, str, int)
     tool_call_received = Signal(dict)
     plain_text_response_received = Signal(str)  # For when a plan was expected but not received
     retry_attempt = Signal(int, int, str, float)  # attempt_num, max_attempts, error, wait_seconds
@@ -543,7 +548,7 @@ class LLMWorker(QObject):
 
                     self.structured_response_received.emit(
                         reasoning_text,
-                        payload, final_schema_name, commentary)
+                        payload, final_schema_name, commentary, tag, turn)
                     return
 
                 # --- Streaming for Chat ---

@@ -1712,6 +1712,11 @@ class TerminalHandler(BaseAgentHandler):
         output_for_llm, output_for_ui = self._format_result_for_llm_and_ui(
             self._pending_action_name, result, self._pending_action_args
         )
+        # A terminal write runs on the exec thread, so execute_action already
+        # returned and the synchronous write count in _run_action never sees
+        # it. Count it here, where the outcome is known.
+        if not _is_error_output(output_for_llm):
+            self.note_write_done(self._pending_action_name)
         job_id = _running_job_id(result)
         # `job_id` is the live handle of a background launch, and only a launch
         # owns the job clock. A poll or stop snapshot reports `status: running`
