@@ -37,6 +37,11 @@ _MAX_README_COMMANDS = 10
 #: ``/home/user`` (a pasted path) is not.
 _COMMAND_RE = re.compile(r"^/[A-Za-z][\w-]*$")
 
+#: ``SlashCommand.completes`` value for a command whose first argument is
+#: another command's name: the palette keeps suggesting after the space, so
+#: ``/help m`` offers ``/memory`` and completes to ``/help memory``.
+COMPLETES_COMMAND = "command"
+
 
 class CommandError(Exception):
     """A command that cannot run here; the message is shown to the user."""
@@ -68,6 +73,10 @@ class SlashCommand:
     action: str = ""
     capability: str = ""
     takes_arguments: bool = False
+    #: What the palette may complete after the space, when the first argument is
+    #: a known name rather than free text (``completes=COMPLETES_COMMAND`` for
+    #: ``/help m`` -> ``/help memory``).
+    completes: str = ""
     #: The grammar line ``/help`` shows; defaults to the bare slash.
     usage: str = ""
     #: One paragraph of detail for ``/help <command>``.
@@ -160,6 +169,9 @@ COMMANDS: tuple[SlashCommand, ...] = (
         name="help",
         summary="List the commands and explain memory",
         action="_command_help",
+        # `/help m` completes to `/help memory`: the argument is a command name,
+        # so the palette keeps suggesting after the space.
+        completes=COMPLETES_COMMAND,
         usage="/help [command]",
         help=(
             "Lists every command with a one-line summary, and explains the two "

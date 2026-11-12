@@ -638,7 +638,14 @@ forwards the keys, the same way the `@` file search popup works - so the caret
 stays in the composer. Only the first word is a command: a space (`/init now`)
 closes the palette and the rest is ordinary text, while a leading one-word token
 that matches no command is answered with an "Unknown command" notice instead of
-being sent, so a typo cannot look like a request.
+being sent, so a typo cannot look like a request. The exception is a command
+that names its first argument as another command (`completes=COMPLETES_COMMAND`,
+`/help` only): `/help m` keeps the palette open and completes to `/help memory`,
+the row reads exactly the line Tab inserts, the base command is not offered
+(`/help ` lists init, compact, memory) and a second word (`/help m x`) or a
+command with free-text arguments (`/memory ...`) closes the palette as before.
+The flag is explicit rather than parsed from `usage`, because `usage` is help
+text: a reworded grammar line must not change how the composer behaves.
 
 `AppController.handle_user_input` resolves the command before anything else,
 and an action leaves through `_run_command_action` before any request is built.

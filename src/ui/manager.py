@@ -804,12 +804,38 @@ class UIManager(QWidget):
             self.current_search_context = None
             self.file_search_popup.setVisible(False)
 
-    def _slash_query(self):
-        """The command token being typed, or None when the palette is closed.
+    def _command_argument_base(self):
+        """The command whose first argument is a command name, or None.
 
-        Only the first word is a command: ``/`` alone lists everything, and a
-        space (``/init now``) closes the palette so the rest is ordinary text.
+        Only a command that declares ``completes`` keeps the palette open after
+        the space: ``/help m`` is still command input, so the palette offers
+        command names for the argument and ``Tab`` completes ``/help memory``.
+        A second argument word (``/help m x``), free text (``/memory always
+        ...``) and every other command close the palette as before.
         """
+        text = self.user_input.toPlainText()
+        if not text.startswith("/") or "\n" in text:
+            return None
+        head, space, tail = text.partition(" ")
+        if not space:
+            return None
+        if any(ch.isspace() for ch in tail.strip()):
+            return None
+        command = commands.find(head)
+        if command is None or command.completes != commands.COMPLETES_COMMAND:
+            return None
+        return command
+
+    def _slash_query(self):
+        """The text the palette filters on, or None when it is closed.
+
+        Without a space the query is the command name (``/me`` -> ``me``).
+        With a space it is the first argument of a command that completes
+        command names (``/help me`` -> ``me``); for every other command the
+        space closes the palette so the rest is ordinary text.
+        """
+        if self._command_argument_base() is not None:
+            return self.user_input.toPlainText().split(" ", 1)[1].strip()
         text = self.user_input.toPlainText()
         if not text.startswith("/") or any(ch.isspace() for ch in text):
             return None
@@ -822,11 +848,16 @@ class UIManager(QWidget):
         if query is None:
             self.command_palette.setVisible(False)
             return
+        base = self._command_argument_base()
         matches = commands.suggestions(query)
+        if base is not None:
+            # `/help help` explains nothing the reader does not already see.
+            matches = [c for c in matches if c.name != base.name]
         if not matches:
             self.command_palette.setVisible(False)
             return
-        self.command_palette.set_commands(matches)
+        self.command_palette.set_commands(
+            matches, prefix=base.slash if base is not None else "")
         self._show_command_palette()
 
     def _show_command_palette(self):
@@ -855,13 +886,21 @@ class UIManager(QWidget):
         """Completes the highlighted command; Enter/click also runs it.
 
         Tab fills the input (a command with arguments waits for them), Enter
-        and a click send it at once, like the palette of any other agent.
+        and a click send it at once, like the palette of any other agent. While
+        an argument is being completed the base command stays: ``/help m``
+        completes to ``/help memory`` and Enter runs exactly that.
         """
+        base = self._command_argument_base()
         command = self.command_palette.current_command()
         self.command_palette.setVisible(False)
         if command is None:
             return
-        text = command.slash + (" " if command.takes_arguments else "")
+        if base is not None:
+            text = f"{base.slash} {command.name}"
+            runs = True
+        else:
+            text = command.slash + (" " if command.takes_arguments else "")
+            runs = not command.takes_arguments
         self._suppress_command_palette = True
         try:
             self.user_input.setPlainText(text)
@@ -871,9 +910,9 @@ class UIManager(QWidget):
         finally:
             self._suppress_command_palette = False
         self.user_input.setFocus()
-        if send and not command.takes_arguments:
+        if send and runs:
             self.user_input.clear()
-            self.user_command_submitted.emit(command.slash)
+            self.user_command_submitted.emit(text)
 
     def _on_escape_pressed(self):
         self._hide_file_search_popup()

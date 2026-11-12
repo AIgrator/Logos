@@ -17,7 +17,7 @@ It started with `/init` alone; the shape that one command defined still holds:
 | Piece | Where | Note |
 | --- | --- | --- |
 | Registry | `src/commands.py::COMMANDS` | The only place a command exists; palette, routing and journal follow from it |
-| Entry | `SlashCommand(name, summary, build, action, capability, takes_arguments, usage, help)` | `build` for a prompt command, `action` (a controller method name) for an app action; `usage`/`help` are what `/help` prints |
+| Entry | `SlashCommand(name, summary, build, action, capability, takes_arguments, completes, usage, help)` | `build` for a prompt command, `action` (a controller method name) for an app action; `completes` opens the palette after the space (`/help m` → `/help memory`); `usage`/`help` are what `/help` prints |
 | Payload | `CommandRun(prompt, objective, capability, expects_write)` | A prepared prompt, not a dialog |
 | Routing | `AppController.handle_user_input` | `commands.find()` → `_run_command_action()` or `_prepare_command()` → ordinary user message |
 | Delivery | `BaseAgentHandler.start_task` | Idle: new task. Running: steered into the current turn (OpenCode's `delivery: "steer"`) |
@@ -107,6 +107,9 @@ class SlashCommand:
     action: str = ""                                       # AppController method
     capability: str = ""
     takes_arguments: bool = False
+    completes: str = ""                                    # COMPLETES_COMMAND
+    usage: str = ""
+    help: str = ""
 ```
 
 The field holds the *name* of a controller method, not a callable: `COMMANDS` is
@@ -136,9 +139,20 @@ The action branch also runs *before* the provider check, so `/memory` works on
 a fresh install that has no API key yet. A missing or raising action is caught
 in `_run_command_action` and reported as one italic line, never as a crash.
 
-The palette needs no change: it renders `COMMANDS` and already filters by
-prefix. `/help` needs none either: it renders each entry's `usage`/`help` plus
-`commands.MEMORY_HELP`, so a new command explains itself the moment it is added.
+The palette needs no change for a new command: it renders `COMMANDS` and
+already filters by prefix. `/help` needs none either: it renders each entry's
+`usage`/`help` plus `commands.MEMORY_HELP`, so a new command explains itself the
+moment it is added.
+
+One field is about the palette alone. A command whose first argument is another
+command's name declares it (`completes=COMPLETES_COMMAND`; only `/help` does),
+and the palette keeps suggesting after the space: `/help m` offers `/memory` as
+`/help memory`, Tab fills exactly that line and Enter runs it. The field is an
+explicit flag rather than something parsed out of `usage`, because `usage` is
+help text — rewording a grammar line must not change what the composer does.
+Free-text arguments (`/memory ...`, `/compact ...`) and a second word
+(`/help m x`) close the palette exactly as before, and the base command is never
+offered as its own argument (`/help ` lists init, compact, memory).
 
 ## 4. The candidates, by cost
 

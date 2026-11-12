@@ -6,7 +6,9 @@ palettes of other coding agents. The keyboard stays in the composer
 focus and the caret never leaves the input.
 
 A row is the command name in a monospace face plus its one-line summary; the
-delegate paints both with the active theme's colors.
+delegate paints both with the active theme's colors. While a command's argument
+is being completed the row shows the whole line it will insert (``/help
+memory``), so the palette never looks like it is replacing the command typed.
 """
 from __future__ import annotations
 
@@ -125,10 +127,17 @@ class CommandPalette(QListWidget):
             " padding: 4px; outline: none; }")
         self.viewport().update()
 
-    def set_commands(self, commands):
+    def set_commands(self, commands, prefix: str = ""):
+        """Fills the list; ``prefix`` shows the argument a row completes.
+
+        ``prefix`` is the command already typed before the argument
+        (``/help``), so a row reads ``/help memory`` - exactly the text ``Tab``
+        inserts - instead of a bare ``/memory`` that looks like a replacement.
+        """
         self.clear()
         for command in commands:
-            item = QListWidgetItem(command.slash)
+            label = f"{prefix} {command.name}" if prefix else command.slash
+            item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, command.summary)
             item.setData(Qt.ItemDataRole.UserRole + 1, command)
             item.setToolTip(command.summary)
