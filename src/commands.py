@@ -1,8 +1,8 @@
 """Slash commands typed into the composer (``/init``, ``/compact``, ``/memory``).
 
-The registry below is the only place a command exists: the palette, the routing
-and the journal all follow from it. There are two kinds, and they differ in
-what pressing Enter does.
+The registry below is the only place a command exists: the palette, the routing,
+``/help`` and the journal all follow from it. There are two kinds, and they
+differ in what pressing Enter does.
 
 A **prompt command** (``build``) is a prepared prompt, not a dialog: pressing
 Enter sends one ordinary user message, so the agent's steps appear in the
@@ -13,18 +13,19 @@ manifests, and every command it prints can be traced to a real file.
 
 An **app action** (``action``) sends nothing to the model. It names a method on
 ``AppController`` (``_command_compact``, ``_command_memory``) that does the
-work in the UI: summarizing the session, opening a memory file. An action
+work in the UI: summarizing the session, saving a line of memory. An action
 creates no turn, writes no journal event, and runs even when no provider is
 configured, because there is no request to make.
 """
 from __future__ import annotations
 
+import html
 import os
 import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
-from context import project_instructions
+from context import project_instructions, project_rules
 
 #: The prompt names the file it writes; keep the two in one place.
 FILENAME = project_instructions.FILENAME
@@ -67,6 +68,10 @@ class SlashCommand:
     action: str = ""
     capability: str = ""
     takes_arguments: bool = False
+    #: The grammar line ``/help`` shows; defaults to the bare slash.
+    usage: str = ""
+    #: One paragraph of detail for ``/help <command>``.
+    help: str = ""
 
     @property
     def slash(self) -> str:
@@ -112,18 +117,116 @@ COMMANDS: tuple[SlashCommand, ...] = (
         summary=f"Generate or update {FILENAME} for this project",
         build=_init_run,
         capability="terminal",
+        usage="/init [focus]",
+        help=(
+            "Reads the repository and writes or improves "
+            f"<code>{FILENAME}</code> in the project root: the commands, "
+            "conventions and gotchas an agent would otherwise guess wrong. It "
+            "is safe to run again - it improves the file in place and keeps "
+            "what still holds. A focus after the command "
+            "(<code>/init testing</code>) steers what it looks at first."
+        ),
     ),
     SlashCommand(
         name="compact",
         summary="Summarize this session to free context",
         action="_command_compact",
+        usage="/compact [focus]",
+        help=(
+            "Summarizes the conversation so far and drops the summarized part "
+            "from the context window, so a long session can continue. A focus "
+            "after the command (<code>/compact the API changes</code>) says "
+            "what the summary must keep in detail. Refused while a reply or a "
+            "tool call is still running."
+        ),
     ),
     SlashCommand(
         name="memory",
-        summary="Open the user or project memory file",
+        summary="Show or add to your own memory",
         action="_command_memory",
+        # The usual gesture is `/memory <text>`, so the palette leaves the
+        # caret in the composer instead of running the bare command.
+        takes_arguments=True,
+        usage="/memory [text]",
+        help=(
+            "Your own rules, in every project: <code>/memory</code> shows the "
+            "file, <code>/memory &lt;text&gt;</code> adds a line to it. Open "
+            "the path it prints in any editor to delete or rewrite a line. The "
+            "project's own <code>AGENTS.md</code> is not touched here - it "
+            "lives in the repository, so it is edited like any other file."
+        ),
+    ),
+    SlashCommand(
+        name="help",
+        summary="List the commands and explain memory",
+        action="_command_help",
+        usage="/help [command]",
+        help=(
+            "Lists every command with a one-line summary, and explains the two "
+            "memory files. <code>/help &lt;command&gt;</code> explains one in "
+            "detail."
+        ),
     ),
 )
+
+
+#: Shown by ``/help`` under the command list. The two files and their order are
+#: the whole mental model, so they are stated once, here.
+MEMORY_HELP = (
+    "<b>Memory</b><br>"
+    "Anything in memory is sent with every request, so keep it short.<br>"
+    f"<code>~/.logos/AGENTS.md</code> — your own rules, in every project "
+    f"(up to {project_rules.USER_MAX_BYTES // 1024} KB). "
+    "<code>/memory &lt;text&gt;</code> adds a line and <code>/memory</code> "
+    "shows the file; open that path in any editor to delete or rewrite a "
+    "line.<br>"
+    "<code>&lt;project&gt;/AGENTS.md</code> — this repository's rules, kept in "
+    f"the repository and in git (up to {project_rules.MAX_BYTES // 1024} KB). "
+    "<code>/init</code> writes the first draft; after that it is a normal "
+    "project file, edited in the Files tab, in git or in any editor.<br>"
+    "The project file is read second, so it overrides a personal rule when the "
+    "two disagree."
+)
+
+_HELP_INTRO = (
+    "Type <code>/</code> at the start of a message to see this list, "
+    "<code>Tab</code> to fill a name, <code>Enter</code> to run it. A command "
+    "never interrupts a running turn."
+)
+
+
+def help_html(topic: str = "") -> str:
+    """The text ``/help`` shows: every command, or one of them in detail."""
+    name = str(topic or "").strip().split(" ", 1)[0].lstrip("/").lower()
+    if name:
+        if name in ("memory", "memories"):
+            return MEMORY_HELP
+        command = find(f"/{name}")
+        if command is None:
+            return (f"<i>Unknown command <code>/{html.escape(name)}</code>. "
+                    "<code>/help</code> lists them all.</i>")
+        return _command_help_html(command)
+    rows = [
+        f"<code>{html.escape(command.usage or command.slash)}</code> — "
+        f"{command.summary}"
+        for command in COMMANDS
+    ]
+    return ("<b>Slash commands</b><br>" + _HELP_INTRO + "<br><br>"
+            + "<br>".join(rows) + "<br><br>" + MEMORY_HELP + "<br><br>"
+            "<i><code>/help &lt;command&gt;</code> explains one in "
+            "detail.</i>")
+
+
+def _command_help_html(command: SlashCommand) -> str:
+    parts = [
+        f"<b><code>{html.escape(command.usage or command.slash)}</code></b>",
+        command.help or command.summary,
+    ]
+    if command.capability:
+        parts.append(
+            f"<i>Needs the {command.capability} capability; a Chat session "
+            "attaches it for you.</i>")
+    return "<br>".join(parts)
 
 
 def command_name(text: str) -> str:

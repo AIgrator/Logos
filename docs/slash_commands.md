@@ -5,10 +5,10 @@ A status and design note for the composer's command registry
 Code, Codex CLI and Gemini CLI ship, and which of those are worth porting to
 Logos, split by how much machinery each one needs.
 
-**Status (1.1.0).** `/compact` and `/memory` are implemented, together with the
-user-level memory layer they needed; `/init` is unchanged. Sections 3, 5 and 6
-describe what was built. Everything else below is a backlog, ordered in
-section 7.
+**Status (1.1.0).** `/compact`, `/memory` and `/help` are implemented, together
+with the user-level memory layer `/memory` writes to; `/init` is unchanged.
+Sections 3, 5 and 6 describe what was built. Everything else below is a backlog,
+ordered in section 7.
 
 ## 1. The registry
 
@@ -17,7 +17,7 @@ It started with `/init` alone; the shape that one command defined still holds:
 | Piece | Where | Note |
 | --- | --- | --- |
 | Registry | `src/commands.py::COMMANDS` | The only place a command exists; palette, routing and journal follow from it |
-| Entry | `SlashCommand(name, summary, build, action, capability, takes_arguments)` | `build` for a prompt command, `action` (a controller method name) for an app action |
+| Entry | `SlashCommand(name, summary, build, action, capability, takes_arguments, usage, help)` | `build` for a prompt command, `action` (a controller method name) for an app action; `usage`/`help` are what `/help` prints |
 | Payload | `CommandRun(prompt, objective, capability, expects_write)` | A prepared prompt, not a dialog |
 | Routing | `AppController.handle_user_input` | `commands.find()` → `_run_command_action()` or `_prepare_command()` → ordinary user message |
 | Delivery | `BaseAgentHandler.start_task` | Idle: new task. Running: steered into the current turn (OpenCode's `delivery: "steer"`) |
@@ -137,7 +137,8 @@ a fresh install that has no API key yet. A missing or raising action is caught
 in `_run_command_action` and reported as one italic line, never as a crash.
 
 The palette needs no change: it renders `COMMANDS` and already filters by
-prefix.
+prefix. `/help` needs none either: it renders each entry's `usage`/`help` plus
+`commands.MEMORY_HELP`, so a new command explains itself the moment it is added.
 
 ## 4. The candidates, by cost
 
@@ -176,7 +177,7 @@ work), and it needs no capability the session does not already have.
 | `/rename <name>` | session title, same as the sidebar menu | Trivial |
 | `/stop` | `_handle_stop()` | Trivial |
 | `/copy` | last answer's `copy_text` | Trivial |
-| `/help` | the registry itself, one line each | Trivial |
+| `/help [command]` | `commands.help_html()`, built from the registry | **done** — one message, no dialog |
 | `/export [path]` | transcript → Markdown in the project | Medium: needs a renderer |
 | `/goal <text>` | `session_objective` + a steer | Medium: semantics |
 
@@ -209,7 +210,7 @@ They are terminal-UI affordances or duplicate an existing Logos surface.
   `**Project instructions (AGENTS.md):**`.
 - `AppController.project_baseline_prompt()` is the single call site, used by
   Chat (`chat_context_prompt`) and by the agent history refresh
-  (`_refresh_generated_context`), so one block reaches every mode.
+  (`_refresh_agent_context`), so one block reaches every mode.
 - The app never wrote that file on its own; the user wrote it or ran `/init`.
 
 ### Now
@@ -218,8 +219,8 @@ Two layers, Claude Code's shape with Logos' paths:
 
 | Layer | Path | Who writes it | Cap |
 | --- | --- | --- | --- |
-| User memory | `~/.logos/AGENTS.md` | The user, `/memory` (creates it) | 8 KB |
-| Project memory | `<project>/AGENTS.md` | The user, `/init` | 32 KB (unchanged) |
+| User memory | `~/.logos/AGENTS.md` | `/memory <text>`, or the user in an editor | 8 KB |
+| Project memory | `<project>/AGENTS.md` | `/init`, or the user in any editor | 32 KB (unchanged) |
 | Session | the journal | the app | — |
 
 `~/.logos` is the folder the app already owns for `skills/` and `mcp/`, so no
@@ -237,43 +238,63 @@ default:
 <text>
 ```
 
-Both blocks go through the same `_read_file(path, cap, label)` helper: redacted,
-cached by `(mtime_ns, size)`, and truncated with a label that names the layer
-(`[user memory truncated at 8 KB]`). The two blocks are returned as one string,
-which is why the history refresh needs a filter that recognizes *either*
-prefix: `project_rules.is_generated_block(text)` replaced the bare
-`startswith(BLOCK_PREFIX)` check in `_refresh_generated_context`, so a project
+Both blocks go through the same `_read_file(path, cap, label)` helper: HTML
+comments stripped, redacted, cached by `(mtime_ns, size)`, and truncated with a
+label that names the layer (`[user memory truncated at 8 KB]`). Comment
+stripping is what makes a freshly created template inert: the template is one
+`<!-- ... -->` block, so it reaches neither the prompt nor `/memory`'s own
+output. The two blocks are returned as one string, which is why the history
+refresh needs a filter that recognizes *either* prefix:
+`project_rules.is_generated_block(text)` replaced the bare
+`startswith(BLOCK_PREFIX)` check in `_refresh_agent_context`, so a project
 switch still replaces both layers instead of stacking them.
 
-**Commands.**
+**The command.** One target and two gestures:
 
-| Command | Behaviour |
+| Input | Behaviour |
 | --- | --- |
-| `/memory` | Creates `~/.logos/AGENTS.md` from a template when missing, then opens it in the detected editor (`editor_launcher.open_path`, falling back to the OS default). The notice names the path and its size, so the transcript says what happened even with no editor installed |
-| `/memory project` | Opens `<project>/AGENTS.md`. Never creates it: with no file it answers "run `/init` or write it yourself" |
+| `/memory` | Shows the file: path, size, contents. Writes nothing and opens nothing |
+| `/memory <text>` | Appends each non-empty line as one bullet, verbatim, creating the file from the template when missing. The notice names the path, the size and when it applies |
 
-`/memory user` and `/memory global` are accepted aliases of the bare form.
-`/memory <anything else>` prints the usage line instead of guessing.
+Deliberate details:
 
-The template's every line is a comment, so creating the file cannot change what
-the model sees: the first real rule is the user's own. The app still never
-rewrites `AGENTS.md` on its own — it creates a *new* file only when the user
-explicitly asks for it, and never touches the project's file at all.
+- **Verbatim, no model.** Memory has to be what the user typed, not a
+  paraphrase of it, and the write must be instant and work mid-turn, so
+  `project_rules.append_memory` writes the file itself.
+- **One bullet a line.** A multi-line message becomes several rules, and a typed
+  `- ` marker is collapsed instead of doubled into `- - ...`.
+- **Duplicates skipped**, with "Already in user memory" instead of a second
+  copy.
+- **Credentials refused.** `redact_text` changing the text means it holds
+  something that looks like a key; memory is plain text on disk and goes into
+  every request, so the write is refused rather than stored.
+- **8 KB cap refused**, not silently truncated: the message says how full the
+  file is.
+- **No editor.** Deleting or rewriting a line has no command form; `/memory`
+  prints the path and any editor opens it. The command exists because
+  `~/.logos/AGENTS.md` is the one memory file with no home in the project tree.
 
-**`/remember` is deliberately not built yet.** It is the only path where the
-model would write memory, and it needs a target rule (personal preference vs
-project fact) plus the write guard pointed at a path that is only known at
-build time. Section 7 keeps it in P1.
+**Why `/memory project` is not a thing.** `<project>/AGENTS.md` lives in the
+repository: it is in the Files tab, in git and in every editor the project is
+already open in, and `/init` writes its first draft. A second target would add a
+grammar to learn for a file the user can already reach in one click, and
+`/init`'s prompt already tells the model to improve that file in place rather
+than rewrite it, so a hand-written rule survives a re-run.
+
+**`/remember` is deliberately not built.** It is the only path where the model
+would write memory, and it would need a target rule plus the write guard
+pointed at a path known only at build time — for a result `/memory <text>`
+already gives without a request. Section 7 keeps it out.
 
 **Why not auto-memory now.** Claude Code extracts memories from the
 conversation on its own. That needs a second model call per turn, a dedupe
 policy, an injection budget and a way to show what was stored — a subsystem
 with its own failure modes, and one that quietly pollutes the context. Explicit
-editing first; auto-memory only if it proves too slow in practice.
+`/memory` first; auto-memory only if it proves too slow in practice.
 
-## 6. `/compact` — design
+## 6. `/compact` — what was built
 
-Almost everything exists:
+Everything already existed:
 
 ```python
 def _request_manual_summary_refresh(self, focus: str = ""):
@@ -281,17 +302,19 @@ def _request_manual_summary_refresh(self, focus: str = ""):
     ...  # no events / busy / already pending / already covered / request
 ```
 
-It already handles the focus argument, a summary in flight (`_manual_compact_pending`),
-an unchanged coverage, a failed boundary write, and the busy reason. The
-context popover's **Compress context** calls the same method.
+It already handled the focus argument, a summary in flight
+(`_manual_compact_pending`), an unchanged coverage, a failed boundary write, and
+the busy reason. The context popover's **Compress context** calls the same
+method.
 
-What `/compact` needs:
+What the command added:
 
-1. One `SlashCommand(kind=action)` entry: `action=lambda args: self._request_manual_summary_refresh(args)`.
-2. The three `QMessageBox` calls in that method become `ui.add_message`
+1. One `SlashCommand` entry with `action="_command_compact"`, whose method
+   forwards the tail as the focus.
+2. The three `QMessageBox` calls in that method became `ui.add_message`
    notices, because the command path must not open a modal over the composer.
-   The dialog path (Session context) wants the same thing — a notice is
-   enough there too.
+   The dialog path (Session context) wanted the same thing — a notice is enough
+   there too.
 3. Nothing else. The applied boundary is journaled as a `compaction` event and
    replayed as an italic notice, so the transcript already explains why older
    history disappeared.
@@ -304,8 +327,8 @@ about to continue from.
 
 | Priority | Commands | Reason |
 | --- | --- | --- |
-| **done** | `/compact`, `/memory` (+ user-level injection) | What was asked for, built in 1.1.0 |
-| P0 | `/help`, `/status`, `/context`, `/clear` | The four that make a growing registry usable |
+| **done** | `/init`, `/compact`, `/memory` (+ user-level injection), `/help` | The registry, its two kinds, and the help that explains them; built in 1.1.0 |
+| P0 | `/status`, `/context`, `/clear` | The rest of what makes a growing registry usable |
 | P1 | `/review`, `/remember`, `/model`, `/permissions`, `/settings`, `/rename`, `/stop`, `/copy`, `/mcp`, `/skills` | Cheap, and each replaces a trip to a panel or a menu |
 | P2 | `/test`, `/fix`, `/explain`, `/commit`, `/pr`, `/simplify`, `/security-review`, `/docs`, `/plan`, `/export` | Prompt commands: valuable but each needs its own prompt quality bar |
 | P3 | `/undo`, `/rewind`, `/diff`, `/recap`, `/fork`, auto-memory | New infrastructure; decide after P0/P1 usage |
@@ -318,5 +341,6 @@ about to continue from.
    the compaction they trigger already writes its own event.
 
 Answered while building `/memory`: the user file lives at `~/.logos/AGENTS.md`,
-and `/memory` creates it from a comment-only template. The project's
-`AGENTS.md` is still never created or rewritten by the app.
+`/memory <text>` appends to it verbatim, and the command does not touch the
+project's `AGENTS.md` at all — that file is written by `/init` and edited like
+any other project file.

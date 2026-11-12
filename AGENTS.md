@@ -599,19 +599,20 @@ its project and that exact session. Per-project data lives in `<project>/.logos/
   sessions. The legacy project-level `.logos/context/summary.md` is no longer
   read.
 - `<project>/AGENTS.md` - optional stable project instructions read from the
-  project root only. Capped at 32 KB, redacted and cached by mtime; injected as
-  a separate block in every mode before the session handoff. The application
-  never rewrites it on its own: the user writes it, or runs `/init` in the
-  composer (below).
+  project root only. Capped at 32 KB, redacted, HTML comments stripped and
+  cached by mtime; injected as a separate block in every mode before the
+  session handoff. The application never rewrites it on its own: the user
+  writes it, or runs `/init` in the composer (below).
 - `~/.logos/AGENTS.md` - the user's own standing preferences, injected before
-  the project block in every project (8 KB cap, same mtime cache and
-  redaction), so a project rule overrides a personal default. Both layers come
-  from `context/project_rules.py::injection_block`, which returns one string
-  starting with the user block; `project_rules.is_generated_block` is the
-  filter that lets `_refresh_generated_context` replace either layer on a
-  project switch. The app never creates it on its own either - `/memory` does,
-  from a template whose every line is a comment, so creating the file changes
-  nothing the model sees until the user writes a rule.
+  the project block in every project (8 KB cap, same mtime cache, redaction and
+  comment stripping), so a project rule overrides a personal default. Both
+  layers come from `context/project_rules.py::injection_block`, which returns
+  one string starting with the user block; `project_rules.is_generated_block`
+  is the filter that lets `_refresh_agent_context` replace either layer on a
+  project switch. The app creates it only when the user runs `/memory <text>`,
+  from a template that is a single HTML comment: comments never reach the
+  prompt, so creating the file changes nothing the model sees until a real rule
+  is written.
 - `attachments/<session-id>/` - copies of pasted images (and other bytes with no
   stable source path), deduplicated by SHA-256. Files with a real path are
   referenced in the journal instead of copied; replay marks referenced files
@@ -623,10 +624,11 @@ registry (`src/commands.py::COMMANDS`) holds two kinds. A **prompt command**
 (`build`) expands into one ordinary user message; `/init` is one. An **app
 action** (`action`, the name of an `AppController` method) sends nothing to the
 model and does the work in the UI: `/compact [focus]` runs the same manual
-compaction as the context popover, and `/memory [project]` opens a memory file
-in the detected editor. An action runs before the provider check (a fresh
-install without a key must still open its memory file), creates no turn and no
-journal event, and reports through `ui.add_message` rather than a modal.
+compaction as the context popover, `/memory [text]` shows the user's memory file
+or appends a line to it, and `/help [command]` prints the command list and the
+two memory layers. An action runs before the provider check (a fresh install
+without a key must still show its memory), creates no turn and no journal event,
+and reports through `ui.add_message` rather than a modal.
 Typing `/` at the start of the input opens a palette above the composer with
 every command and its one-line summary; Up/Down move the highlight, Tab fills
 `/init` into the input, Enter or a click runs it, and Esc closes the palette
@@ -655,7 +657,23 @@ at the next step boundary, and idle it starts a fresh task. That is also why
 pressing `/init` ten times works: each press is a user message of the same or a
 new turn, never a blocked or queued command. Adding the next prompt command is
 one `SlashCommand` entry, and adding the next app action is one entry plus one
-controller method; the palette, the routing and the journal need no change.
+controller method; the palette, the routing, `/help` and the journal need no
+change: `/help` renders each entry's `usage` and `help` fields plus
+`commands.MEMORY_HELP`.
+
+`/memory` is deliberately about the user file alone. `<project>/AGENTS.md` lives
+in the repository, so it is opened from the Files tab, from git or from any
+editor like the rest of the code, and `/init` writes its first draft; a second
+target for the command would only add a grammar to learn. A written line goes in
+verbatim (`project_rules.append_memory`), one bullet per non-empty line, with a
+typed `- ` marker collapsed instead of doubled, a line already present skipped,
+and the whole write refused when the text looks like a credential (`redact_text`
+would change it, and memory is plain text sent with every request) or when the
+file would pass 8 KB. It is picked up from the next request (the next task in
+Terminal) because `project_baseline_prompt()` is rebuilt then. `/memory` without
+text writes nothing: showing memory and adding to it are different acts. The
+display strips HTML comments, so a freshly created template reads as empty
+instead of showing its own instructions back.
 
 `src/commands.py::_init_run` builds the prompt from OpenCode's own `/init`
 (`initialize.txt` in its command plugin), so the two commands behave the same:

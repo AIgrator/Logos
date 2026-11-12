@@ -25,7 +25,6 @@ from app_paths import resource_path
 from context import context_stats, handoff, model_context, project_rules, skills
 from context.tokens import ModelMetadata
 from settings_manager import SettingsManager
-from ui import editor_launcher
 from ui.manager import UIManager
 from ui.text_render import render_text
 from ui.theme_manager import ThemeManager
@@ -4642,49 +4641,109 @@ class AppController(QObject):
         self._request_manual_summary_refresh(focus=arguments)
 
     def _command_memory(self, arguments: str = ""):
-        """``/memory [project]`` - opens a memory file in the user's editor.
+        """``/memory [<text>]`` - show or extend the user's own memory file.
 
-        No argument opens the user's own file (``~/.logos/AGENTS.md``), created
-        from a template when it does not exist yet. ``project`` opens this
-        project's ``AGENTS.md`` and never creates it: that file belongs to the
-        user and to ``/init``. The notice always names the path, so the
-        transcript still says what was opened when no editor is installed.
+        A tail is saved verbatim, one bullet per non-empty line. No tail shows
+        the file: its path, its size and its contents, so the user can open
+        that path in any editor when a line has to be deleted or rewritten.
+
+        The project's ``AGENTS.md`` is deliberately out of reach here. It lives
+        in the repository, so it is opened from the Files tab, from git or from
+        any editor like the rest of the code, and ``/init`` writes its first
+        draft. This command exists for the one memory file that has no home in
+        the project tree.
+
+        Nothing here calls the model: memory must be what the user typed, not a
+        paraphrase of it, and the write has to be instant and work mid-turn.
         """
-        target = str(arguments or "").strip().lower()
-        if target in ("", "user", "global"):
-            path = project_rules.ensure_user_memory()
-            label = "User memory"
-            cap = project_rules.USER_MAX_BYTES
-        elif target in ("project", "repo"):
-            if not self.project_root:
-                self.ui.add_message(
-                    "<i>Open a project folder before "
-                    "<code>/memory project</code>.</i>", force_scroll=True)
-                return
-            path = os.path.join(self.project_root, project_rules.FILENAME)
-            label = "Project memory"
-            cap = project_rules.MAX_BYTES
-            if not os.path.isfile(path):
-                self.ui.add_message(
-                    f"<i>This project has no "
-                    f"<code>{project_rules.FILENAME}</code> yet. Run "
-                    "<code>/init</code> to create it, or write the file "
-                    "yourself.</i>", force_scroll=True)
-                return
+        text = str(arguments or "").strip()
+        if text:
+            self._append_memory(text)
         else:
+            self._show_memory()
+
+    def _show_memory(self):
+        """``/memory`` - what the user's memory file holds right now."""
+        path = project_rules.user_memory_path()
+        if not os.path.isfile(path):
             self.ui.add_message(
-                "<i>Usage: <code>/memory</code> for your own file, "
-                "<code>/memory project</code> for this project's "
-                f"<code>{project_rules.FILENAME}</code>.</i>",
+                "<b>User memory</b> · "
+                f"<code>{path}</code><br>"
+                "<i>Nothing saved yet. <code>/memory &lt;text&gt;</code> "
+                "writes the first line.</i>", force_scroll=True)
+            return
+        size = self._memory_size_text(path, project_rules.USER_MAX_BYTES)
+        text = project_rules.display_text(path, project_rules.USER_MAX_BYTES)
+        lines = text.splitlines()
+        if not lines:
+            self.ui.add_message(
+                "<b>User memory</b> · "
+                f"<code>{path}</code>{size}<br>"
+                "<i>Empty. <code>/memory &lt;text&gt;</code> adds a "
+                "line.</i>", force_scroll=True)
+            return
+        shown = lines[:40]
+        body = "<br>".join(
+            html.escape(line) if line.strip() else "&nbsp;" for line in shown)
+        more = ""
+        if len(lines) > len(shown):
+            more = f"<br><i>… {len(lines) - len(shown)} more lines</i>"
+        self.ui.add_message(
+            "<b>User memory</b> · "
+            f"<code>{path}</code>{size}<br>{body}{more}<br>"
+            "<i>Applies in every project. Open the path in any editor to "
+            "delete or rewrite a line.</i>", force_scroll=True)
+
+    def _append_memory(self, text: str):
+        """Saves the user's own words to their memory file, one bullet a line."""
+        path = project_rules.user_memory_path()
+        created = not os.path.isfile(path)
+        # The template only gives the file a header: every line in it is a
+        # comment, so creating it changes nothing the model sees.
+        path = project_rules.ensure_user_memory()
+        try:
+            added, duplicates = project_rules.append_memory(
+                path, text, project_rules.USER_MAX_BYTES)
+        except project_rules.MemorySecretError:
+            self.ui.add_message(
+                "<i>That looks like a credential, so nothing was saved: memory "
+                "is stored in plain text and sent with every request.</i>",
+                force_scroll=True)
+            return
+        except project_rules.MemoryLimitError as exc:
+            self.ui.add_message(
+                f"<i>User memory is full ({exc}). Remove a line with an editor "
+                "and try again.</i>", force_scroll=True)
+            return
+        except OSError as exc:
+            self.ui.add_message(
+                f"<i>Could not save to user memory: {exc}</i>",
                 force_scroll=True)
             return
 
-        size = self._memory_size_text(path, cap)
-        opened = editor_launcher.open_path(path)
-        note = "" if opened else " It could not be opened in an editor."
+        size = self._memory_size_text(path, project_rules.USER_MAX_BYTES)
+        if not added:
+            already = ("That line was already there" if duplicates == 1 else
+                       f"{duplicates} lines were already there")
+            self.ui.add_message(
+                "<b>Already in user memory</b> · "
+                f"<code>{path}</code>{size}<br>"
+                f"<i>{already}, so nothing was added.</i>", force_scroll=True)
+            return
+        note = ""
+        if duplicates:
+            note = (" (1 line was already there.)" if duplicates == 1 else
+                    f" ({duplicates} lines were already there.)")
+        new_file = " · new file" if created else ""
         self.ui.add_message(
-            f"<i>{label}: <code>{path}</code>{size}.{note}</i>",
+            "<b>Saved to user memory</b> · "
+            f"<code>{path}</code>{size}{new_file}<br>"
+            f"<i>Applies in every project, from your next message.</i>{note}",
             force_scroll=True)
+
+    def _command_help(self, arguments: str = ""):
+        """``/help [command]`` - the command list and how memory works."""
+        self.ui.add_message(commands.help_html(arguments), force_scroll=True)
 
     @staticmethod
     def _memory_size_text(path: str, cap_bytes: int) -> str:
