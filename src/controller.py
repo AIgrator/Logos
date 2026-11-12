@@ -1704,16 +1704,23 @@ class AppController(QObject):
     def _request_summary_update(self, force: bool = False,
                                 advance_boundary: bool = False,
                                 trigger: str = "",
-                                focus: str = ""):
+                                focus: str = "") -> bool:
+        """Ask for a summary refresh; True when one is now pending or started.
+
+        The caller needs that answer to decide whether to say work is running:
+        an update can finish inside this call (the summary already covers every
+        model-facing event), and announcing progress after the result would
+        leave a "Compacting…" line under the outcome forever.
+        """
         if self._summary_pending:
             if advance_boundary:
                 self._manual_compact_pending = True
                 self._compaction_trigger = trigger or "manual"
                 self._manual_compact_focus = (focus or "").strip()
             self._summary_force = True
-            return
+            return True
         if not self.session_file or not self.session_events:
-            return
+            return False
         if advance_boundary:
             trigger = trigger or "manual"
             focus = (focus or "").strip()
@@ -1722,7 +1729,7 @@ class AppController(QObject):
         else:
             trigger = "background"
             focus = ""
-        self._start_summary_request(
+        return self._start_summary_request(
             session_file=self.session_file,
             events=self.session_events,
             mode=self.session_mode,
@@ -1759,8 +1766,12 @@ class AppController(QObject):
                 self._summary_force = False
             if advance_boundary:
                 covered = handoff.summary_coverage(meta, events)
-                self._apply_compaction(
-                    covered, history_cut or self._history_cut_key())
+                if not self._apply_compaction(
+                        covered, history_cut or self._history_cut_key()):
+                    self._clear_pending_compaction()
+                    self.ui.add_message(
+                        "<i>Could not record the compaction boundary. The "
+                        "session is unchanged.</i>", force_scroll=True)
             return False
         if not project_name and active and self.project_manager is not None:
             project_name = self.project_manager.get_active_name()
@@ -4616,21 +4627,35 @@ class AppController(QObject):
             return
         meta = handoff.read_meta(self.session_file)
         covered = handoff.summary_coverage(meta, self.session_events)
-        if (not focus and covered >= len(self.session_events)
-                and handoff.read_summary(self.session_file)):
-            self._compaction_trigger = "manual"
-            if not self._apply_compaction(
-                    covered, self._history_cut_key()):
-                self.ui.add_message(
-                    "<i>Could not record the compaction boundary. "
-                    "The session is unchanged.</i>", force_scroll=True)
-            return
+        summary = handoff.read_summary(self.session_file)
+        if not focus and summary and covered:
+            boundary = handoff.compacted_event_count(meta, self.session_events)
+            # Usage, plan and compaction events are bookkeeping: they do not
+            # make a summary stale, so they must not force another model call
+            # or a new boundary event on every press.
+            pending_events = [event for event in self.session_events[covered:]
+                              if handoff.event_line(event)]
+            if not pending_events:
+                if boundary >= covered:
+                    self.ui.add_message(
+                        "<i>Nothing new to compact: the session summary "
+                        "already covers this conversation.</i>",
+                        force_scroll=True)
+                    return
+                self._compaction_trigger = "manual"
+                if not self._apply_compaction(
+                        covered, self._history_cut_key()):
+                    self.ui.add_message(
+                        "<i>Could not record the compaction boundary. "
+                        "The session is unchanged.</i>", force_scroll=True)
+                return
         self._manual_compact_pending = True
         self._compaction_trigger = "manual"
         self._manual_compact_focus = focus
-        self._request_summary_update(
-            force=True, advance_boundary=True, trigger="manual", focus=focus)
-        self.ui.add_message("<i>Compacting the session context…</i>")
+        if self._request_summary_update(
+                force=True, advance_boundary=True, trigger="manual",
+                focus=focus):
+            self.ui.add_message("<i>Compacting the session context…</i>")
 
     def _command_compact(self, arguments: str = ""):
         """``/compact [focus]`` - manual compaction, the same path the popover runs.

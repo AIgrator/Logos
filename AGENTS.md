@@ -138,7 +138,14 @@ compaction as Compact now and as `/compact [focus]`) and `Session context…`
 (opens the existing dialog). A refused compaction - no events yet, a summary or
 a tool call still in flight - answers with one italic line in the chat rather
 than a modal, because the command path and the popover both run from the
-composer.
+composer. The progress line is only added when a summary request actually
+started (`_request_summary_update` returns that), so a press that finishes
+inside the call shows the outcome alone and never leaves "Compacting the
+session context…" as the last line of the transcript. A bare press whose
+boundary already covers every model-facing event answers "Nothing new to
+compact" instead of journaling another `compaction` event; usage, plan and
+compaction events are bookkeeping and never make a summary stale. A `focus`
+argument always re-summarizes, even when nothing new arrived.
 Row shares are estimates from the next request scaled to the provider-reported
 total (`context_stats.payload_breakdown`), so they add up to the shown
 percentage; Vision, whose request is assembled elsewhere, gets one

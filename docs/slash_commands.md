@@ -337,6 +337,26 @@ Mid-turn `/compact` is refused with one line rather than interrupting: a
 compaction while a step is in flight would cut the history the running turn is
 about to continue from.
 
+Two follow-ups found on a real session:
+
+- **The progress line must follow the work, not precede it.** `/compact` used
+  to append "Compacting the session context…" after calling
+  `_request_summary_update`, but that call can finish inside itself (the rolling
+  summary already covers every model-facing event, so no model call is needed).
+  The outcome notice was then written *above* the progress line, which stayed
+  last in the transcript and looked like a five-minute hang. The line is now
+  added only when `_request_summary_update` reports that a request is actually
+  pending or started; an instant press shows the outcome alone.
+- **A repeat press is a no-op.** After a compaction, `covered >=
+  len(events)` is never true again because the `compaction` event itself is
+  appended, so a second `/compact` re-applied the same boundary and journaled
+  another event. The check is now on model-facing events after the summary
+  (`handoff.event_line`), not on the raw length: usage, plan, suggestion and
+  compaction events are bookkeeping, so a press with nothing new answers
+  "Nothing new to compact" and writes nothing. A `focus` argument still forces
+  a fresh summary, and a failed boundary write now says so instead of returning
+  silently.
+
 ## 7. Order
 
 | Priority | Commands | Reason |
